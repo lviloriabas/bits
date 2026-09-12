@@ -101,6 +101,16 @@ _WEAK_PEAK_GUARD = 0.08
 # vacía aunque la densidad local sea baja (sellos, recuadros, calcas).
 _EMPTY_COVERAGE = 0.03
 
+# Tinta repartida: una rúbrica grande de trazo fino deja poca densidad en
+# cualquier ventana, pero la reparte a lo ancho del campo. Un campo vacío no
+# hace eso: su ruido de escaneo se queda en una banda o en una esquina.
+# Medido sobre 144 recortes etiquetados como ausentes, solo uno llega a esta
+# pareja de valores; una firma con florituras que cruza la casilla la pasa
+# con holgura. No afirma que haya firma (la densidad no da para tanto): solo
+# impide afirmar que el campo está vacío.
+_SPREAD_PEAK = 0.04
+_SPREAD_SPAN = 0.30
+
 # DPI con el que están calibrados los kernels morfológicos y los umbrales.
 # El recorte se lleva a esta escala antes de medirlo, para que la misma
 # página dé el mismo veredicto tanto si se renderiza a 150 DPI (opción por
@@ -283,10 +293,12 @@ def _classify(metrics: dict, field: FieldTemplate) -> tuple[str, float, str]:
             + f"; {evidence}",
         )
 
+    spread_ink = peak >= _SPREAD_PEAK and span >= _SPREAD_SPAN
     empty = (
         peak < field.max_empty_peak
         and metrics["coverage"] < _EMPTY_COVERAGE
         and metrics["weak_peak"] < _WEAK_PEAK_GUARD
+        and not spread_ink
     )
     if empty:
         margin = 1.0 - min(1.0, peak / max(field.max_empty_peak, 1e-6))

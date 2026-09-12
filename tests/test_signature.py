@@ -284,3 +284,80 @@ class TestCoberturaMinima(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTintaRepartida(unittest.TestCase):
+    """Una rúbrica grande de trazo fino no es un campo vacío.
+
+    Los números son los medidos en la bitácora fix.pdf: la firma del capitán
+    de la página 1 cruza la casilla con trazos largos y finos y deja densidad
+    0,044, por debajo del umbral de vacío, así que el sistema reclamaba una
+    firma que estaba ahí. De los 144 recortes etiquetados como ausentes, uno
+    solo llega a la vez a esa densidad y a esa extensión.
+    """
+
+    # Los de la plantilla para un campo de firma.
+    CAMPO = dict(ink_delta=50.0, min_ink_peak=0.28, max_empty_peak=0.07,
+                 min_ink_span=0.30)
+
+    def _veredicto(self, **metricas):
+        base = dict(peak=0.0, weak_peak=0.0, coverage=0.0, span=0.0,
+                    dark_ratio=0.0)
+        base.update(metricas)
+        return _classify(base, _campo(**self.CAMPO))[0]
+
+    def test_una_rubrica_de_trazo_fino_no_se_declara_ausente(self):
+        self.assertEqual(
+            self._veredicto(peak=0.044, weak_peak=0.053, coverage=0.0202,
+                            span=0.363), UNCLEAR)
+
+    def test_la_casilla_de_verdad_vacia_sigue_siendo_ausente(self):
+        # Lo que mide una casilla limpia de la misma bitácora.
+        self.assertEqual(
+            self._veredicto(peak=0.003, weak_peak=0.003, coverage=0.0010,
+                            span=0.016), "false")
+
+    def test_la_tinta_agrupada_en_una_esquina_sigue_siendo_ausente(self):
+        """La guarda pide tinta repartida: un borrón no basta."""
+        self.assertEqual(
+            self._veredicto(peak=0.059, weak_peak=0.059, coverage=0.0116,
+                            span=0.074), "false")
+
+    def test_una_hoja_limpia_sigue_siendo_ausente(self):
+        self.assertEqual(detect_signature(_papel(), _campo(), 1).value, "false")
+
+
+class TestBloqueDeCorreccion(unittest.TestCase):
+    """Umbrales del bloque de corrección, medidos sobre 40 páginas de fix.pdf.
+
+    Es una casilla mucho más ancha que alta: una frase escrita a mano ocupa
+    una franja fina y nunca alcanza la densidad de una rúbrica. Los recortes
+    escritos miden densidad 0,076 o más; los vacíos, 0,064 o menos.
+    """
+
+    CAMPO = dict(min_ink_peak=0.13, max_empty_peak=0.07,
+                 min_ink_span=0.12, min_ink_coverage=0.008)
+
+    def _veredicto(self, **metricas):
+        base = dict(peak=0.0, weak_peak=0.0, coverage=0.0, span=0.0,
+                    dark_ratio=0.0)
+        base.update(metricas)
+        return _classify(base, _campo(**self.CAMPO))[0]
+
+    def test_una_frase_escrita_a_lo_ancho_es_escritura(self):
+        # Página 74: "Pitot TAT and static ports cover were removed...".
+        self.assertEqual(
+            self._veredicto(peak=0.097, weak_peak=0.108, coverage=0.0640,
+                            span=0.798), "true")
+
+    def test_una_firma_con_fecha_en_una_esquina_es_escritura(self):
+        # Página 4: nombre y fecha en el primer tercio de la casilla.
+        self.assertEqual(
+            self._veredicto(peak=0.152, weak_peak=0.160, coverage=0.0276,
+                            span=0.304), "true")
+
+    def test_la_casilla_vacia_no_pasa_por_poca_tinta_repartida(self):
+        # Página 77: nada escrito, solo el gris del escaneo.
+        self.assertNotEqual(
+            self._veredicto(peak=0.049, weak_peak=0.051, coverage=0.0114,
+                            span=0.303), "true")

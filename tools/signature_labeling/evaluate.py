@@ -28,6 +28,8 @@ import numpy as np
 from app.templates.schema import FieldTemplate
 from app.vision.signature import (
     _EMPTY_COVERAGE,
+    _SPREAD_PEAK,
+    _SPREAD_SPAN,
     _WEAK_PEAK_GUARD,
     SIGNATURE_PAD_X,
     SIGNATURE_PAD_Y,
@@ -189,10 +191,12 @@ def decision_masks(
     present = (peak >= thresholds.min_ink_peak) | (
         (peak >= thresholds.max_empty_peak) & (span >= thresholds.min_ink_span)
     )
+    spread_ink = (peak >= _SPREAD_PEAK) & (span >= _SPREAD_SPAN)
     empty = (
         (peak < thresholds.max_empty_peak)
         & (coverage < _EMPTY_COVERAGE)
         & (weak_peak < _WEAK_PEAK_GUARD)
+        & ~spread_ink
     )
     return usable & present, usable & ~present & empty
 
