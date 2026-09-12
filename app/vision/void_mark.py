@@ -5,11 +5,11 @@ exigen dos lecturas de cuatro letras compatibles en la misma zona.
 
 Es la etapa mas cara de la ejecucion: cada hoja con una posible discrepancia
 manda decenas de recortes a un reconocedor mediano. Medido en este equipo
-(12 nucleos): 0,28 s por recorte, seis recortes por zona y hasta doce zonas,
-o sea entre 10 s y 20 s por hoja, mas unos 7 s de carga del modelo la primera
+(12 nucleos): 0,28 s por recorte, seis recortes por zona y hasta seis zonas,
+o sea unos 10 s por hoja, mas unos 7 s de carga del modelo la primera
 vez en cada proceso. Por eso el modelo se carga una sola vez por proceso y,
 cuando el pool de OCR esta libre, las hojas se reparten entre sus procesos:
-medido, 6,5 s por hoja repartiendo frente a 20 s haciendolas de una en una.
+medido, 4,6 s por hoja repartiendo frente a 10,6 s haciendolas de una en una.
 
 Pedirle menos hilos al reconocedor no sirve de nada: mide igual con uno que
 con doce (usa unos seis nucleos pase lo que pase), asi que el reparto solo
@@ -34,6 +34,10 @@ DPI_VOID = 120
 # Tres giros por dos umbrales de tinta, en una sola llamada por zona: los
 # recortes de una zona miden lo mismo y el reconocedor los agrupa sin relleno.
 _RECORTES_POR_ZONA = 6
+# Zonas que se llegan a leer, de mayor a menor. Eran doce y costaban el doble:
+# en la muestra etiquetada las marcas que el reconocedor alcanza a leer salen
+# siempre entre las cinco primeras, asi que las de mas solo gastaban tiempo.
+_ZONAS_POR_HOJA = 6
 # Hilos que se le piden al reconocedor. Los ignora, pero es lo declarado.
 _HILOS_RECONOCEDOR = 4
 # Lo que suma cada proceso del pool al cargar el modelo de VOID. Repartir la
@@ -98,7 +102,7 @@ def candidatos(img):
                 seen.append((center,cw))
                 angle = np.degrees(np.arctan2(unit[1],unit[0]))
                 results.append((len(chosen)*height,center,cw,ch,angle))
-    return sorted(results,key=lambda x:-x[0])[:12]
+    return sorted(results,key=lambda x:-x[0])[:_ZONAS_POR_HOJA]
 
 
 def es_lectura_void(texto, confianza):

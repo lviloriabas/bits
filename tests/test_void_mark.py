@@ -167,3 +167,18 @@ def test_sin_pool_la_comprobacion_sigue_en_el_proceso(monkeypatch):
         lambda: False,
     ) == 2
     assert avisos == [(0, 2, VOID_STAGE), (1, 2, VOID_STAGE), (2, 2, VOID_STAGE)]
+
+
+def test_solo_se_leen_las_zonas_mas_grandes():
+    """Doce zonas costaban el doble sin encontrar ninguna marca mas."""
+    image = np.full((900, 1200, 3), 255, np.uint8)
+    # Ocho renglones de cuatro letras: sobran candidatas de sobra.
+    for fila in range(8):
+        for letra in range(4):
+            x = 120 + letra * 90
+            y = 60 + fila * 100
+            image[y:y + 60, x:x + 30] = 0
+    zonas = void_mark.candidatos(image)
+    assert 0 < len(zonas) <= void_mark._ZONAS_POR_HOJA
+    # Y son las de mayor evidencia: la lista sigue ordenada de mayor a menor.
+    assert [z[0] for z in zonas] == sorted((z[0] for z in zonas), reverse=True)
