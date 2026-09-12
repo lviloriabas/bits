@@ -28,6 +28,7 @@ import numpy as np
 from app.templates.schema import FieldTemplate
 from app.vision.signature import (
     _EMPTY_COVERAGE,
+    _REPARTO_MARGEN,
     _SPREAD_PEAK,
     _SPREAD_SPAN,
     _WEAK_PEAK_GUARD,
@@ -71,6 +72,7 @@ class Thresholds:
     min_ink_peak: float = 0.12
     max_empty_peak: float = 0.05
     min_ink_span: float = 0.30
+    min_ink_coverage: float = 0.0
     max_ink_ratio: float = 0.60
 
     @classmethod
@@ -82,6 +84,7 @@ class Thresholds:
             min_ink_peak=field.min_ink_peak,
             max_empty_peak=field.max_empty_peak,
             min_ink_span=field.min_ink_span,
+            min_ink_coverage=field.min_ink_coverage,
             max_ink_ratio=field.max_ink_ratio,
         )
 
@@ -189,15 +192,26 @@ def decision_masks(
 
     usable = ~np.isnan(peak) & (dark_ratio <= thresholds.max_ink_ratio)
     present = (peak >= thresholds.min_ink_peak) | (
-        (peak >= thresholds.max_empty_peak) & (span >= thresholds.min_ink_span)
+        (peak >= thresholds.max_empty_peak)
+        & (span >= thresholds.min_ink_span)
+        & (coverage >= thresholds.min_ink_coverage)
     )
     spread_ink = (peak >= _SPREAD_PEAK) & (span >= _SPREAD_SPAN)
-    empty = (
-        (peak < thresholds.max_empty_peak)
-        & (coverage < _EMPTY_COVERAGE)
-        & (weak_peak < _WEAK_PEAK_GUARD)
-        & ~spread_ink
-    )
+    if thresholds.min_ink_coverage > 0.0:
+        empty = (
+            (
+                (span < _REPARTO_MARGEN * thresholds.min_ink_span)
+                | (coverage < _REPARTO_MARGEN * thresholds.min_ink_coverage)
+            )
+            & ~spread_ink
+        )
+    else:
+        empty = (
+            (peak < thresholds.max_empty_peak)
+            & (coverage < _EMPTY_COVERAGE)
+            & (weak_peak < _WEAK_PEAK_GUARD)
+            & ~spread_ink
+        )
     return usable & present, usable & ~present & empty
 
 

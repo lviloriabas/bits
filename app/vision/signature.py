@@ -111,6 +111,13 @@ _EMPTY_COVERAGE = 0.03
 _SPREAD_PEAK = 0.04
 _SPREAD_SPAN = 0.30
 
+# Margen del veredicto de vacío en las casillas que se deciden por reparto.
+# Con el mismo baremo que la presencia, todo lo que no fuera presencia sería
+# ausencia y no quedaría sitio para la duda. Por debajo de este margen la
+# casilla está claramente sin escribir; entre un baremo y el otro se queda
+# incierta, que es lo que la manda a REVISAR en vez de afirmar nada.
+_REPARTO_MARGEN = 0.8
+
 # DPI con el que están calibrados los kernels morfológicos y los umbrales.
 # El recorte se lleva a esta escala antes de medirlo, para que la misma
 # página dé el mismo veredicto tanto si se renderiza a 150 DPI (opción por
@@ -294,12 +301,28 @@ def _classify(metrics: dict, field: FieldTemplate) -> tuple[str, float, str]:
         )
 
     spread_ink = peak >= _SPREAD_PEAK and span >= _SPREAD_SPAN
-    empty = (
-        peak < field.max_empty_peak
-        and metrics["coverage"] < _EMPTY_COVERAGE
-        and metrics["weak_peak"] < _WEAK_PEAK_GUARD
-        and not spread_ink
-    )
+    if field.min_ink_coverage > 0.0:
+        # Casilla que se decide por reparto, no por densidad: el bloque de
+        # corrección son renglones impresos de lado a lado, y su densidad de
+        # tinta es la misma escrito que vacío (medido sobre 120 recortes
+        # etiquetados: mediana 0,089 con escritura y 0,058 sin ella, con los
+        # dos rangos solapados). Lo que sí los separa es que la escritura
+        # cruza la casilla y la ensucia: extensión 0,51 contra 0,50 y
+        # cobertura 0,027 contra 0,021 en sus percentiles de frontera. Así
+        # que aquí el campo está vacío cuando la tinta no se reparte, no
+        # cuando hay poca.
+        empty = (
+            (span < _REPARTO_MARGEN * field.min_ink_span
+             or metrics["coverage"] < _REPARTO_MARGEN * field.min_ink_coverage)
+            and not spread_ink
+        )
+    else:
+        empty = (
+            peak < field.max_empty_peak
+            and metrics["coverage"] < _EMPTY_COVERAGE
+            and metrics["weak_peak"] < _WEAK_PEAK_GUARD
+            and not spread_ink
+        )
     if empty:
         margin = 1.0 - min(1.0, peak / max(field.max_empty_peak, 1e-6))
         return (

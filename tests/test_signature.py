@@ -328,15 +328,19 @@ class TestTintaRepartida(unittest.TestCase):
 
 
 class TestBloqueDeCorreccion(unittest.TestCase):
-    """Umbrales del bloque de corrección, medidos sobre 40 páginas de fix.pdf.
+    """La casilla que se decide por reparto, no por densidad.
 
-    Es una casilla mucho más ancha que alta: una frase escrita a mano ocupa
-    una franja fina y nunca alcanza la densidad de una rúbrica. Los recortes
-    escritos miden densidad 0,076 o más; los vacíos, 0,064 o menos.
+    El bloque de corrección son tres renglones impresos de lado a lado, y su
+    densidad de tinta es prácticamente la misma escrito que vacío: medido
+    sobre 120 recortes etiquetados a mano de ocho bitácoras, la mediana es
+    0,089 con escritura y 0,058 sin ella, con los dos rangos solapados. Lo
+    que sí los separa es que la escritura cruza la casilla y la ensucia.
+
+    Los números de cada prueba son los medidos en la página que se cita.
     """
 
-    CAMPO = dict(min_ink_peak=0.13, max_empty_peak=0.07,
-                 min_ink_span=0.12, min_ink_coverage=0.008)
+    CAMPO = dict(min_ink_peak=0.13, max_empty_peak=0.02,
+                 min_ink_span=0.5, min_ink_coverage=0.024)
 
     def _veredicto(self, **metricas):
         base = dict(peak=0.0, weak_peak=0.0, coverage=0.0, span=0.0,
@@ -344,20 +348,42 @@ class TestBloqueDeCorreccion(unittest.TestCase):
         base.update(metricas)
         return _classify(base, _campo(**self.CAMPO))[0]
 
-    def test_una_frase_escrita_a_lo_ancho_es_escritura(self):
-        # Página 74: "Pitot TAT and static ports cover were removed...".
+    def test_tres_renglones_escritos_son_escritura(self):
+        # fix.pdf p5: "PERFORMED UNIVERSAL PRECAUTION KIT RESTORATION...".
         self.assertEqual(
-            self._veredicto(peak=0.097, weak_peak=0.108, coverage=0.0640,
-                            span=0.798), "true")
+            self._veredicto(peak=0.196, weak_peak=0.207, coverage=0.1165,
+                            span=0.916), "true")
 
-    def test_una_firma_con_fecha_en_una_esquina_es_escritura(self):
-        # Página 4: nombre y fecha en el primer tercio de la casilla.
+    def test_dos_renglones_escritos_son_escritura(self):
+        # fix.pdf p12: "PERFORMED TIRE PRESSURE CHECK IAW T/C...".
         self.assertEqual(
-            self._veredicto(peak=0.152, weak_peak=0.160, coverage=0.0276,
-                            span=0.304), "true")
+            self._veredicto(peak=0.088, weak_peak=0.092, coverage=0.0440,
+                            span=0.691), "true")
 
-    def test_la_casilla_vacia_no_pasa_por_poca_tinta_repartida(self):
-        # Página 77: nada escrito, solo el gris del escaneo.
-        self.assertNotEqual(
-            self._veredicto(peak=0.049, weak_peak=0.051, coverage=0.0114,
-                            span=0.303), "true")
+    def test_la_casilla_vacia_es_ausencia(self):
+        # fix.pdf p7: solo el gris del escaneo sobre el papel rayado.
+        self.assertEqual(
+            self._veredicto(peak=0.024, weak_peak=0.022, coverage=0.0076,
+                            span=0.363), "false")
+
+    def test_la_densidad_alta_de_un_sello_no_es_escritura(self):
+        """El sello concentra tinta pero no cruza la casilla.
+
+        Image_003.pdf p156: el sello "MXI Entry Performed By" cae dentro del
+        bloque con densidad 0,119, más alta que la de dos renglones escritos
+        de verdad. Sin el reparto no es escritura.
+        """
+        self.assertEqual(
+            self._veredicto(peak=0.119, weak_peak=0.130, coverage=0.0212,
+                            span=0.211), "false")
+
+    def test_una_raya_suelta_que_cruza_queda_en_duda(self):
+        """Image_005.pdf p213: un trazo diagonal cruza la casilla vacía.
+
+        Cruza lo suficiente para no poder afirmar que está vacía, pero no
+        ensucia lo bastante para afirmar que hay escritura: incierta, que es
+        lo que la manda a revisar.
+        """
+        self.assertEqual(
+            self._veredicto(peak=0.070, weak_peak=0.050, coverage=0.0204,
+                            span=0.546), "unclear")

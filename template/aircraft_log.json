@@ -30,7 +30,17 @@
       "max_empty_peak": 0.05,
       "min_ink_span": 0.3,
       "sig_present_conf": 0.45,
-      "sig_absent_conf": 0.55
+      "sig_absent_conf": 0.55,
+      "ancla": {
+        "raya_arriba": 0,
+        "arriba": -0.033012,
+        "raya_abajo": 1,
+        "abajo": -0.083576,
+        "raya_izquierda": 21,
+        "izquierda": 0.455225,
+        "raya_derecha": 23,
+        "derecha": 0.009031
+      }
     },
     {
       "id": "matricula",
@@ -54,7 +64,17 @@
       "max_empty_peak": 0.05,
       "min_ink_span": 0.3,
       "sig_present_conf": 0.45,
-      "sig_absent_conf": 0.55
+      "sig_absent_conf": 0.55,
+      "ancla": {
+        "raya_arriba": 1,
+        "arriba": -0.05253,
+        "raya_abajo": 2,
+        "abajo": -0.148857,
+        "raya_izquierda": 1,
+        "izquierda": -0.710523,
+        "raya_derecha": 3,
+        "derecha": -0.039494
+      }
     },
     {
       "id": "flight_number",
@@ -78,7 +98,17 @@
       "max_empty_peak": 0.05,
       "min_ink_span": 0.3,
       "sig_present_conf": 0.45,
-      "sig_absent_conf": 0.55
+      "sig_absent_conf": 0.55,
+      "ancla": {
+        "raya_arriba": 1,
+        "arriba": -0.073227,
+        "raya_abajo": 2,
+        "abajo": -0.100146,
+        "raya_izquierda": 4,
+        "izquierda": 0.203384,
+        "raya_derecha": 7,
+        "derecha": 0.169718
+      }
     },
     {
       "id": "pilot_signature",
@@ -102,7 +132,17 @@
       "max_empty_peak": 0.07,
       "min_ink_span": 0.3,
       "sig_present_conf": 0.45,
-      "sig_absent_conf": 0.55
+      "sig_absent_conf": 0.55,
+      "ancla": {
+        "raya_arriba": 8,
+        "arriba": -0.03135,
+        "raya_abajo": 9,
+        "abajo": -0.055616,
+        "raya_izquierda": 21,
+        "izquierda": 0.163157,
+        "raya_derecha": 23,
+        "derecha": 0.020916
+      }
     },
     {
       "id": "captain_signature",
@@ -126,7 +166,17 @@
       "max_empty_peak": 0.07,
       "min_ink_span": 0.3,
       "sig_present_conf": 0.45,
-      "sig_absent_conf": 0.55
+      "sig_absent_conf": 0.55,
+      "ancla": {
+        "raya_arriba": 34,
+        "arriba": 0.437578,
+        "raya_abajo": 38,
+        "abajo": -0.091614,
+        "raya_izquierda": 14,
+        "izquierda": 0.185026,
+        "raya_derecha": 20,
+        "derecha": 0.416305
+      }
     },
     {
       "id": "captain_license",
@@ -150,7 +200,17 @@
       "max_empty_peak": 0.07,
       "min_ink_span": 0.3,
       "sig_present_conf": 0.45,
-      "sig_absent_conf": 0.55
+      "sig_absent_conf": 0.55,
+      "ancla": {
+        "raya_arriba": 35,
+        "arriba": -0.551101,
+        "raya_abajo": 38,
+        "abajo": -0.070054,
+        "raya_izquierda": 21,
+        "izquierda": -0.085779,
+        "raya_derecha": 23,
+        "derecha": -0.024461
+      }
     },
     {
       "id": "day",
@@ -174,7 +234,17 @@
       "max_empty_peak": 0.05,
       "min_ink_span": 0.3,
       "sig_present_conf": 0.45,
-      "sig_absent_conf": 0.55
+      "sig_absent_conf": 0.55,
+      "ancla": {
+        "raya_arriba": 1,
+        "arriba": -0.044769,
+        "raya_abajo": 2,
+        "abajo": -0.074167,
+        "raya_izquierda": 18,
+        "izquierda": 0.183682,
+        "raya_derecha": 20,
+        "derecha": -1.619333
+      }
     },
     {
       "id": "day_1",
@@ -198,7 +268,17 @@
       "max_empty_peak": 0.05,
       "min_ink_span": 0.3,
       "sig_present_conf": 0.45,
-      "sig_absent_conf": 0.55
+      "sig_absent_conf": 0.55,
+      "ancla": {
+        "raya_arriba": 1,
+        "arriba": 0.017321,
+        "raya_abajo": 2,
+        "abajo": -0.048188,
+        "raya_izquierda": 18,
+        "izquierda": 0.269925,
+        "raya_derecha": 19,
+        "derecha": 0.247359
+      }
     },
     {
       "id": "day_2",
@@ -222,7 +302,17 @@
       "max_empty_peak": 0.05,
       "min_ink_span": 0.3,
       "sig_present_conf": 0.45,
-      "sig_absent_conf": 0.55
+      "sig_absent_conf": 0.55,
+      "ancla": {
+        "raya_arriba": 1,
+        "arriba": 0.014734,
+        "raya_abajo": 2,
+        "abajo": -0.07092,
+        "raya_izquierda": 19,
+        "izquierda": 0.249367,
+        "raya_derecha": 20,
+        "derecha": -1.803982
+      }
     },
     {
       "id": "month",
@@ -246,7 +336,17 @@
       "max_empty_peak": 0.05,
       "min_ink_span": 0.3,
       "sig_present_conf": 0.45,
-      "sig_absent_conf": 0.55
+      "sig_absent_conf": 0.55,
+      "ancla": {
+        "raya_arriba": 1,
+        "arriba": -0.024072,
+        "raya_abajo": 2,
+        "abajo": -0.122878,
+        "raya_izquierda": 20,
+        "izquierda": 0.114562,
+        "raya_derecha": 22,
+        "derecha": -0.030317
+      }
     },
     {
       "id": "month_1",
@@ -270,7 +370,17 @@
       "max_empty_peak": 0.05,
       "min_ink_span": 0.3,
       "sig_present_conf": 0.45,
-      "sig_absent_conf": 0.55
+      "sig_absent_conf": 0.55,
+      "ancla": {
+        "raya_arriba": 1,
+        "arriba": 0.032844,
+        "raya_abajo": 2,
+        "abajo": -0.113136,
+        "raya_izquierda": 20,
+        "izquierda": 0.240664,
+        "raya_derecha": 21,
+        "derecha": 0.152066
+      }
     },
     {
       "id": "month_2",
@@ -294,7 +404,17 @@
       "max_empty_peak": 0.05,
       "min_ink_span": 0.3,
       "sig_present_conf": 0.45,
-      "sig_absent_conf": 0.55
+      "sig_absent_conf": 0.55,
+      "ancla": {
+        "raya_arriba": 1,
+        "arriba": 0.014734,
+        "raya_abajo": 2,
+        "abajo": -0.077414,
+        "raya_izquierda": 21,
+        "izquierda": 0.166854,
+        "raya_derecha": 22,
+        "derecha": -0.362001
+      }
     },
     {
       "id": "month_3",
@@ -318,7 +438,17 @@
       "max_empty_peak": 0.05,
       "min_ink_span": 0.3,
       "sig_present_conf": 0.45,
-      "sig_absent_conf": 0.55
+      "sig_absent_conf": 0.55,
+      "ancla": {
+        "raya_arriba": 1,
+        "arriba": 0.092347,
+        "raya_abajo": 2,
+        "abajo": -0.100146,
+        "raya_izquierda": 22,
+        "izquierda": -0.356599,
+        "raya_derecha": 22,
+        "derecha": -0.01195
+      }
     },
     {
       "id": "year",
@@ -342,7 +472,17 @@
       "max_empty_peak": 0.05,
       "min_ink_span": 0.3,
       "sig_present_conf": 0.45,
-      "sig_absent_conf": 0.55
+      "sig_absent_conf": 0.55,
+      "ancla": {
+        "raya_arriba": 1,
+        "arriba": 0.032844,
+        "raya_abajo": 2,
+        "abajo": -0.025456,
+        "raya_izquierda": 22,
+        "izquierda": 0.292724,
+        "raya_derecha": 23,
+        "derecha": -0.029863
+      }
     },
     {
       "id": "year_1",
@@ -366,7 +506,17 @@
       "max_empty_peak": 0.05,
       "min_ink_span": 0.3,
       "sig_present_conf": 0.45,
-      "sig_absent_conf": 0.55
+      "sig_absent_conf": 0.55,
+      "ancla": {
+        "raya_arriba": 1,
+        "arriba": 0.074237,
+        "raya_abajo": 2,
+        "abajo": -0.048188,
+        "raya_izquierda": 22,
+        "izquierda": 0.300287,
+        "raya_derecha": 23,
+        "derecha": -0.378833
+      }
     },
     {
       "id": "year_2",
@@ -390,16 +540,26 @@
       "max_empty_peak": 0.05,
       "min_ink_span": 0.3,
       "sig_present_conf": 0.45,
-      "sig_absent_conf": 0.55
+      "sig_absent_conf": 0.55,
+      "ancla": {
+        "raya_arriba": 1,
+        "arriba": 0.074237,
+        "raya_abajo": 2,
+        "abajo": -0.048188,
+        "raya_izquierda": 23,
+        "izquierda": -0.374512,
+        "raya_derecha": 23,
+        "derecha": -0.061195
+      }
     },
     {
       "id": "correction_block",
       "type": "signature",
       "required": false,
       "x": 0.118,
-      "y": 0.388,
+      "y": 0.38811,
       "w": 0.835,
-      "h": 0.057,
+      "h": 0.065774,
       "regex": null,
       "min_length": null,
       "max_length": null,
@@ -411,12 +571,22 @@
       "min_components": 2,
       "ink_delta": 50.0,
       "min_ink_peak": 0.13,
-      "max_empty_peak": 0.07,
-      "min_ink_span": 0.12,
+      "max_empty_peak": 0.02,
+      "min_ink_span": 0.5,
       "sig_present_conf": 0.45,
       "sig_absent_conf": 0.55,
       "book_background": false,
-      "min_ink_coverage": 0.008
+      "min_ink_coverage": 0.024,
+      "ancla": {
+        "raya_arriba": 12,
+        "arriba": 0.0,
+        "raya_abajo": 15,
+        "abajo": 0.0,
+        "raya_izquierda": 1,
+        "izquierda": -0.165525,
+        "raya_derecha": 23,
+        "derecha": 0.0328
+      }
     },
     {
       "id": "technician_license",
@@ -440,7 +610,17 @@
       "max_empty_peak": 0.07,
       "min_ink_span": 0.3,
       "sig_present_conf": 0.45,
-      "sig_absent_conf": 0.55
+      "sig_absent_conf": 0.55,
+      "ancla": {
+        "raya_arriba": 15,
+        "arriba": -0.025882,
+        "raya_abajo": 16,
+        "abajo": -0.208026,
+        "raya_izquierda": 21,
+        "izquierda": 0.170551,
+        "raya_derecha": 23,
+        "derecha": 0.027398
+      }
     },
     {
       "id": "technician_signature",
@@ -464,7 +644,87 @@
       "max_empty_peak": 0.07,
       "min_ink_span": 0.3,
       "sig_present_conf": 0.45,
-      "sig_absent_conf": 0.55
+      "sig_absent_conf": 0.55,
+      "ancla": {
+        "raya_arriba": 15,
+        "arriba": -0.082601,
+        "raya_abajo": 16,
+        "abajo": -0.208026,
+        "raya_izquierda": 5,
+        "izquierda": -0.000482,
+        "raya_derecha": 19,
+        "derecha": 0.134899
+      }
     }
-  ]
+  ],
+  "reticula": {
+    "x": [
+      0.049848,
+      0.125684,
+      0.172106,
+      0.218178,
+      0.253071,
+      0.264523,
+      0.311632,
+      0.345933,
+      0.357522,
+      0.41105,
+      0.457944,
+      0.503452,
+      0.52704,
+      0.550454,
+      0.561522,
+      0.585185,
+      0.596702,
+      0.619789,
+      0.64287,
+      0.654465,
+      0.754056,
+      0.776261,
+      0.857406,
+      0.949964
+    ],
+    "y": [
+      0.034526,
+      0.06863,
+      0.107284,
+      0.138078,
+      0.164121,
+      0.184662,
+      0.206463,
+      0.228204,
+      0.24785,
+      0.27178,
+      0.318162,
+      0.359014,
+      0.38811,
+      0.412489,
+      0.433287,
+      0.453884,
+      0.480331,
+      0.493458,
+      0.510556,
+      0.528972,
+      0.54818,
+      0.567413,
+      0.586328,
+      0.596656,
+      0.632042,
+      0.667242,
+      0.677486,
+      0.731765,
+      0.752569,
+      0.773686,
+      0.795064,
+      0.81627,
+      0.837436,
+      0.858773,
+      0.879537,
+      0.891336,
+      0.900838,
+      0.915305,
+      0.927275,
+      0.94119
+    ]
+  }
 }
