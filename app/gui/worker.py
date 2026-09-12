@@ -11,6 +11,7 @@ from PySide6.QtCore import QThread, Signal
 
 from app.core.config import AppConfig
 from app.core.page_range import PageRange, slice_batch, slice_paths
+from app.core.progress import VOID_STAGE
 from app.models.schemas import ValidationReport
 from app.templates.manager import TemplateManager
 from app.utils.fleet import load_fleet
@@ -36,6 +37,9 @@ class PipelineWorker(QThread):
     file_started = Signal(int, int, str)
     # (archivo 1-based, páginas hechas, páginas del archivo)
     file_progress = Signal(int, int, int)
+    # (archivo 1-based, hojas revisadas, hojas por revisar) de la comprobación
+    # de VOID: una segunda vuelta que no son páginas del documento.
+    review_progress = Signal(int, int, int)
     file_finished = Signal(int, object)
     succeeded = Signal(object)
     failed = Signal(str)
@@ -139,6 +143,9 @@ class PipelineWorker(QThread):
                         on_file_progress=lambda index, done, total: (
                             self.file_progress.emit(index, done, total)
                         ),
+                        on_review_progress=lambda index, done, total: (
+                            self.review_progress.emit(index, done, total)
+                        ),
                     )
                     self.reports = list(reports)
                 else:
@@ -231,6 +238,19 @@ class PipelineWorker(QThread):
             self._progress_offset += self._prev_total
             self._progress_file = self._current_file_index
             self._prev_total = total
+        if message == VOID_STAGE:
+            # Hojas de la comprobación de VOID, no páginas: el archivo ya leyó
+            # las suyas, así que su avance se queda donde estaba.
+            if self._current_file_index:
+                self.review_progress.emit(
+                    self._current_file_index, done, total
+                )
+            pages_done = self._progress_offset + self._prev_total
+            self.progress.emit(
+                pages_done, pages_done,
+                self._message_prefix() + f"{message} {done}/{total}",
+            )
+            return
         # Hay etapas que informan con las páginas leídas en vez del total del
         # tramo (la revisión de firmas, o una cancelación a media bitácora).
         # El desplazamiento se queda con el mayor total visto del archivo:
@@ -239,14 +259,17 @@ class PipelineWorker(QThread):
         self._prev_total = max(self._prev_total, total)
         if self._current_file_index:
             self.file_progress.emit(self._current_file_index, done, total)
-        prefix = ""
-        if self._current_file_index and self._active_paths:
-            name = self._active_paths[self._current_file_index - 1].name
-            prefix = (f"Archivo {self._current_file_index}/"
-                      f"{len(self._active_paths)}: {name} - ")
         self.progress.emit(self._progress_offset + done,
                            self._progress_offset + self._prev_total,
-                           prefix + message)
+                           self._message_prefix() + message)
+
+    def _message_prefix(self) -> str:
+        """``Archivo i/n: nombre - `` del archivo en curso, o nada."""
+        if not (self._current_file_index and self._active_paths):
+            return ""
+        name = self._active_paths[self._current_file_index - 1].name
+        return (f"Archivo {self._current_file_index}/"
+                f"{len(self._active_paths)}: {name} - ")
 
 
 class PreprocessWorker(QThread):

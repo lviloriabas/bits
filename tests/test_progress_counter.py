@@ -16,7 +16,7 @@ import numpy as np
 
 from app.core.config import AppConfig
 from app.core.pipeline import Pipeline, process_pdf_batch
-from app.core.progress import PAGES_STAGE, with_page_counter
+from app.core.progress import PAGES_STAGE, VOID_STAGE, with_page_counter
 from app.models.schemas import PageResult, ValidationReport
 from app.templates.schema import Template
 
@@ -229,6 +229,77 @@ def test_file_strategy_message_carries_the_page_counter(tmp_path):
     counters = [done for done, _total, _message in live]
     assert counters == sorted(counters)
     assert with_page_counter(*live[-1]).endswith(f"{counters[-1]}/30")
+
+
+def test_the_void_stage_is_not_counted_as_pages(tmp_path):
+    """La segunda vuelta cuenta hojas: el archivo no vuelve a empezar."""
+    paths = [tmp_path / "a.pdf", tmp_path / "b.pdf"]
+    pool = _FakePool(tmp_path, workers=4)
+    updates: list[tuple[int, int, str]] = []
+    files: list[tuple[int, int, int]] = []
+    reviews: list[tuple[int, int, int]] = []
+
+    class _FakePipeline:
+        def __init__(self, *_args, **_kwargs):
+            self.on_progress = None
+
+        def process(self, path, page_range=None, should_cancel=None):
+            count = 10 if Path(path).name == "a.pdf" else 20
+            for done in range(count + 1):
+                self.on_progress(done, count, PAGES_STAGE)
+            for done in range(4):
+                self.on_progress(done, 3, VOID_STAGE)
+            return ValidationReport(
+                pdf_path=str(path),
+                template_name="empty",
+                pages=[PageResult(page_number=n) for n in range(1, count + 1)],
+            )
+
+    with patch("app.core.pipeline.PdfPageRenderer", _FakeRenderer), patch(
+        "app.core.pipeline.config_for_pdf", side_effect=lambda config, _p: config
+    ), patch("app.core.pipeline.Pipeline", _FakePipeline):
+        process_pdf_batch(
+            paths,
+            AppConfig(),
+            Template(name="empty"),
+            pool,
+            _FakeEngine(),
+            on_progress=lambda done, total, message: updates.append(
+                (done, total, message)
+            ),
+            on_file_progress=lambda *args: files.append(args),
+            on_review_progress=lambda *args: reviews.append(args),
+        )
+    pool.executor.shutdown()
+
+    counters = [done for done, _total, _message in updates]
+    assert counters == sorted(counters)
+    void = [item for item in updates if VOID_STAGE in item[2]]
+    assert [done for done, _t, _m in void[:4]] == [10] * 4
+    assert void[3][2] == f"Archivo 1/2: a.pdf - {VOID_STAGE} 3/3"
+    first_file = [done for index, done, _total in files if index == 1]
+    assert first_file == sorted(first_file)
+    assert reviews == [(1, n, 3) for n in range(4)] + [(2, n, 3) for n in range(4)]
+
+
+def test_the_worker_counter_keeps_pages_and_void_apart(tmp_path):
+    from app.core.pipeline import (
+        _page_counter_writer,
+        _read_page_counter,
+        _read_review_counter,
+    )
+
+    path = tmp_path / "pages_0.count"
+    write = _page_counter_writer(path)
+    write(50, 50, PAGES_STAGE)
+    assert _read_review_counter(path) is None
+    write(3, 40, VOID_STAGE)
+    assert _read_page_counter(path) == (50, 50)
+    assert _read_review_counter(path) == (3, 40)
+    # El formato de siempre sigue leyéndose.
+    path.write_text("7/10", encoding="ascii")
+    assert _read_page_counter(path) == (7, 10)
+    assert _read_review_counter(path) is None
 
 
 def test_with_page_counter_only_touches_the_pages_stage():

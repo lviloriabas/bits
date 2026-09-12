@@ -37,7 +37,7 @@ PDF originales + plantilla
   -> validación por página y corrección por libro
   -> CSV, JSON y estadísticas
   -> exportación PDF e índice de páginas
-  -> carga, comprobación, indexado y cierre en AirVault
+  -> carga, revisión, indexado y cierre en AirVault
 ```
 
 La GUI y la consola comparten `Pipeline`, `process_pdf_batch()` y `write_outputs()`. La GUI ejecuta todos los PDF seleccionados; la consola también permite rangos. `PageRange` numera el conjunto desde 1 y lo divide por archivo.
@@ -86,6 +86,8 @@ La clasificación de firmas se hace por página. Mantenimiento (licencia de téc
 
 Antes de confirmar posibles discrepancias, `void_mark.py` busca una marca VOID en regiones propuestas de toda la página. Exige dos lecturas compatibles, limita regiones y variantes y admite cancelación. Una marca confirmada anula el reclamo de firmas, conservando los controles de identidad y fecha. Si falta su modelo portable, registra el motivo y mantiene la discrepancia. Puede omitir marcas de trazo fino, letras muy separadas u orientación difícil; no debe interpretarse la ausencia de detección como prueba de que la página no es VOID.
 
+Esa búsqueda es una segunda vuelta por documento y la etapa más cara medida: cada hoja pendiente manda hasta doce zonas por seis recortes al reconocedor `PP-OCRv6_medium_rec`. Medido en un equipo de 12 núcleos: unos 16 s por hoja en el proceso que la pide y 6,6 s repartiéndola entre los procesos del pool, que es lo que hace cuando el documento se repartió por páginas y el modelo cabe en la memoria libre de todos. Pedirle menos hilos al reconocedor no cambia su tiempo, así que el reparto es por hojas. El avance la lleva en un canal propio (`VOID_STAGE`): cuenta hojas, no páginas, y la barra y el tiempo restante le reservan su parte para no llenarse con la etapa pendiente.
+
 `book_matriculas.json` y `book_fechas.json` conservan anclas entre ejecuciones. El plan de AirVault las contrasta con páginas remotas válidas; reemplazarlas exige respaldo coherente de dos bitácoras distintas. Con `buscar_publicadas` activado, una ronda posterior consulta libros antiguos en Web Search y guarda su turno en `book_ronda.json`.
 
 Código: `app/validation/`, `app/utils/date_window.py`, `app/vision/void_mark.py` y `app/airvault/memoria.py`.
@@ -127,7 +129,7 @@ Código: `app/reports/outputs.py`, `csv_reporter.py`, `json_reporter.py`, `organ
 | Sesión | Edge obtiene la autenticación federada y conserva el perfil en `portable/edge-airvault/`. Python reutiliza cookies y tokens antifalsificación. |
 | Preparar | Relaciona CSV, PDF e índice de páginas; divide las cargas y separa revisión. La compresión opcional crea copias a 200 DPI. |
 | Subir | Envía un PDF por vez a Quick Upload. Registra la aceptación antes de buscar el batch remoto. |
-| Comprobar | Identifica la carga por nombre, cantidad y contenido. Una aceptación sin descubrimiento no autoriza reenvío automático. |
+| Revisar | Identifica la carga por nombre, cantidad y contenido. Una aceptación sin descubrimiento no autoriza reenvío automático. |
 | Planear | Mapea páginas y campos; comprueba obligatorios, duplicados, valores remotos y matrícula del libro. Una diferencia de cantidad bloquea el batch. |
 | Indexar | Escribe las páginas permitidas, relee los valores y actualiza el manifiesto. Conserva páginas válidas, omite conflictos y retira separadores del flujo normal. |
 | Completar | Completa solo batches válidos para Web Search. **REVISAR** conserva separadores y no se publica automáticamente. |

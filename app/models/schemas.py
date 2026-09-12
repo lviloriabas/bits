@@ -134,6 +134,13 @@ class ValidationReport(BaseModel):
     # sumar ``processing_ms`` cuenta el mismo minuto una vez por archivo. No
     # viaja al JSON: es metadato de la ejecución, no del reporte.
     started_at: float = Field(default=0.0, exclude=True, repr=False)
+    # Lo que tardó cada vuelta del documento: la lectura de páginas y la
+    # comprobación de VOID, con cuántas hojas entraron en ella. La ventana
+    # aprende de aquí cuánto pesa una hoja de VOID frente a una página para
+    # repartir la barra y el tiempo restante. Tampoco viajan al JSON.
+    pages_ms: float = Field(default=0.0, exclude=True, repr=False)
+    review_pages: int = Field(default=0, exclude=True, repr=False)
+    review_ms: float = Field(default=0.0, exclude=True, repr=False)
     cancelled: bool = False
     summary: Dict[str, int] = Field(default_factory=dict)
     pages: List[PageResult] = Field(default_factory=list)

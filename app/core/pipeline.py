@@ -44,7 +44,7 @@ from app.core.parallelism import (
     reserved_memory_mb,
     total_memory_mb,
 )
-from app.core.progress import PAGES_STAGE
+from app.core.progress import PAGES_STAGE, VOID_STAGE
 from app.models.schemas import (
     FieldResult,
     PageResult,
@@ -1557,6 +1557,7 @@ class Pipeline:
             pdf_path, first, total, reference, renderer=renderer
         )
 
+        t_pages = time.perf_counter()
         if self._is_cancelled():
             pages: List[PageResult] = []
         elif self.workers > 1:
@@ -1566,6 +1567,7 @@ class Pipeline:
             pages = self._process_sequential(pdf_path, first, total, reference,
                                              anchors, own_transforms,
                                              renderer=renderer)
+        pages_ms = (time.perf_counter() - t_pages) * 1000
 
         # Las firmas que quedaron inciertas se contrastan con el resto de
         # la bitácora, que es evidencia que ya está leída. Tras una
@@ -1578,10 +1580,19 @@ class Pipeline:
                 renderer=renderer, first_page=first,
             )
 
+        review_pages = 0
+        review_ms = 0.0
         if not self._is_cancelled():
             from app.vision.void_mark import revisar_voids
-            revisar_voids(pdf_path, pages, self.template, renderer,
-                          self._notify, self._is_cancelled)
+
+            t_review = time.perf_counter()
+            # Con el reparto por páginas, el pool ya terminó con este
+            # documento y está libre: la comprobación reparte en él sus hojas.
+            review_pages = revisar_voids(
+                pdf_path, pages, self.template, renderer,
+                self._notify, self._is_cancelled, pool=self.process_pool,
+            )
+            review_ms = (time.perf_counter() - t_review) * 1000
 
         self._notify(total, total, "Generando reporte")
         report = ValidationReport(
@@ -1592,6 +1603,9 @@ class Pipeline:
             calibration_ms=self.calibration_ms,
             processing_ms=round((time.perf_counter() - t_start) * 1000, 1),
             started_at=started_at,
+            pages_ms=round(pages_ms, 1),
+            review_pages=review_pages,
+            review_ms=round(review_ms, 1),
         )
         report.summary = self._compute_summary(pages)
 
@@ -2410,10 +2424,24 @@ def _page_counter_writer(path: Path) -> ProgressCallback:
     donde ya vive la bandera de cancelación) y el planificador lo consulta
     mientras espera. Es una línea de texto por página: más barato que una
     cola compartida y sin proceso extra de ``Manager``.
+
+    La comprobación de VOID va detrás de un ``;`` (``50/50;3/40``): son hojas
+    de esa etapa, y escribirlas en el lugar de las páginas hacía que el
+    archivo pareciera volver a empezar con menos páginas.
     """
-    def write(done: int, total: int, _message: str) -> None:
+    pages = [0, 0]
+    review: List[int] = []
+
+    def write(done: int, total: int, message: str) -> None:
+        if message == VOID_STAGE:
+            review[:] = [done, total]
+        else:
+            pages[:] = [done, total]
+        text = f"{pages[0]}/{pages[1]}"
+        if review:
+            text += f";{review[0]}/{review[1]}"
         try:
-            path.write_text(f"{done}/{total}", encoding="ascii")
+            path.write_text(text, encoding="ascii")
         except OSError:
             # Un contador que no se puede escribir no puede tumbar el OCR.
             pass
@@ -2426,10 +2454,25 @@ def _read_page_counter(path: Optional[Path]) -> Optional[Tuple[int, int]]:
     if path is None:
         return None
     try:
-        done, _, total = path.read_text(encoding="ascii").partition("/")
+        pages, _, _review = path.read_text(encoding="ascii").partition(";")
+        done, _, total = pages.partition("/")
         return int(done), int(total)
     except (OSError, ValueError):
         # El padre puede leer justo mientras el worker reescribe el archivo.
+        return None
+
+
+def _read_review_counter(path: Optional[Path]) -> Optional[Tuple[int, int]]:
+    """Hojas de la comprobación de VOID de un worker; ``None`` si no empezó."""
+    if path is None:
+        return None
+    try:
+        _pages, _, review = path.read_text(encoding="ascii").partition(";")
+        if not review:
+            return None
+        done, _, total = review.partition("/")
+        return int(done), int(total)
+    except (OSError, ValueError):
         return None
 
 
@@ -2447,8 +2490,12 @@ def process_pdf_batch(
     on_file_finished: Optional[Callable[[int, ValidationReport], None]] = None,
     on_progress: Optional[ProgressCallback] = None,
     on_file_progress: Optional[Callable[[int, int, int], None]] = None,
+    on_review_progress: Optional[Callable[[int, int, int], None]] = None,
 ) -> List[ValidationReport]:
     """Procesa un batch con el perfil C siempre activo y cola acotada.
+
+    ``on_review_progress`` recibe ``(archivo 1-based, hojas revisadas, hojas
+    por revisar)`` de la comprobación de VOID, que no se cuenta como páginas.
 
     El planificador elige la granularidad sin cambiar el algoritmo OCR: reparte
     PDFs completos cuando hay suficientes archivos para ocupar el pool y, en
@@ -2536,7 +2583,21 @@ def process_pdf_batch(
                 _offset: int = offset,
                 _index: int = index,
                 _name: str = path.name,
+                _count: int = count,
             ) -> None:
+                if message == VOID_STAGE:
+                    # Hojas de la segunda vuelta: el archivo ya leyó sus
+                    # páginas y su avance no puede volver a empezar.
+                    if on_review_progress is not None:
+                        on_review_progress(_index + 1, done, total_in_file)
+                    if on_progress is not None:
+                        on_progress(
+                            _offset + _count,
+                            total_pages,
+                            f"Archivo {_index + 1}/{total_files}: {_name} - "
+                            f"{message} {done}/{total_in_file}",
+                        )
+                    return
                 if on_file_progress is not None:
                     on_file_progress(_index + 1, done, total_in_file)
                 if on_progress is not None:
@@ -2642,6 +2703,10 @@ def process_pdf_batch(
             live += done
             if on_file_progress is not None:
                 on_file_progress(index + 1, done, total_in_file)
+            if on_review_progress is not None:
+                review = _read_review_counter(counters.get(index))
+                if review is not None:
+                    on_review_progress(index + 1, *review)
         if on_progress is not None:
             ready = sum(r is not None for r in reports)
             # El contador global no puede retroceder: un archivo que sale de

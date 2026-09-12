@@ -63,3 +63,107 @@ def test_exige_dos_lecturas_y_admite_cancelar(monkeypatch):
     assert void_mark.detectar_void(image, Motor(1)) is None
     assert void_mark.detectar_void(image, Motor(2)).text == "VOID"
     assert void_mark.detectar_void(image, Motor(2), cancelado=lambda: True) is None
+
+
+def test_cada_zona_es_una_llamada_y_la_confirmada_corta_la_busqueda(monkeypatch):
+    """Una llamada por zona: la que confirma detiene el resto."""
+    zonas = [(5 - n, np.array([200. + 150 * n, 300. + 90 * n]), 300., 120., 0.)
+             for n in range(5)]
+    monkeypatch.setattr(void_mark, "candidatos", lambda _: zonas)
+
+    class Motor:
+        def __init__(self):
+            self.llamadas = []
+
+        def recognize_lines(self, crops):
+            self.llamadas.append(len(crops))
+            return [
+                [OcrResult(text="VOID", confidence=.9)]
+                if len(self.llamadas) == 4 else []
+                for _ in crops
+            ]
+
+    motor = Motor()
+    marca = void_mark.detectar_void(np.full((1000, 1300, 3), 255, np.uint8), motor)
+    assert motor.llamadas == [6, 6, 6, 6]
+    assert marca is not None and marca.text == "VOID"
+    centro = np.mean(np.array(marca.box), axis=0) * np.array([1300, 1000])
+    assert np.allclose(centro, zonas[3][1], atol=1)
+
+
+def test_el_modelo_se_carga_una_vez_por_proceso(monkeypatch):
+    creados = []
+
+    class Motor:
+        def __init__(self, **kwargs):
+            creados.append(kwargs)
+
+    monkeypatch.setattr(void_mark, "modelo_disponible", lambda: True)
+    monkeypatch.setattr(void_mark, "_MOTOR", None)
+    monkeypatch.setattr("app.ocr.engine.PaddleOcrEngine", Motor)
+    assert void_mark.motor_void() is void_mark.motor_void()
+    assert creados == [{
+        "cpu_threads": void_mark._HILOS_RECONOCEDOR,
+        "rec_model": void_mark.MODELO_VOID,
+    }]
+
+
+def _hojas(*numeros):
+    from app.models.schemas import PageResult
+    return [PageResult(page_number=numero) for numero in numeros]
+
+
+def test_con_pool_libre_las_hojas_se_reparten_y_el_avance_cuenta_hojas(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from app.core.progress import VOID_STAGE
+
+    hojas = _hojas(3, 5, 8, 9)
+    pedidas = []
+
+    def comprobar(pdf, numero):
+        pedidas.append(numero)
+        return OcrResult(text="VOID", confidence=.9) if numero == 8 else None
+
+    monkeypatch.setattr(void_mark, "paginas_por_revisar", lambda pages, _t: list(pages))
+    monkeypatch.setattr(void_mark, "modelo_disponible", lambda: True)
+    monkeypatch.setattr(void_mark, "_cabe_en_el_pool", lambda _pool: True)
+    monkeypatch.setattr(void_mark, "comprobar_hoja_en_worker", comprobar)
+
+    class Pool:
+        max_workers = 3
+        executor = ThreadPoolExecutor(max_workers=3)
+
+    avisos = []
+    revisadas = void_mark.revisar_voids(
+        "libro.pdf", hojas, None, None,
+        lambda hechas, total, etapa: avisos.append((hechas, total, etapa)),
+        lambda: False, pool=Pool(),
+    )
+    Pool.executor.shutdown()
+    assert revisadas == 4
+    assert sorted(pedidas) == [3, 5, 8, 9]
+    assert avisos == [(n, 4, VOID_STAGE) for n in range(5)]
+    assert [bool(hoja.void_mark) for hoja in hojas] == [False, False, True, False]
+
+
+def test_sin_pool_la_comprobacion_sigue_en_el_proceso(monkeypatch):
+    from app.core.progress import VOID_STAGE
+
+    hojas = _hojas(1, 2)
+    monkeypatch.setattr(void_mark, "paginas_por_revisar", lambda pages, _t: list(pages))
+    monkeypatch.setattr(void_mark, "modelo_disponible", lambda: True)
+    monkeypatch.setattr(void_mark, "motor_void", lambda *_a: object())
+    monkeypatch.setattr(void_mark, "detectar_void", lambda *_a, **_k: None)
+
+    class Renderer:
+        def render_page(self, _numero, dpi):
+            assert dpi == void_mark.DPI_VOID
+            return np.full((10, 10, 3), 255, np.uint8)
+
+    avisos = []
+    assert void_mark.revisar_voids(
+        "libro.pdf", hojas, None, Renderer(),
+        lambda hechas, total, etapa: avisos.append((hechas, total, etapa)),
+        lambda: False,
+    ) == 2
+    assert avisos == [(0, 2, VOID_STAGE), (1, 2, VOID_STAGE), (2, 2, VOID_STAGE)]

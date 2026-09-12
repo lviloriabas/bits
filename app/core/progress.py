@@ -23,6 +23,13 @@ from __future__ import annotations
 # modo que el prefijo del archivo en curso sigue quedando delante.
 PAGES_STAGE = "Procesando páginas"
 
+# Segunda vuelta de un documento: busca la marca VOID en las hojas con una
+# posible discrepancia de firmas. Cuenta hojas de esa etapa y no páginas del
+# documento, así que las capas de avance la llevan aparte: sumarla como
+# páginas hacía que la fila del archivo volviera a empezar con menos páginas
+# y que el tiempo restante cayera a cero con la etapa todavía en marcha.
+VOID_STAGE = "Comprobando marcas VOID en hojas sin firma"
+
 
 def with_page_counter(done: int, total: int, message: str) -> str:
     """Cierra la etapa de páginas con el ``hechas/total`` del batch.
