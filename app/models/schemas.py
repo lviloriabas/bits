@@ -64,6 +64,10 @@ class PageResult(BaseModel):
     blank: bool = False
     skew_angle: float = 0.0
     alignment_quality: str = "ok"
+    # Rayas impresas que se identificaron en esta página. Con cero, la
+    # retícula no encajó y los campos se leyeron en su posición de plantilla;
+    # es lo que distingue "colocado sobre el papel" de "colocado a ciegas".
+    reticula_rayas: int = 0
     processing_ms: float = 0.0
     discrepancy: bool = False
     # Qué discrepancia se detectó, en una frase corta y en castellano

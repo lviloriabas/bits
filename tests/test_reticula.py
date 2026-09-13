@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import unittest
+
 import numpy as np
 import pytest
 from pydantic import ValidationError
@@ -19,6 +21,7 @@ from app.vision.reticula import (
     Reticula,
     casar_rayas,
     centros_de_rayas,
+    leer_reticula,
     plantilla_ajustada,
     rect_de_campo,
 )
@@ -296,3 +299,82 @@ class TestPlantillaReal:
             assert rect[1] == pytest.approx(campo.y, abs=1e-4), campo.id
             assert rect[2] == pytest.approx(campo.w, abs=1e-4), campo.id
             assert rect[3] == pytest.approx(campo.h, abs=1e-4), campo.id
+
+
+class TestSobreUnaPaginaDibujada(unittest.TestCase):
+    """La detección completa, sobre una retícula sintética que sí se desplaza.
+
+    Las demás pruebas parten de rayas ya identificadas; esta ejerce la cadena
+    entera (estructura impresa, perfiles, centros, casado y colocación) sobre
+    una página dibujada, que es lo que permite comprobar que el campo sigue al
+    papel y no al lienzo.
+    """
+
+    ALTO, ANCHO = 900, 1400
+    # Separaciones irregulares, como las del formulario real (las suyas van
+    # de 0,0095 a 0,0213). Un peine regular no sirve ni para probar ni para
+    # trabajar: desplazado casi un paso es indistinguible de si mismo corrido
+    # una raya, y no hay identificacion posible.
+    _PASOS = [0.030, 0.022, 0.035, 0.018, 0.026]
+    RAYAS_Y = [0.08]
+    for _i in range(29):
+        RAYAS_Y.append(round(RAYAS_Y[-1] + _PASOS[_i % len(_PASOS)], 6))
+    RAYAS_X = [0.05]
+    for _i in range(14):
+        RAYAS_X.append(round(RAYAS_X[-1] + _PASOS[_i % len(_PASOS)] * 1.8, 6))
+
+    def _pagina(self, desplaza_y=0.0, escala_y=1.0):
+        pagina = np.full((self.ALTO, self.ANCHO, 3), 255, np.uint8)
+        for y in self.RAYAS_Y:
+            fila = int((y * escala_y + desplaza_y) * self.ALTO)
+            if 0 <= fila < self.ALTO - 2:
+                pagina[fila:fila + 2, :] = 30
+        for x in self.RAYAS_X:
+            col = int(x * self.ANCHO)
+            pagina[:, col:col + 2] = 30
+        return pagina
+
+    def _plantilla(self):
+        return Template(
+            name="dibujada",
+            reticula=PatronReticula(x=[round(v, 6) for v in self.RAYAS_X],
+                                    y=[round(v, 6) for v in self.RAYAS_Y]),
+            fields=[FieldTemplate(
+                id="firma", type=FieldType.SIGNATURE,
+                x=0.2, y=self.RAYAS_Y[10], w=0.3,
+                h=self.RAYAS_Y[11] - self.RAYAS_Y[10],
+                ancla=AnclaCampo(raya_arriba=10, arriba=0.0,
+                                 raya_abajo=11, abajo=0.0),
+            )],
+        )
+
+    def test_identifica_las_rayas_dibujadas(self):
+        plantilla = self._plantilla()
+        reticula = leer_reticula(plantilla, self._pagina())
+        self.assertTrue(reticula.fiable)
+        self.assertEqual(len(reticula.y), len(self.RAYAS_Y))
+
+    def test_el_campo_sigue_a_la_reticula_desplazada(self):
+        plantilla = self._plantilla()
+        quieta = leer_reticula(plantilla, self._pagina())
+        movida = leer_reticula(plantilla, self._pagina(desplaza_y=0.02))
+        self.assertTrue(movida.fiable)
+        antes = rect_de_campo(plantilla.fields[0], quieta, plantilla)
+        despues = rect_de_campo(plantilla.fields[0], movida, plantilla)
+        # El campo se mueve con el papel, no se queda en su coordenada.
+        self.assertAlmostEqual(despues[1] - antes[1], 0.02, delta=0.003)
+        self.assertAlmostEqual(despues[3], antes[3], delta=0.003)
+
+    def test_el_campo_sigue_a_la_reticula_estirada(self):
+        plantilla = self._plantilla()
+        estirada = leer_reticula(plantilla, self._pagina(escala_y=1.02))
+        self.assertTrue(estirada.fiable)
+        rect = rect_de_campo(plantilla.fields[0], estirada, plantilla)
+        self.assertAlmostEqual(rect[1], self.RAYAS_Y[10] * 1.02, delta=0.003)
+
+    def test_una_pagina_en_blanco_no_inventa_reticula(self):
+        plantilla = self._plantilla()
+        blanco = np.full((self.ALTO, self.ANCHO, 3), 255, np.uint8)
+        reticula = leer_reticula(plantilla, blanco)
+        self.assertFalse(reticula.fiable)
+        self.assertIs(plantilla_ajustada(plantilla, reticula), plantilla)

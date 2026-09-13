@@ -70,6 +70,7 @@ from app.validation.discrepancias import (
 from app.validation.grouping import log_number
 from app.validation.page_status import needs_review
 from app.vision.pdf_loader import PdfDocumentCache, copy_pdf_pages, render_page
+from app.vision.reticula import leer_reticula, plantilla_ajustada
 from app.vision.signature import SIGNATURE_PAD_X, SIGNATURE_PAD_Y
 
 SIN_MATRICULA = "sin_matricula"
@@ -1037,8 +1038,12 @@ def escribir_recortes_firmas(
     recorte incluye el mismo margen que usa ``detect_signature`` y el nombre
     del archivo lleva el veredicto (``true``/``false``/``unclear``), de modo
     que basta ordenar la carpeta por nombre para revisar juntos todos los
-    casos inciertos. La página se renderiza sin alineación, por lo que el
-    encuadre puede variar unos píxeles respecto al recorte real.
+    casos inciertos.
+
+    La página se renderiza sin alineación, así que el recorte se sitúa por las
+    rayas impresas de esa misma página, igual que hizo el lector: con las
+    coordenadas de plantilla sobre una página sin alinear el recuadro se iba
+    hasta 11 píxeles, y lo que se auditaba no era lo que se había leído.
     """
     run_dir = Path(run_dir)
     out_root = run_dir / "recortes_firmas"
@@ -1064,7 +1069,13 @@ def escribir_recortes_firmas(
             continue
         base = f"{Path(ref.pdf_path).stem}_p{ref.page.page_number:03d}.png"
         leidos = {f.field_id: f.value for f in ref.page.fields}
-        for campo in campos:
+        pagina_template = template
+        if template.reticula is not None:
+            reticula = leer_reticula(template, image_bgr)
+            if reticula.fiable:
+                pagina_template = plantilla_ajustada(template, reticula)
+        for campo_plantilla in campos:
+            campo = pagina_template.field(campo_plantilla.id) or campo_plantilla
             left, top, right, bottom = campo.rect_pixels(
                 imagen.width, imagen.height
             )

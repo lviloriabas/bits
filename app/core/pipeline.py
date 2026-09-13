@@ -101,6 +101,7 @@ from app.vision.signature import (
     detect_signature,
     review_with_background,
 )
+from app.vision.reticula import leer_reticula, plantilla_ajustada
 from app.vision.date_geometry import (
     DateFieldGeometry,
     field_override,
@@ -586,6 +587,25 @@ def process_page_image(
                 "target_width_ratio": float(width) / max(source_width, 1),
                 "target_height_ratio": float(height) / max(source_height, 1),
             })
+
+    # 3.4) Colocar los campos sobre las rayas impresas de *esta* página. Las
+    # coordenadas de la plantilla miden desde el borde del lienzo, que depende
+    # de cómo cayó la hoja en el escáner; la retícula impresa no. Medido sobre
+    # doce páginas de ocho bitácoras, el borde de un campo se separaba de su
+    # raya real entre 8 y 11 px según el libro, hasta el 22% del alto del
+    # campo. Se mide después de alinear, así el resultado no depende de lo
+    # bien que saliera la alineación. Si la retícula no se identifica, la
+    # plantilla vuelve tal cual y los campos se quedan donde siempre.
+    if template.reticula is not None:
+        reticula = leer_reticula(template, image)
+        page.reticula_rayas = len(reticula.y) + len(reticula.x)
+        if reticula.fiable:
+            template = plantilla_ajustada(template, reticula)
+        else:
+            logger.warning(
+                f"[Página {page_number}] Retícula impresa no identificada: "
+                f"los campos se leen en su posición de plantilla"
+            )
 
     # 3.5) Preparar una copia sin fondo impreso para las casillas. No se usa
     # ni para OCR (si varias páginas repiten la misma escritura, el consenso

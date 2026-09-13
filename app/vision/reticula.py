@@ -15,6 +15,15 @@ libros distintos:
 O sea que la retícula impresa es un dato mucho más firme que el lienzo. Este
 módulo la mide en cada página y recoloca los campos anclados sobre ella.
 
+De qué depende
+--------------
+De que la retícula sea *irregular*. Las separaciones del formulario van de
+0,0095 a 0,0213 del alto, y esa irregularidad es lo que hace única la
+identificación: un peine de rayas equiespaciadas, desplazado casi un paso, es
+indistinguible de sí mismo corrido una raya, y no habría forma de saber qué
+raya es cuál. Un formulario de renglones perfectamente regulares necesitaría
+otro anclaje.
+
 Lo que hace y lo que no
 -----------------------
 El patrón de ``Template.reticula`` sirve **solo para nombrar** las rayas: dice
