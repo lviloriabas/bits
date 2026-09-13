@@ -6,13 +6,14 @@ from pathlib import Path
 import time
 
 from PySide6.QtCore import Qt, QThread
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtGui import QColor, QImage, QPalette
 from PySide6.QtWidgets import QApplication
 
 from app.gui.csv_viewer import (
     CsvColumnModeButton,
     CsvViewerWindow,
     EmbeddedPdfViewer,
+    csv_path_for_view,
     reports_for_csv,
     resolve_source_documents,
     restore_run_columns,
@@ -36,6 +37,7 @@ from app.gui.csv_utils import (
     infer_important_field_ids,
     read_csv_file,
 )
+from app.templates.schema import FieldTemplate, Template
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -179,18 +181,95 @@ def test_viewer_restores_review_for_a_historical_run(tmp_path: Path):
     assert [row["review"] for row in rows] == ["false", "true"]
 
 
-def test_column_mode_control_is_compact_icon_only():
+def test_column_mode_control_explains_what_the_click_will_change():
     app = QApplication.instance() or QApplication([])
     button = CsvColumnModeButton()
 
-    assert button.width() == button.height() == 30
-    assert button.text() == ""
+    assert button.text() == "Columnas importantes"
     assert not button.icon().isNull()
     assert "columnas importantes" in button.toolTip()
 
     button.setChecked(False)
     app.processEvents()
+    assert button.text() == "Todas las columnas"
     assert "CSV completo" in button.toolTip()
+
+
+def test_minimum_csv_uses_complete_companion_for_the_view(tmp_path: Path):
+    minimum = tmp_path / "run.CSV"
+    complete = tmp_path / "run_completo.CSV"
+    minimum.write_text("file,page\na.pdf,1\n", encoding="utf-8")
+    complete.write_text(
+        "file,page,log_number,log_number_status\na.pdf,1,1234500,OK\n",
+        encoding="utf-8",
+    )
+
+    assert csv_path_for_view(minimum) == complete
+    assert csv_path_for_view(complete) == complete
+
+
+def test_viewer_can_show_and_select_every_complete_column(tmp_path: Path):
+    app = QApplication.instance() or QApplication([])
+    run = tmp_path / "run"
+    data = run / "datos"
+    data.mkdir(parents=True)
+    minimum = data / "run.CSV"
+    complete = data / "run_completo.CSV"
+    minimum.write_text("file,page\na.pdf,1\n", encoding="utf-8")
+    complete.write_text(
+        "file,page,log_number,log_number_status\na.pdf,1,1234500,OK\n",
+        encoding="utf-8",
+    )
+
+    viewer = CsvViewerWindow(tmp_path)
+    try:
+        assert viewer.load_folder(run)
+        assert viewer._columns == [
+            "file", "page", "log_number", "log_number_status",
+        ]
+        assert viewer.table.isColumnHidden(
+            viewer.table_model.column_of("log_number_status")
+        )
+
+        viewer.column_toggle.click()
+        app.processEvents()
+
+        assert not viewer.table.isColumnHidden(
+            viewer.table_model.column_of("log_number_status")
+        )
+    finally:
+        viewer.close()
+        app.processEvents()
+
+
+def test_pdf_overlay_can_be_shown_and_filtered():
+    app = QApplication.instance() or QApplication([])
+    viewer = EmbeddedPdfViewer()
+    image = QImage(100, 100, QImage.Format.Format_RGB32)
+    image.fill(Qt.GlobalColor.white)
+    template = Template(
+        name="prueba",
+        fields=[
+            FieldTemplate(
+                id="log_number", x=0.1, y=0.1, w=0.2, h=0.2
+            )
+        ],
+    )
+    try:
+        viewer._base_image = image
+        viewer.set_field_overlay(template, True)
+        assert viewer._source is not None
+        assert viewer._source.toImage().pixelColor(10, 15) != QColor(
+            Qt.GlobalColor.white
+        )
+
+        viewer.set_field_overlay(template, True, set())
+        assert viewer._source.toImage().pixelColor(10, 15) == QColor(
+            Qt.GlobalColor.white
+        )
+    finally:
+        viewer.close()
+        app.processEvents()
 
 
 def test_true_dup_uses_warning_color_convention():
@@ -205,12 +284,10 @@ def test_true_dup_uses_warning_color_convention():
 
 
 def test_minimal_csv_recovers_field_color_from_companion_json(tmp_path: Path):
-    """El CSV mínimo no trae columnas ``_status``: el color sale del JSON.
+    """El CSV minimo toma el color y las columnas de su companero completo.
 
     ``find_csv_files`` abre por defecto el CSV mínimo (ordena antes que
-    ``_completo``), y ese CSV se recorta al exportar sin esas columnas. Sin
-    este respaldo, el historial se abría sin ningún campo coloreado aunque
-    la ejecución sí tuviera estados de WARNING/ERROR.
+    ``_completo``), pero la consulta no debe quedar limitada a ese recorte.
     """
     import json
 
@@ -256,7 +333,7 @@ def test_minimal_csv_recovers_field_color_from_companion_json(tmp_path: Path):
     viewer = CsvViewerWindow(tmp_path)
     assert viewer.load_csv_file(minimal_path)
 
-    assert "log_number_status" not in viewer._columns
+    assert "log_number_status" in viewer._columns
     row = viewer._rows[0]
     assert viewer._status_for(row, "log_number") == "ERROR"
 

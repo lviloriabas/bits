@@ -12,6 +12,7 @@ from loguru import logger
 from PySide6.QtCore import (
     QEvent,
     QObject,
+    QRectF,
     QSize,
     Qt,
     QThread,
@@ -19,15 +20,20 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import (
+    QColor,
+    QFont,
     QIcon,
     QImage,
     QIntValidator,
     QKeySequence,
+    QPainter,
+    QPen,
     QPixmap,
     QShortcut,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -55,6 +61,7 @@ from app.gui.csv_utils import (
     important_csv_columns,
     important_field_ids_for_csv,
     read_csv_file,
+    template_field_ids_for_columns,
     template_for_csv,
     template_name_for_csv,
 )
@@ -69,7 +76,14 @@ from app.gui.export_options import ExportOptionsGroup
 from app.gui.field_selector import ImportantFieldsDialog
 from app.gui.responsive import ROOMY, Density, density_for, fit_to_screen
 from app.gui.table_sort import ModelSortController
-from app.gui.tokens import SPACE_S, TEXT_DISABLED, TEXT_SECONDARY
+from app.gui.tokens import (
+    FONT_CAPTION_PT,
+    SPACE_S,
+    TEXT_DISABLED,
+    TEXT_SECONDARY,
+    accent_color,
+)
+from app.reports.outputs import complete_csv_path
 from app.reports.csv_reporter import CsvReporter
 from app.gui.widgets import (
     DATA_TABLE_QSS,
@@ -747,16 +761,24 @@ def apply_csv_column_visibility(
         )
 
 
+def csv_path_for_view(path: Path) -> Path:
+    """Usa el CSV completo como fuente visual cuando acompana al minimo."""
+    path = Path(path)
+    if path.stem.casefold().endswith("_completo"):
+        return path
+    complete = complete_csv_path(path)
+    return complete if complete.is_file() else path
+
+
 class CsvColumnModeButton(QToolButton):
-    """Selector compacto del conjunto de columnas visible."""
+    """Alterna con una etiqueta clara entre la vista resumida y la completa."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setCheckable(True)
         self.setChecked(True)
         self.setObjectName("csvColumnToggle")
-        self.setAutoRaise(True)
-        self.setFixedSize(30, 30)
+        self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.setIconSize(QSize(20, 20))
         self.setAccessibleName("Columnas visibles del CSV")
         self.toggled.connect(self._sync_visuals)
@@ -765,6 +787,9 @@ class CsvColumnModeButton(QToolButton):
     def _sync_visuals(self, important_only: bool) -> None:
         icon_name = "columns_important.svg" if important_only else "columns_all.svg"
         self.setIcon(QIcon(str(_ASSETS / icon_name)))
+        self.setText(
+            "Columnas importantes" if important_only else "Todas las columnas"
+        )
         self.setToolTip(
             "Mostrando columnas importantes. Clic para mostrar todas las columnas."
             if important_only
@@ -775,15 +800,13 @@ class CsvColumnModeButton(QToolButton):
 
 
 class ImportantFieldsButton(QToolButton):
-    """Botón compacto para abrir el selector de columnas importantes."""
+    """Abre el selector con una etiqueta legible, no con un glifo ambiguo."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setText("☷")
+        self.setText("Elegir columnas…")
         self.setToolTip("Seleccionar columnas importantes")
         self.setAccessibleName("Seleccionar columnas importantes")
-        self.setFixedSize(30, 30)
-        self.setAutoRaise(True)
 
 
 def _document_labels(documents: list[Path]) -> list[str]:
@@ -874,7 +897,11 @@ class EmbeddedPdfViewer(QFrame):
         self._global_index = 0
         self._zoom = 1.0  # 1.0 = página ajustada al panel
         self._density = density
+        self._base_image: QImage | None = None
         self._source: QPixmap | None = None
+        self._overlay_template = None
+        self._overlay_field_ids: set[str] | None = None
+        self._overlay_visible = False
         self._refresh_pending = False
         # Páginas por documento: el recuento reabría el PDF en cada salto.
         self._page_counts: dict[str, int] = {}
@@ -1090,6 +1117,7 @@ class EmbeddedPdfViewer(QFrame):
         self._page = 1
         self._total = 0
         self._global_index = 0
+        self._base_image = None
         self._source = None
         self._page_counts = {}
         self._pending_render = None
@@ -1295,9 +1323,70 @@ class EmbeddedPdfViewer(QFrame):
             )
             self._sync_controls()
             return
-        self._source = QPixmap.fromImage(qimage)
-        self._render_page()
+        self._base_image = qimage
+        self._apply_field_overlay()
         self._sync_controls()
+
+    def set_field_overlay(
+        self,
+        template,
+        visible: bool,
+        field_ids: Iterable[str] | None = None,
+    ) -> None:
+        """Configura y repinta los recuadros de la plantilla sobre la pagina."""
+        self._overlay_template = template
+        self._overlay_visible = bool(visible and template is not None)
+        self._overlay_field_ids = (
+            set(field_ids) if field_ids is not None else None
+        )
+        self._apply_field_overlay()
+
+    def _apply_field_overlay(self) -> None:
+        """Compone los recuadros sin volver a rasterizar el PDF."""
+        qimage = self._base_image
+        if qimage is None or qimage.isNull():
+            return
+        pixmap = QPixmap.fromImage(qimage)
+        template = self._overlay_template
+        if self._overlay_visible and template is not None:
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            accent = QColor(accent_color())
+            pen = QPen(accent, 2)
+            fill = QColor(accent)
+            fill.setAlpha(38)
+            label = QColor(accent)
+            label.setAlpha(210)
+            font = QFont(self.font())
+            font.setPointSize(FONT_CAPTION_PT)
+            font.setBold(True)
+            painter.setFont(font)
+            width, height = qimage.width(), qimage.height()
+            for field in template.fields:
+                if (
+                    self._overlay_field_ids is not None
+                    and field.id not in self._overlay_field_ids
+                ):
+                    continue
+                rect = QRectF(
+                    field.x * width,
+                    field.y * height,
+                    field.w * width,
+                    field.h * height,
+                )
+                painter.setBrush(fill)
+                painter.setPen(pen)
+                painter.drawRect(rect)
+                painter.setBrush(label)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawText(
+                    rect.adjusted(2, 2, -2, -2),
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+                    field.id,
+                )
+            painter.end()
+        self._source = pixmap
+        self._render_page()
 
     def _sync_combo_to(self, path: Path) -> None:
         index = next(
@@ -1350,6 +1439,7 @@ class EmbeddedPdfViewer(QFrame):
 
     def _show_placeholder(self, text: str) -> None:
         """Deja el panel con un mensaje centrado y sin página cargada."""
+        self._base_image = None
         self._source = None
         self.image.setContentsMargins(12, 12, 12, 12)
         self.image.setPixmap(QPixmap())
@@ -1467,6 +1557,7 @@ class CsvViewerWindow(QMainWindow):
         self._important_field_ids: set[str] = set()
         self._selected_important_columns: set[str] = set()
         self._template_name: str | None = None
+        self._template = None
         self._important_fields_store = ImportantFieldsStore(
             _PROGRAM_DIR / IMPORTANT_FIELDS_FILENAME
         )
@@ -1591,17 +1682,30 @@ class CsvViewerWindow(QMainWindow):
         self.csv_combo.setEnabled(False)
         self.csv_combo.currentIndexChanged.connect(self._on_csv_changed)
         controls.addWidget(self.csv_combo, 1)
+        layout.addLayout(controls)
+
+        view_controls = QHBoxLayout()
+        view_controls.setSpacing(SPACE_S)
+        self.fields_check = QCheckBox("Mostrar campos")
+        self.fields_check.setEnabled(False)
+        self.fields_check.setToolTip(
+            "Dibuja los recuadros de los campos sobre la pagina del visor."
+        )
+        self.fields_check.toggled.connect(self._apply_pdf_overlay)
+        view_controls.addWidget(self.fields_check)
+        view_controls.addStretch()
+        view_controls.addWidget(QLabel("Vista de la tabla:"))
         self.column_toggle = CsvColumnModeButton()
         self.column_toggle.setEnabled(False)
         self.column_toggle.setVisible(False)
         self.column_toggle.toggled.connect(self._apply_column_mode)
-        controls.addWidget(self.column_toggle)
+        view_controls.addWidget(self.column_toggle)
         self.important_fields_button = ImportantFieldsButton()
         self.important_fields_button.setEnabled(False)
         self.important_fields_button.setVisible(False)
         self.important_fields_button.clicked.connect(self._open_field_selector)
-        controls.addWidget(self.important_fields_button)
-        layout.addLayout(controls)
+        view_controls.addWidget(self.important_fields_button)
+        layout.addLayout(view_controls)
 
         search_row = QHBoxLayout()
         search_row.setSpacing(SPACE_S)
@@ -1926,7 +2030,10 @@ class CsvViewerWindow(QMainWindow):
 
     def _load_csv(self, path: Path) -> None:
         try:
-            columns, rows = read_csv_file(path)
+            # El archivo principal es deliberadamente corto. Para consultar,
+            # ordenar y elegir columnas se usa su companero completo, sin
+            # cambiar cual archivo eligio la persona ni ninguna salida.
+            columns, rows = read_csv_file(csv_path_for_view(path))
             columns, rows = restore_run_columns(path, columns, rows)
         except (OSError, ValueError, csv.Error) as exc:
             QMessageBox.critical(
@@ -1964,6 +2071,7 @@ class CsvViewerWindow(QMainWindow):
         # La selección guardada manda sobre la inferida: es la lista que el
         # usuario editó para esta plantilla, aquí o en la ventana principal.
         self._template_name = template_name_for_csv(path)
+        self._template = template_for_csv(path)
         stored = self._important_fields_store.load(self._template_name)
         self._selected_important_columns = (
             set(stored)
@@ -1975,6 +2083,12 @@ class CsvViewerWindow(QMainWindow):
         self.column_toggle.setVisible(bool(columns))
         self.important_fields_button.setEnabled(bool(columns))
         self.important_fields_button.setVisible(bool(columns))
+        self.fields_check.setEnabled(self._template is not None)
+        self.fields_check.setToolTip(
+            "Dibuja los recuadros de los campos sobre la pagina del visor."
+            if self._template is not None
+            else "Este CSV no identifica una plantilla disponible."
+        )
         self._apply_column_mode()
         self._load_pdf_paths(path)
         self._search_matches = []
@@ -2713,13 +2827,27 @@ class CsvViewerWindow(QMainWindow):
         dialog.exec()
 
     def _set_important_columns(self, columns: set[str]) -> None:
-        # El CSV mínimo trae solo las columnas marcadas, así que el selector
-        # abierto sobre él no puede enseñar el resto: lo que esta plantilla
-        # tiene marcado y este archivo no lleva se conserva.
         self._selected_important_columns = self._important_fields_store.save(
             self._template_name, columns, self._columns
         )
         self._apply_column_mode()
+
+    def _apply_pdf_overlay(self, _checked: bool | None = None) -> None:
+        """Sincroniza los recuadros con el modo y la seleccion de columnas."""
+        template = self._template
+        important_only = self.column_toggle.isChecked()
+        field_ids = None
+        if template is not None and important_only:
+            field_ids = template_field_ids_for_columns(
+                self._selected_important_columns,
+                [field.id for field in template.fields],
+                self._columns,
+            )
+        self.pdf_viewer.set_field_overlay(
+            template,
+            self.fields_check.isChecked(),
+            field_ids,
+        )
 
     def _status_for(self, row: dict[str, str], column: str) -> str | None:
         if column == "dup":
@@ -2779,6 +2907,7 @@ class CsvViewerWindow(QMainWindow):
             "columnas visibles · solo lectura"
         )
         self._refresh_status()
+        self._apply_pdf_overlay()
 
     def _refresh_status(self) -> None:
         """Resumen de la tabla, con el estado de la exportación al final."""
