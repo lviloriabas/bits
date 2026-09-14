@@ -168,7 +168,10 @@ def test_el_csv_completo_no_arma_el_mapa_de_estados_del_json(
 
 def test_el_csv_minimo_sigue_pintandose_con_el_json(app, tmp_path: Path):
     """Sin columnas de estado, el color solo puede salir del compañero."""
-    minimo, _completo = _ejecucion_real(tmp_path)
+    minimo, completo = _ejecucion_real(tmp_path)
+    # El completo tiene prioridad si existe. Esta prueba cubre una entrega
+    # que solo conserva el minimo y obtiene sus estados desde el JSON.
+    completo.unlink()
     visor = CsvViewerWindow(tmp_path)
     try:
         assert visor.load_csv_file(minimo)

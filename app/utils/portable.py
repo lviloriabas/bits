@@ -55,14 +55,14 @@ def ensure_portable_env() -> Path:
     importar paddleocr/paddlex, porque esos módulos leen las variables
     al momento del import. Configura:
 
-    - PADDLE_PDX_CACHE_HOME  → <raíz>/portable/paddlex
+    - PADDLE_PDX_CACHE_HOME  -> <raíz>/portable/paddlex
       (los modelos OCR se descargan/leen desde la carpeta del proyecto,
        nunca de ~/.paddlex del usuario).
     - PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=1
       (omite el chequeo de conectividad a los servidores de modelos).
     - PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT=0
       (evita el bug de oneDNN en Windows: ConvertPirAttribute2Runtime...).
-    - TLS → almacen de certificados de Windows mediante truststore.
+    - TLS -> almacen de certificados de Windows mediante truststore.
 
     También instala la supresión de consolas de los subprocesos: la GUI
     corre sin consola y cualquier dependencia que llame a ``subprocess``

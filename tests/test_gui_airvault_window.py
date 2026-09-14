@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QLabel,
     QLineEdit,
+    QGroupBox,
     QMessageBox,
     QToolButton,
 )
@@ -36,7 +37,7 @@ from app.gui.automatizacion import OpcionesAutomatizacion
 from app.gui.airvault_window import (
     ANCHO_MAXIMO_NOMBRE_BATCH,
     ANCHO_MINIMO_NOMBRE_BATCH,
-    COLOR_INDEXADO,
+    color_indexado,
     AirVaultWindow,
     TrabajoAirVaultWorker,
     csv_de_corrida,
@@ -51,10 +52,15 @@ def ventana(app, tmp_path):
 
     Los pasos del proceso automático tienen memoria en disco, y esa memoria
     es el ``airvault.json`` del repositorio: sin darle uno propio, cada
-    prueba que toca «Comprobar cada» o «Completar batch» le cambia la
+    prueba que toca «Revisar cada» o «Completar batch» le cambia la
     configuración a quien ejecuta el programa, y a la prueba siguiente.
     """
     return AirVaultWindow(tmp_path, OpcionesAutomatizacion(tmp_path))
+
+
+def test_el_resumen_de_la_ejecucion_se_llama_resultado(ventana):
+    assert ventana.reparto_total.parentWidget().title() == "Resultado"
+    assert isinstance(ventana.reparto_total.parentWidget(), QGroupBox)
 
 
 def corrida(
@@ -123,7 +129,7 @@ def test_indexar_esta_apagado_hasta_que_haya_un_lote_listo(ventana):
 def test_la_bitacora_de_airvault_se_puede_copiar(ventana):
     ventana.bitacora.addItems([
         "10:00  Entrando a AirVault",
-        "10:01  Comprobando la sesión",
+        "10:01  Revisando la sesión",
     ])
     ventana.bitacora.item(0).setSelected(True)
     ventana.bitacora.item(1).setSelected(True)
@@ -131,7 +137,7 @@ def test_la_bitacora_de_airvault_se_puede_copiar(ventana):
     ventana.bitacora.copySelectedItems()
 
     assert QApplication.clipboard().text() == (
-        "10:00  Entrando a AirVault\n10:01  Comprobando la sesión"
+        "10:00  Entrando a AirVault\n10:01  Revisando la sesión"
     )
 
 
@@ -405,7 +411,7 @@ def test_elegir_del_historial_apunta_a_esa_corrida(app, tmp_path):
     ventana = AirVaultWindow(tmp_path)
     ventana._refrescar_historial()
     ventana._al_elegir_del_historial(1)
-    assert ventana.corrida_edit.text() == str(csv)
+    assert ventana.corrida() == csv
     assert ventana.lote_edit.text() == "DP | BITS 18 AUG 2026 05 42"
 
 
@@ -414,7 +420,7 @@ def test_sin_elegir_nada_se_propone_la_mas_reciente(app, tmp_path):
     csv = corrida(tmp_path, "BITS 18 AUG 2026 05 42")
     ventana = AirVaultWindow(tmp_path)
     ventana._refrescar_historial()
-    assert ventana.corrida_edit.text() == str(csv)
+    assert ventana.corrida() == csv
 
 
 def test_se_propone_la_exportada_aunque_no_sea_la_ultima(app, tmp_path):
@@ -423,7 +429,7 @@ def test_se_propone_la_exportada_aunque_no_sea_la_ultima(app, tmp_path):
     corrida(tmp_path, "BITS 18 AUG 2026 05 42", exportada=False)
     ventana = AirVaultWindow(tmp_path)
     ventana._refrescar_historial()
-    assert ventana.corrida_edit.text() == str(csv)
+    assert ventana.corrida() == csv
     assert ventana.boton_subir.isEnabled()
 
 
@@ -467,13 +473,14 @@ def test_el_csv_que_se_sube_es_el_minimo_no_el_completo(tmp_path):
 def test_apunta_a_la_corrida_y_propone_el_nombre_del_lote(ventana, tmp_path):
     csv = corrida(tmp_path)
     ventana.fijar_corrida(csv)
-    assert ventana.corrida_edit.text() == str(csv)
+    assert ventana.corrida() == csv
     assert ventana.lote_edit.text() == "DP | BITS 18 AUG 2026 05 42"
 
 
-def test_el_campo_de_la_corrida_no_se_teclea(ventana):
-    """Se elige en el historial o con «Otra ejecución…»."""
-    assert ventana.corrida_edit.isReadOnly()
+def test_la_ejecucion_solo_se_elige_en_el_historial(ventana):
+    """No hay forma de apuntar la ventana a un CSV cualquiera."""
+    assert not hasattr(ventana, "corrida_edit")
+    assert not hasattr(ventana, "boton_buscar")
 
 
 def test_cambiar_de_corrida_tira_lo_que_se_sabia_de_la_anterior(ventana,
@@ -666,7 +673,7 @@ def cola_de_dos_ejecuciones(ventana):
     anterior = parte(LISTO, "Anterior", carpeta="anterior")
     actual.trabajo.manifiesto.csv_origen = "C:/entregas/actual.csv"
     anterior.trabajo.manifiesto.csv_origen = "C:/entregas/anterior.csv"
-    ventana.corrida_edit.setText(actual.trabajo.manifiesto.csv_origen)
+    ventana._corrida = actual.trabajo.manifiesto.csv_origen
     ventana.lote_edit.setText("Actual")
     ventana._trabajos = [anterior.trabajo, actual.trabajo]
     ventana._estados = [anterior, actual]
@@ -854,6 +861,7 @@ def test_todos_los_batches_confirmados_quedan_activos_en_blanco(ventana):
 
 def test_gris_solo_significa_sin_subir_y_subido_queda_blanco(ventana):
     from app.airvault.flujo import BUSCANDO, SIN_SUBIR
+    from app.gui.tokens import paleta
 
     ventana._estados = [
         parte(SIN_SUBIR, "DP | FALTA"),
@@ -863,27 +871,53 @@ def test_gris_solo_significa_sin_subir_y_subido_queda_blanco(ventana):
     ventana._pintar_lotes()
 
     assert ventana.lotes.item(0, 0).foreground().color() == QColor(
-        Qt.GlobalColor.gray
+        paleta().TEXT_TERTIARY
     )
     assert ventana.lotes.item(1, 0).foreground().style() is Qt.BrushStyle.NoBrush
 
 
 def test_azul_solo_durante_indexacion_y_verde_al_terminar(ventana):
     from app.airvault.flujo import INDEXADO, LISTO
-    from app.gui.airvault_window import COLOR_INDEXANDO
+    from app.gui.airvault_window import color_indexando
 
     activo = parte(LISTO)
     terminado = parte(INDEXADO, carpeta="terminado")
     ventana._estados = [activo, terminado]
     ventana._al_batch_indexando(activo.trabajo, True)
     for columna in range(ventana.lotes.columnCount()):
-        assert ventana.lotes.item(0, columna).foreground().color() == QColor(COLOR_INDEXANDO)
-        assert ventana.lotes.item(1, columna).foreground().color() == QColor(COLOR_INDEXADO)
+        assert ventana.lotes.item(0, columna).foreground().color() == QColor(color_indexando())
+        assert ventana.lotes.item(1, columna).foreground().color() == QColor(color_indexado())
     ventana._al_batch_indexando(activo.trabajo, False)
     assert ventana.lotes.item(0, 0).foreground().style() is Qt.BrushStyle.NoBrush
     ventana._estados = [parte(INDEXADO)]
     ventana._pintar_lotes()
-    assert ventana.lotes.item(0, 0).foreground().color() == QColor(COLOR_INDEXADO)
+    assert ventana.lotes.item(0, 0).foreground().color() == QColor(color_indexado())
+
+
+def test_cambiar_tema_repinta_estados_sin_perder_las_filas(ventana, app, monkeypatch):
+    from app.airvault.flujo import INDEXADO, LISTO, SIN_SUBIR
+    from app.gui.airvault_window import color_indexando
+    from app.gui.theme import aplicar_tema, install_application_theme
+    from app.gui.tokens import TEMA_CLARO, TEMA_OSCURO, paleta
+
+    monkeypatch.setattr("app.gui.theme.leer_tema", lambda: None)
+    monkeypatch.setattr("app.gui.theme.guardar_tema", lambda nombre: True)
+    install_application_theme(app)
+    activo = parte(LISTO, "Activo", carpeta="activo")
+    ventana._estados = [activo, parte(INDEXADO), parte(SIN_SUBIR, carpeta="falta")]
+    ventana._al_batch_indexando(activo.trabajo, True)
+    ventana.lotes.selectRow(1)
+    celdas = [ventana.lotes.item(fila, 0) for fila in range(3)]
+    try:
+        for nombre in (TEMA_CLARO, TEMA_OSCURO):
+            aplicar_tema(nombre)
+            assert [ventana.lotes.item(fila, 0) for fila in range(3)] == celdas
+            assert ventana.lotes.currentRow() == 1
+            colores = (color_indexando(), paleta().STATUS_OK, paleta().TEXT_TERTIARY)
+            for celda, color in zip(celdas, colores):
+                assert celda.foreground().color() == QColor(color)
+    finally:
+        aplicar_tema(TEMA_OSCURO)
 
 
 def test_un_batch_parcial_no_se_pinta_como_terminado(ventana):
@@ -900,7 +934,7 @@ def test_un_batch_parcial_no_se_pinta_como_terminado(ventana):
 
     assert all(
         ventana.lotes.item(0, columna).foreground().color()
-        != QColor(COLOR_INDEXADO)
+        != QColor(color_indexado())
         for columna in range(ventana.lotes.columnCount())
     )
 
@@ -956,7 +990,7 @@ class ResultadoFalso:
 def test_al_indexar_cuenta_como_quedo_el_lote(ventana):
     ventana._al_indexar({"resultado": ResultadoFalso(), "validas": 2, "total": 3})
     texto = ventana.resumen.text()
-    assert "Escritas 2" in texto and "2 de 3 páginas comprobadas" in texto
+    assert "Escritas 2" in texto and "2 de 3 páginas revisadas" in texto
 
 
 def test_revisar_distingue_fin_del_guardado_y_revision_humana(ventana):
@@ -992,6 +1026,57 @@ def test_paginas_amarillas_agotan_sus_reintentos_y_el_proceso_termina(ventana):
 
     assert ventana.estado_label.text() == "Indexado incompleto"
     assert ventana._vigilante is None or not ventana._vigilante.isActive()
+
+
+def test_un_indexado_sin_confirmar_se_vuelve_a_comprobar_solo(ventana):
+    """La verificación pudo leer de AirVault algo que aún no reflejaba.
+
+    Sin esto el reloj se paraba si no quedaba otro batch esperando, y el
+    batch se quedaba sin completar aunque sus datos ya estuvieran.
+    """
+    from app.airvault.flujo import INCOMPLETO, LISTO
+    from app.gui.airvault_window import RECONFIRMACIONES_TRAS_INDEXAR
+
+    incompleto = {
+        "resultado": ResultadoFalso(), "validas": 2, "total": 3,
+        "incompleto": True, "carpetas": ["job"],
+    }
+    ventana._estados = [parte(LISTO)]
+    ventana._al_indexar(dict(incompleto))
+
+    assert ventana._vigilante.isActive()
+    assert "Se vuelve a revisar solo" in ventana.resumen.text()
+
+    for _ in range(RECONFIRMACIONES_TRAS_INDEXAR - 1):
+        ventana._al_comprobar({
+            "estados": [parte(INCOMPLETO)], "planes": {}, "partes": [],
+        })
+        assert ventana._vigilante.isActive()
+    ventana._al_comprobar({
+        "estados": [parte(INCOMPLETO)], "planes": {}, "partes": [],
+    })
+    assert not ventana._vigilante.isActive()
+
+    # Volver a quedar incompleto no devuelve las comprobaciones gastadas.
+    ventana._al_indexar(dict(incompleto))
+    assert not ventana._vigilante.isActive()
+    ventana.close()
+
+
+def test_el_batch_confirmado_deja_de_contar_comprobaciones(ventana):
+    from app.airvault.flujo import INDEXADO, LISTO
+
+    ventana._estados = [parte(LISTO)]
+    ventana._al_indexar({
+        "resultado": ResultadoFalso(), "validas": 2, "total": 3,
+        "incompleto": True, "carpetas": ["job"],
+    })
+    ventana._al_comprobar({
+        "estados": [parte(INDEXADO)], "planes": {}, "partes": [],
+    })
+
+    assert ventana._reconfirmaciones == {}
+    ventana.close()
 
 
 def test_indexar_desde_la_cola_no_encadena_una_revision_global(ventana):
@@ -1304,7 +1389,6 @@ def test_el_avance_sale_por_la_barra_de_la_ventana(ventana):
 def test_con_un_lote_a_medias_otra_ejecucion_sigue_disponible(ventana):
     ventana._habilitar(False)
     assert ventana.historial.isEnabled()
-    assert ventana.boton_buscar.isEnabled()
     assert not ventana.boton_subir.isEnabled()
     assert not ventana.boton_comprobar.isEnabled()
 
@@ -1327,7 +1411,7 @@ def test_elegir_otra_ejecucion_en_marcha_la_abre_en_paralelo(
     ventana._al_elegir_del_historial(1)
 
     assert solicitadas == [str(segunda)]
-    assert ventana.corrida_edit.text() == str(primera)
+    assert ventana.corrida() == primera
 
 
 def test_mientras_trabaja_siempre_hay_algo_que_pulsar(ventana):
@@ -1500,7 +1584,7 @@ def test_al_terminar_una_exportacion_se_apunta_a_esa_corrida(app, tmp_path):
             "BITS 18 AUG 2026 05 42.CSV"
         )
         principal._open_airvault()
-        assert principal._airvault_window.corrida_edit.text().endswith(
+        assert str(principal._airvault_window.corrida()).endswith(
             "BITS 18 AUG 2026 05 42.CSV"
         )
     finally:
@@ -1696,7 +1780,7 @@ def test_un_batch_que_cerro_el_programa_se_pinta_como_terminado(ventana):
     assert fila.se_acabo
     assert not ventana._falta_esperar()
     assert ventana.lotes.item(0, 3).text().startswith("Terminado por el programa")
-    assert ventana.lotes.item(0, 0).foreground().color() == QColor(COLOR_INDEXADO)
+    assert ventana.lotes.item(0, 0).foreground().color() == QColor(color_indexado())
 
 
 def _acciones(ventana, *filas):
@@ -1752,7 +1836,7 @@ def test_revisar_desde_la_cola_solo_encola_los_batches_elegidos(ventana):
     )
 
     acciones = _acciones(ventana, 0)
-    acciones["Comprobar en AirVault"].trigger()
+    acciones["Revisar en AirVault"].trigger()
 
     assert encoladas[0][0] == "comprobar"
     assert encoladas[0][1] == [primera.trabajo]
@@ -2043,12 +2127,12 @@ def test_la_bitacora_lista_cada_batch_en_su_propia_linea(ventana):
         "planes": {}, "partes": [],
     })
 
-    comprobado = [
+    revisado = [
         ventana.bitacora.item(i).text()
         for i in range(ventana.bitacora.count())
-        if "Comprobado:" in ventana.bitacora.item(i).text()
+        if "Revisado:" in ventana.bitacora.item(i).text()
     ][-1]
-    lineas = comprobado.splitlines()
+    lineas = revisado.splitlines()
     assert len(lineas) == 3
     assert "DP | BITS -1" in lineas[1]
     assert "DP | BITS -2" in lineas[2]
@@ -2215,7 +2299,7 @@ def test_la_vista_previa_avisa_de_la_ejecucion_sin_exportar(app, tmp_path, monke
     """Sin PDF de entrega no hay reparto, y se dice en vez de fallar."""
     csv_path = corrida(tmp_path, exportada=False)
     ventana = AirVaultWindow(tmp_path)
-    ventana.corrida_edit.setText(str(csv_path))
+    ventana._corrida = str(csv_path)
 
     avisos = []
     monkeypatch.setattr(
@@ -2287,7 +2371,7 @@ def test_el_boton_de_subir_si_recoge_lo_que_quedo_a_medias(
 def test_solo_el_boton_pide_recuperar_y_solo_por_una_vez(ventana, tmp_path):
     csv = corrida(RAIZ, nombre="BITS 26 AUG 2026 05 00")
     try:
-        ventana.corrida_edit.setText(str(csv))
+        ventana._corrida = str(csv)
         ventana.lote_edit.setText("DP | BIT")
 
         ventana._recuperar_pendientes = True

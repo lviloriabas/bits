@@ -12,7 +12,7 @@ class AppConfig(BaseModel):
     """Parámetros de configuración del pipeline."""
 
     dpi: int = Field(default=200, ge=72, le=600,
-                     description="DPI del renderizado PDF→imagen")
+                     description="DPI del renderizado PDF->imagen")
     blank_threshold: float = Field(
         default=15.0, ge=0.0,
         description="Varianza de grises bajo la cual la página se considera vacía",

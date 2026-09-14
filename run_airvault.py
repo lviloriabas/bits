@@ -45,7 +45,9 @@ from app.airvault.discovery import (  # noqa: E402
     buscar_por_id,
 )
 from app.airvault.flujo import ErrorDeCorrida, Trabajo, paginas_de_lote  # noqa: E402
-from app.airvault.indexer import Indexador, verificar_lote  # noqa: E402
+from app.airvault.indexer import (  # noqa: E402
+    ESPERAS_TRAS_ESCRIBIR, Indexador, verificar_lote,
+)
 from app.airvault.mapping import FLOTA_CACHE_FILENAME, ResolutorFlota  # noqa: E402
 from app.airvault.memoria import BITACORAS_POR_LIBRO  # noqa: E402
 from app.airvault.model import EstadoEtapa, Manifiesto  # noqa: E402
@@ -489,7 +491,9 @@ def etapa_indexar(args, config: AirVaultConfig) -> int:
         # suelta: AirVault admite un solo dueno y el que queda tomado
         # cuelga la siguiente apertura sin decir por que.
         _soltar(cliente, manifiesto.batch_id)
-    validas, total, problemas = verificar_lote(cliente, manifiesto)
+    validas, total, problemas = verificar_lote(
+        cliente, manifiesto, esperas=ESPERAS_TRAS_ESCRIBIR,
+    )
     incompleto = not manifiesto.solo_subir and validas != total
     hubo_error = bool(
         resultado.fallidas

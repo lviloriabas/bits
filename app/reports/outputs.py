@@ -187,7 +187,7 @@ def write_outputs(
 
     Un re-export NO borra los PDFs ya exportados: los conserva y escribe
     los nuevos junto a ellos con sufijo numérico cuando el nombre coincide
-    (``HP-1534CMP.pdf`` → ``HP-1534CMP-2.pdf``).
+    (``HP-1534CMP.pdf`` -> ``HP-1534CMP-2.pdf``).
 
     Con ``options.skip_pdfs`` (ejecución cancelada a mitad de camino) se
     guardan solo los datos (CSV, JSON, stats) y NO se generan PDFs, para

@@ -56,14 +56,16 @@ from PySide6.QtWidgets import (
 
 from app.branding import APPLICATION_DISPLAY_NAME
 from app.gui.responsive import density_for, fit_to_screen
-from app.gui.tokens import FONT_CAPTION_PT, SPACE_S, TEXT_SECONDARY
+from app.gui.theme import gestor_tema
+from app.gui.tokens import FONT_CAPTION_PT, SPACE_S, paleta
 from app.gui.widgets import (
-    DATA_TABLE_QSS,
-    ZOOM_OVERLAY_QSS,
     ZoomOverlay,
+    data_table_qss,
     hide_overlay_when_tight,
     keep_overlay_clear_of_scrollbars,
+    pintar_del_tema,
     window_stylesheet,
+    zoom_overlay_qss,
 )
 from app.templates.manager import TEMPLATES_DIR, TemplateManager
 from app.templates.schema import FieldTemplate, FieldType, Template
@@ -323,6 +325,9 @@ class EditorWindow(QMainWindow):
         self._density = fit_to_screen(self, 1200, 800)
         self.setWindowIcon(_load_icon())
         self._apply_density_stylesheet()
+        # La hoja lleva el fragmento de la densidad, así que la rehace la
+        # ventana y no el módulo del tema.
+        gestor_tema().cambiado.connect(self._on_tema_cambiado)
 
         self._pdf_path: Optional[Path] = None
         self._current_page = 0
@@ -399,6 +404,15 @@ class EditorWindow(QMainWindow):
         self.btn_next.setToolTip("Página siguiente (flecha derecha)")
         self.btn_next.setEnabled(False)
         self.btn_next.triggered.connect(self._next_page)
+
+        for accion, flecha in (
+            (self.btn_prev, Qt.ArrowType.LeftArrow),
+            (self.btn_next, Qt.ArrowType.RightArrow),
+        ):
+            boton = toolbar.widgetForAction(accion)
+            boton.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+            boton.setArrowType(flecha)
+            boton.setAccessibleName(accion.text())
 
         toolbar.addSeparator()
         act_load = toolbar.addAction("Cargar plantilla")
@@ -483,7 +497,9 @@ class EditorWindow(QMainWindow):
             "✓ indica que ya está colocado."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet(f"color: {TEXT_SECONDARY};")
+        pintar_del_tema(
+            hint, lambda: f"color: {paleta().TEXT_SECONDARY};"
+        )
         layout.addWidget(hint)
 
         layout.addWidget(QLabel("Campos de la plantilla"))
@@ -514,9 +530,13 @@ class EditorWindow(QMainWindow):
     def _apply_density_stylesheet(self) -> None:
         self.setStyleSheet(
             window_stylesheet(
-                DATA_TABLE_QSS + ZOOM_OVERLAY_QSS + self._density.qss
+                data_table_qss() + zoom_overlay_qss() + self._density.qss
             )
         )
+
+    def _on_tema_cambiado(self, _nombre: str) -> None:
+        """Rehace la hoja de la ventana con los tonos del tema nuevo."""
+        self._apply_density_stylesheet()
 
     def _update_responsive_layout(self) -> None:
         density = density_for(self.height(), self._density)

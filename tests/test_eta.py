@@ -35,3 +35,21 @@ def test_completed_batch_has_zero_remaining():
         cached_ms_per_page=2500.0,
     ) == 0.0
 
+
+def test_pocas_unidades_grandes_pesan_mas_que_pocas_paginas():
+    """Web Reports mide bitacoras enteras, no paginas: con tres ya se sabe.
+
+    Con el calentamiento de paginas, tres de veinte apenas moverian la
+    estimacion del historico, y casi ninguna corrida de Web Reports llega a
+    las veinte unidades: seria no mirar nunca lo que esta pasando.
+    """
+    comun = dict(
+        total_pages=10,
+        completed_pages=3,
+        elapsed_seconds=30.0,
+        cached_ms_per_page=30000.0,
+    )
+    # Observado: 10 s/unidad, que son 70 s de las siete que quedan. Guardado:
+    # 30 s/unidad, que son 210.
+    assert estimate_remaining_seconds(**comun, warmup_units=3.0) == 84.0
+    assert estimate_remaining_seconds(**comun) == 189.0

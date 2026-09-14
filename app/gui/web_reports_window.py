@@ -6,7 +6,7 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QDate, Qt, QThread, Signal
+from PySide6.QtCore import QDate, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -44,25 +44,39 @@ from app.airvault.web_reports import (
     ExcepcionLogPageAudit,
     abrir_en_web_search,
 )
+from app.gui.cronometro import Cronometro, cronometro_qss
 from app.gui.responsive import fit_to_screen
+from app.gui.theme import gestor_tema
 from app.gui.tokens import (
+    CONTROL_HEIGHT,
+    CONTROL_HEIGHT_COMPACT,
     SPACE_L,
     SPACE_S,
-    TEXT_SECONDARY,
     link_text_color,
+    paleta,
+)
+from app.gui.web_reports_tiempos import (
+    TAREA_BUSQUEDA,
+    TAREA_CONSULTA,
+    TAREA_CORRECCION,
+    Estimacion,
 )
 from app.gui.widgets import (
-    DATA_TABLE_QSS,
     align_vertical_scrollbar_to_header,
     configure_combo_box,
+    data_table_qss,
+    pintar_del_tema,
     size_columns_once,
     style_data_table,
     window_stylesheet,
 )
 
-# El mismo nombre que le dan la ventana de AirVault y la vista previa al
-# gris de las frases de ayuda.
-COLOR_AYUDA = TEXT_SECONDARY
+# El mismo nombre que le dan la ventana de AirVault y la vista previa al gris
+# de las frases de ayuda. Es una función y no una constante porque el gris
+# cambia con el tema.
+def color_ayuda() -> str:
+    """El gris de las frases de ayuda."""
+    return paleta().TEXT_SECONDARY
 
 # Con el que se enseñan las dos fechas y con el que se mide cuánto ocupan.
 FORMATO_FECHA = "d/M/yyyy"
@@ -136,6 +150,10 @@ class _TrabajoEnEdge(QThread):
     """
 
     avance = Signal(str)
+    # Cuántas unidades van de cuántas: reportes en la consulta y bitácoras
+    # en la corrección. Va aparte de «avance» porque el cronómetro necesita
+    # números, y la frase de estado está escrita para leerla una persona.
+    paso = Signal(int, int)
     resultado = Signal(object)
     fallo = Signal(str)
     cancelado = Signal()
@@ -192,6 +210,7 @@ class WebReportsWorker(_TrabajoEnEdge):
             self._filtros,
             avisar=self.avance.emit,
             cancelar=self._cancelado,
+            progreso=self.paso.emit,
         )
 
 
@@ -216,6 +235,7 @@ class CorreccionWorker(_TrabajoEnEdge):
             avisar=self.avance.emit,
             cancelar=self._cancelado,
             ensayo=False,
+            progreso=self.paso.emit,
         )
 
 
@@ -275,14 +295,47 @@ class WebReportsWindow(QDialog):
         # cambio de selección, que llega por su cuenta y no puede encender
         # un botón en mitad de una consulta.
         self._libre = True
+        # El trabajo que corre ahora, con lo que lleva y lo que le falta.
+        # Sin nada en Edge no hay nada que contar y el reloj se queda quieto.
+        self._estimacion: Optional[Estimacion] = None
+        self._timer = QTimer(self)
+        self._timer.setInterval(250)
+        self._timer.timeout.connect(self._al_latir)
 
         self.setWindowTitle("Web Reports")
         self.setWindowFlag(Qt.WindowType.WindowMinimizeButtonHint, True)
         self._densidad = fit_to_screen(self, 1080, 680)
-        self.setStyleSheet(
-            window_stylesheet(DATA_TABLE_QSS + self._densidad.qss)
-        )
+        self._aplicar_hoja()
         self._build_ui()
+        # La hoja lleva el fragmento de la densidad, así que la vuelve a pedir
+        # la propia ventana cuando cambia el tema.
+        gestor_tema().cambiado.connect(self._al_cambiar_tema)
+
+    def _aplicar_hoja(self) -> None:
+        """La hoja de la ventana, con los tonos y las medidas de ahora."""
+        self.setStyleSheet(
+            window_stylesheet(
+                cronometro_qss() + data_table_qss() + self._densidad.qss
+            )
+        )
+
+    def _al_cambiar_tema(self, _nombre: str) -> None:
+        """Rehace la hoja y repinta los enlaces de la tabla.
+
+        Los enlaces llevan su color en el propio elemento, puesto al llenar la
+        tabla, así que la hoja no los alcanza: se vuelven a recorrer.
+        """
+        self._aplicar_hoja()
+        self._repintar_enlaces()
+
+    def _repintar_enlaces(self) -> None:
+        """Devuelve a las celdas con enlace el color del tema puesto ahora."""
+        color = QColor(link_text_color())
+        for fila in range(self.tabla.rowCount()):
+            for columna in range(self.tabla.columnCount()):
+                item = self.tabla.item(fila, columna)
+                if item is not None and item.data(ROL_ENLACE):
+                    item.setForeground(color)
 
     def _build_ui(self) -> None:
         cuerpo = QVBoxLayout(self)
@@ -342,7 +395,7 @@ class WebReportsWindow(QDialog):
             "Las celdas subrayadas abren la página o el libro en Web Search."
         )
         ayuda.setWordWrap(True)
-        ayuda.setStyleSheet(f"color: {COLOR_AYUDA};")
+        pintar_del_tema(ayuda, lambda: f"color: {color_ayuda()};")
         grid.addWidget(ayuda, 1, 0, 1, 8)
         cuerpo.addWidget(consulta)
         # Con el cuadro ya colgado de la ventana, que es cuando los campos
@@ -382,19 +435,38 @@ class WebReportsWindow(QDialog):
         size_columns_once(self.tabla, stretch_last=True)
         cuerpo.addWidget(self.tabla, 1)
 
-        # El mismo orden que la ventana de AirVault: la barra sola en su
-        # fila, debajo la frase de estado y al final los botones. Compartir
-        # fila con los botones dejaba la barra corta y ponía las acciones a
-        # media altura de la ventana, donde no las busca nadie.
+        # El mismo orden que la ventana de AirVault: la barra en su fila,
+        # debajo la frase de estado y al final los botones. Compartir fila
+        # con los botones dejaba la barra corta y ponía las acciones a media
+        # altura de la ventana, donde no las busca nadie. El reloj sí va con
+        # la barra, y con el mismo reparto que en la ventana principal: la
+        # barra se estira y las tres cifras conservan su ancho.
+        fila_progreso = QHBoxLayout()
+        fila_progreso.setSpacing(SPACE_S)
         self.progreso = QProgressBar()
         self.progreso.setRange(0, 100)
         self.progreso.setValue(0)
         self.progreso.setTextVisible(False)
-        cuerpo.addWidget(self.progreso)
+        fila_progreso.addWidget(self.progreso, 1)
+
+        alto = (
+            CONTROL_HEIGHT_COMPACT
+            if self._densidad.compact
+            else CONTROL_HEIGHT
+        )
+        self.cronometro = Cronometro(alto)
+        self.cronometro.setToolTip(
+            "El tiempo restante se recalcula con las bitácoras terminadas "
+            "y el ritmo observado."
+        )
+        fila_progreso.addWidget(self.cronometro)
+        cuerpo.addLayout(fila_progreso)
 
         self.resumen = QLabel("Listo para consultar.")
         self.resumen.setWordWrap(True)
-        self.resumen.setStyleSheet(f"color: {COLOR_AYUDA};")
+        pintar_del_tema(
+            self.resumen, lambda: f"color: {color_ayuda()};"
+        )
         # Con el sitio reservado, como allá: los motivos de fallo de esta
         # consulta son igual de largos («Complete el acceso en Edge con la
         # cuenta de trabajo…») y sin el hueco la ventana pegaba un salto
@@ -536,12 +608,18 @@ class WebReportsWindow(QDialog):
         worker.resultado.connect(self._al_corregir)
         worker.fallo.connect(self._al_fallar_correccion)
         worker.cancelado.connect(self._al_cancelar)
+        worker.paso.connect(self._al_pasar)
         worker.finished.connect(self._al_terminar)
         worker.finished.connect(worker.deleteLater)
         self._worker = worker
         self._habilitar(False)
         self.progreso.setRange(0, 0)
         self.resumen.setText("Corrigiendo en AirVault…")
+        # Por bitácora que de verdad se va a abrir en Edge: las de revisión
+        # manual salen del plan resueltas y no cuestan nada de navegador.
+        self._arrancar_cronometro(
+            TAREA_CORRECCION, len(self._aplicables(plan))
+        )
         worker.start()
 
     def _autorizado(self, plan: list[Correccion]) -> bool:
@@ -566,6 +644,7 @@ class WebReportsWindow(QDialog):
 
     def _al_corregir(self, resultados: object) -> None:
         """Cuenta lo que se hizo y lo que no, sin esconder lo segundo."""
+        self._cerrar_cronometro(aprender=True)
         resultados = list(resultados)
         hechos = [resultado for resultado in resultados if resultado.hecho]
         intentados = [
@@ -613,6 +692,7 @@ class WebReportsWindow(QDialog):
 
     def _al_fallar_correccion(self, mensaje: str) -> None:
         """Un fallo del corrector no se presenta como fallo de consulta."""
+        self._cerrar_cronometro(aprender=False)
         self.resumen.setText(f"Error al corregir: {mensaje}")
 
     @staticmethod
@@ -643,18 +723,67 @@ class WebReportsWindow(QDialog):
         worker.resultado.connect(self._al_recibir)
         worker.fallo.connect(self._al_fallar)
         worker.cancelado.connect(self._al_cancelar)
+        worker.paso.connect(self._al_pasar)
         worker.finished.connect(self._al_terminar)
         worker.finished.connect(worker.deleteLater)
         self._worker = worker
         self._habilitar(False)
         self.progreso.setRange(0, 0)
         self.resumen.setText("Consultando Web Reports…")
+        self._arrancar_cronometro(TAREA_CONSULTA, len(filtros))
         worker.start()
 
     def _al_avanzar(self, texto: str) -> None:
         self.resumen.setText(texto)
 
+    def _arrancar_cronometro(self, tarea: str, unidades: int) -> None:
+        """Pone el reloj en marcha con lo que costó ese trabajo la vez pasada."""
+        self._estimacion = Estimacion(tarea, unidades)
+        self._al_latir()
+        self._timer.start()
+
+    def _al_pasar(self, hechas: int, total: int) -> None:
+        """Unidades terminadas, contadas por el hilo que conduce Edge.
+
+        El total llega con cada aviso porque es el hilo el que sabe cuántas
+        piezas tenía el trabajo de verdad.
+        """
+        if self._estimacion is not None:
+            self._estimacion.avanzo(hechas, total)
+
+    def _al_latir(self) -> None:
+        """Repinta las tres cifras, cuatro veces por segundo."""
+        estimacion = self._estimacion
+        if estimacion is None:
+            return
+        transcurrido = estimacion.transcurrido()
+        restante = estimacion.restante()
+        self.cronometro.actualizar(
+            transcurrido, restante, transcurrido + restante
+        )
+
+    def _cerrar_cronometro(self, aprender: bool) -> None:
+        """Para el reloj donde acabó el trabajo.
+
+        Solo se guardan las medidas de una corrida que llegó al final. Una
+        cancelada o una que falló dejó fuera lo que faltaba, y guardarla
+        enseñaría la próxima vez un trabajo más corto de lo que es; en esas
+        queda el tiempo que se gastó y ningún pronóstico que ya no se debe.
+        """
+        estimacion = self._estimacion
+        self._timer.stop()
+        self._estimacion = None
+        if estimacion is None:
+            return
+        transcurrido = estimacion.transcurrido()
+        if not aprender:
+            self.cronometro.actualizar(transcurrido, None, None)
+            return
+        estimacion.aprender()
+        self.cronometro.actualizar(transcurrido, 0.0, transcurrido)
+
     def _al_recibir(self, excepciones: object) -> None:
+        self._cerrar_cronometro(aprender=True)
         self._resultados = list(excepciones)
         self._llenar_tabla(self._resultados)
         mal_indexadas = sum(
@@ -798,12 +927,20 @@ class WebReportsWindow(QDialog):
         self._habilitar(False)
         self.progreso.setRange(0, 0)
         self.resumen.setText(f"Abriendo {etiqueta} en Web Search.")
+        # Sin unidades: abrir una búsqueda es la apertura y nada más.
+        self._arrancar_cronometro(TAREA_BUSQUEDA, 0)
         worker.start()
 
     def _al_abrir(self, etiqueta: object) -> None:
+        # La búsqueda no tiene unidades, así que la apertura no termina
+        # hasta aquí: lo que costó abrirla es el trabajo entero.
+        if self._estimacion is not None:
+            self._estimacion.abrio()
+        self._cerrar_cronometro(aprender=True)
         self.resumen.setText(f"Abierto en Web Search: {etiqueta}.")
 
     def _al_fallar_al_abrir(self, mensaje: str) -> None:
+        self._cerrar_cronometro(aprender=False)
         self.resumen.setText(f"No se pudo abrir Web Search: {mensaje}")
 
     def _al_cancelar_la_apertura(self) -> None:
@@ -812,17 +949,23 @@ class WebReportsWindow(QDialog):
         Cuando llega la cancelación, Edge ya está arriba con la búsqueda
         dentro: lo único que queda por decir es dónde quedó la ventana.
         """
+        self._cerrar_cronometro(aprender=False)
         self.resumen.setText(
             "Web Search quedó abierto."
         )
 
     def _al_fallar(self, mensaje: str) -> None:
+        self._cerrar_cronometro(aprender=False)
         self.resumen.setText(f"Error al consultar: {mensaje}")
 
     def _al_cancelar(self) -> None:
+        self._cerrar_cronometro(aprender=False)
         self.resumen.setText("Consulta cancelada.")
 
     def _al_terminar(self) -> None:
+        # Por si el hilo acabó sin decir cómo: el reloj no se queda corriendo
+        # detrás de un trabajo que ya no existe.
+        self._cerrar_cronometro(aprender=False)
         self._worker = None
         self._habilitar(True)
         self.progreso.setRange(0, 100)

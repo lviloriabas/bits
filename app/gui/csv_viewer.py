@@ -22,7 +22,6 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QColor,
     QFont,
-    QIcon,
     QImage,
     QIntValidator,
     QKeySequence,
@@ -76,37 +75,29 @@ from app.gui.export_options import ExportOptionsGroup
 from app.gui.field_selector import ImportantFieldsDialog
 from app.gui.responsive import ROOMY, Density, density_for, fit_to_screen
 from app.gui.table_sort import ModelSortController
-from app.gui.tokens import (
-    FONT_CAPTION_PT,
-    SPACE_S,
-    TEXT_DISABLED,
-    TEXT_SECONDARY,
-    accent_color,
-)
+from app.gui.theme import gestor_tema
+from app.gui.tokens import FONT_CAPTION_PT, SPACE_S, accent_color, paleta
 from app.reports.outputs import complete_csv_path
 from app.reports.csv_reporter import CsvReporter
 from app.gui.widgets import (
-    DATA_TABLE_QSS,
-    PANE_BG,
-    PANE_BORDER,
-    PANE_CONTROL_BG,
-    PANE_CONTROL_HOVER,
-    PANE_STATUS_COLORS,
-    PANE_SURFACE_BG,
-    PANE_TEXT,
     TABLE_RADIUS,
     TABLE_SELECTION_BG,
-    ZOOM_OVERLAY_QSS,
     ElidedLabel,
     ZoomableScrollArea,
     ZoomOverlay,
+    al_cambiar_tema,
+    data_table_qss,
     hide_overlay_when_tight,
     keep_overlay_clear_of_scrollbars,
+    load_icon,
+    pane_status_colors,
+    pintar_del_tema,
     scrollbars_qss,
     style_data_table,
     window_stylesheet,
     style_dark_pane,
     style_pdf_surface,
+    zoom_overlay_qss,
 )
 from app.utils.important_fields import (
     IMPORTANT_FIELDS_FILENAME,
@@ -121,7 +112,6 @@ from app.validation.page_status import needs_review
 
 
 _PROGRAM_DIR = Path(__file__).resolve().parents[2]
-_ASSETS = _PROGRAM_DIR / "assets"
 _RENDER_DPI = 150
 _MIN_ZOOM = 0.4
 _MAX_ZOOM = 4.0
@@ -143,39 +133,41 @@ _EXPORT_TOOLTIP = (
     "Volver a generar CSV, JSON y PDF con las opciones actuales, sin "
     "reprocesar. Los PDF repetidos se numeran (-2, -3…)"
 )
-# El panel se estiliza a sí mismo para verse igual dentro y fuera del visor.
-_PDF_PANE_QSS = (
-    # El panel va en el mismo gris oscuro que la tabla a la que acompaña: en
-    # blanco quedaba como un bloque luminoso al lado de ella.
-    f"#embeddedPdfPane {{ background: {PANE_BG};"
-    f" border: 1px solid {PANE_SURFACE_BG}; border-radius: {TABLE_RADIUS}px; }}"
-    # Mismo radio que el marco que la contiene: quedaba en 4px, un cuadro
-    # distinto al del resto de la aplicacion (QGroupBox, tablas, timeSummary).
-    f"#pdfSurface {{ background: {PANE_SURFACE_BG};"
-    f" border: 1px solid {PANE_BORDER}; border-radius: {TABLE_RADIUS}px; }}"
-    # Sin fondo explícito, la etiqueta pinta el color de ventana y tapa la
-    # superficie oscura justo cuando solo muestra el mensaje de estado.
-    f"#pdfPage {{ color: {PANE_TEXT}; padding: 0; background: transparent; }}"
-    f"#embeddedPdfPane QLabel {{ color: {PANE_TEXT}; background: transparent; }}"
-    # Los campos suben un escalón sobre el panel para seguir leyéndose como
-    # controles y no como parte del fondo.
-    "#embeddedPdfPane QComboBox, #embeddedPdfPane QLineEdit,"
-    "#embeddedPdfPane QPushButton, #embeddedPdfPane QToolButton {"
-    f" background: {PANE_CONTROL_BG}; color: {PANE_TEXT};"
-    f" border: 1px solid {PANE_BORDER}; border-radius: {TABLE_RADIUS}px; padding: 2px 6px; }}"
-    "#embeddedPdfPane QComboBox:hover, #embeddedPdfPane QPushButton:hover,"
-    "#embeddedPdfPane QToolButton:hover {"
-    f" background: {PANE_CONTROL_HOVER}; }}"
-    "#embeddedPdfPane QComboBox:disabled, #embeddedPdfPane QPushButton:disabled,"
-    "#embeddedPdfPane QToolButton:disabled {"
-    f" background: {PANE_BG}; color: {TEXT_DISABLED}; }}"
-    # La lista desplegable es una ventana aparte y no hereda el fondo.
-    "#embeddedPdfPane QComboBox QAbstractItemView {"
-    f" background: {PANE_CONTROL_BG}; color: {PANE_TEXT};"
-    f" selection-background-color: palette(highlight); }}"
-    # El recuadro de zoom va al final: sus reglas y las del panel tienen la
-    # misma especificidad y aquí gana la última.
-) + scrollbars_qss("#embeddedPdfPane") + ZOOM_OVERLAY_QSS
+def _pdf_pane_qss() -> str:
+    """El panel se viste a sí mismo para verse igual dentro y fuera del visor."""
+    c = paleta()
+    return (
+        # El panel va en la misma superficie que la tabla a la que acompaña: con
+        # otro fondo quedaba como un bloque suelto al lado de ella.
+        f"#embeddedPdfPane {{ background: {c.PANE_BG};"
+        f" border: 1px solid {c.PANE_SURFACE_BG}; border-radius: {TABLE_RADIUS}px; }}"
+        # Mismo radio que el marco que la contiene: quedaba en 4px, un cuadro
+        # distinto al del resto de la aplicacion (QGroupBox, tablas, timeSummary).
+        f"#pdfSurface {{ background: {c.PANE_SURFACE_BG};"
+        f" border: 1px solid {c.PANE_BORDER}; border-radius: {TABLE_RADIUS}px; }}"
+        # Sin fondo explícito, la etiqueta pinta el color de ventana y tapa la
+        # superficie del panel justo cuando solo muestra el mensaje de estado.
+        f"#pdfPage {{ color: {c.PANE_TEXT}; padding: 0; background: transparent; }}"
+        f"#embeddedPdfPane QLabel {{ color: {c.PANE_TEXT}; background: transparent; }}"
+        # Los campos suben un escalón sobre el panel para seguir leyéndose como
+        # controles y no como parte del fondo.
+        "#embeddedPdfPane QComboBox, #embeddedPdfPane QLineEdit,"
+        "#embeddedPdfPane QPushButton, #embeddedPdfPane QToolButton {"
+        f" background: {c.PANE_CONTROL_BG}; color: {c.PANE_TEXT};"
+        f" border: 1px solid {c.PANE_BORDER}; border-radius: {TABLE_RADIUS}px; padding: 2px 6px; }}"
+        "#embeddedPdfPane QComboBox:hover, #embeddedPdfPane QPushButton:hover,"
+        "#embeddedPdfPane QToolButton:hover {"
+        f" background: {c.PANE_CONTROL_HOVER}; }}"
+        "#embeddedPdfPane QComboBox:disabled, #embeddedPdfPane QPushButton:disabled,"
+        "#embeddedPdfPane QToolButton:disabled {"
+        f" background: {c.PANE_BG}; color: {c.TEXT_DISABLED}; }}"
+        # La lista desplegable es una ventana aparte y no hereda el fondo.
+        "#embeddedPdfPane QComboBox QAbstractItemView {"
+        f" background: {c.PANE_CONTROL_BG}; color: {c.PANE_TEXT};"
+        f" selection-background-color: palette(highlight); }}"
+        # El recuadro de zoom va al final: sus reglas y las del panel tienen la
+        # misma especificidad y aquí gana la última.
+    ) + scrollbars_qss("#embeddedPdfPane") + zoom_overlay_qss()
 
 
 def _folder_key(path: Path | str) -> str:
@@ -782,11 +774,11 @@ class CsvColumnModeButton(QToolButton):
         self.setIconSize(QSize(20, 20))
         self.setAccessibleName("Columnas visibles del CSV")
         self.toggled.connect(self._sync_visuals)
-        self._sync_visuals(True)
+        al_cambiar_tema(self, lambda: self._sync_visuals(self.isChecked()))
 
     def _sync_visuals(self, important_only: bool) -> None:
-        icon_name = "columns_important.svg" if important_only else "columns_all.svg"
-        self.setIcon(QIcon(str(_ASSETS / icon_name)))
+        icon_name = "columns_important" if important_only else "columns_all"
+        self.setIcon(load_icon(icon_name, paleta().PANE_TEXT))
         self.setText(
             "Columnas importantes" if important_only else "Todas las columnas"
         )
@@ -909,6 +901,14 @@ class EmbeddedPdfViewer(QFrame):
         self._loader: PdfPageLoader | None = None
         self._loader_thread: QThread | None = None
         self._build_ui()
+        # La hoja de este panel la compone el propio panel, así que es él quien
+        # la vuelve a pedir cuando cambia el tema.
+        gestor_tema().cambiado.connect(self._on_tema_cambiado)
+
+    def _on_tema_cambiado(self, _nombre: str) -> None:
+        """Rehace la hoja del panel con los tonos del tema nuevo."""
+        self.setStyleSheet(_pdf_pane_qss())
+        self._apply_field_overlay()
 
     # ── Render en segundo plano ─────────────────────────────────────────
 
@@ -961,7 +961,7 @@ class EmbeddedPdfViewer(QFrame):
         ancho que le toca al panel (dos quintos de la ventana) no cabe junto
         a una paginación centrada sin montarse encima de ella.
         """
-        self.setStyleSheet(_PDF_PANE_QSS)
+        self.setStyleSheet(_pdf_pane_qss())
         style_dark_pane(self)
         self.setMinimumWidth(self._density.pdf_pane_min_width)
         layout = QVBoxLayout(self)
@@ -1495,30 +1495,45 @@ class EmbeddedPdfViewer(QFrame):
             # Vale tanto antes de abrir un CSV como para uno sin PDF anotados;
             # el detalle lo da el mensaje del área de página.
             text = "Sin PDF de origen para mostrar."
-            color = TEXT_SECONDARY
+            estado = ""
         elif not available:
             text = (
                 f"No se encontró el PDF de origen ({names})."
                 if missing == 1
                 else f"No se encontraron los {missing} PDF de origen ({names})."
             ) + " Use «Ubicar PDF…»."
-            color = PANE_STATUS_COLORS["ERROR"]
+            estado = "ERROR"
         elif missing:
             text = (
                 f"{available} de {available + missing} PDF de origen "
                 f"disponibles · {'falta' if missing == 1 else 'faltan'} {names}."
             )
-            color = PANE_STATUS_COLORS["WARNING"]
+            estado = "WARNING"
         else:
             text = (
                 "1 PDF de origen disponible."
                 if available == 1
                 else f"{available} PDF de origen disponibles."
             )
-            color = PANE_STATUS_COLORS["OK"]
+            estado = "OK"
         self.source_status.setText(text)
-        # Gana a la regla general de QLabel del panel, que va sin id.
-        self.source_status.setStyleSheet(f"#pdfSourceStatus {{ color: {color}; }}")
+        # Se guarda el estado y no el color para poder volver a resolverlo al
+        # cambiar de tema: el verde que se lee de noche no es el que se lee de
+        # día, y este rótulo se queda puesto hasta que cambia el origen.
+        self._origen_estado = estado
+        pintar_del_tema(self.source_status, self._hoja_origen)
+
+    def _hoja_origen(self) -> str:
+        """El color del rótulo de origen, en los tonos del tema de ahora.
+
+        Lleva el id delante para ganarle a la regla general de ``QLabel`` del
+        panel, que va sin él.
+        """
+        estado = getattr(self, "_origen_estado", "")
+        color = (
+            pane_status_colors()[estado] if estado else paleta().TEXT_SECONDARY
+        )
+        return f"#pdfSourceStatus {{ color: {color}; }}"
 
     def _sync_zoom_controls(self) -> None:
         has_page = self._source is not None
@@ -1613,6 +1628,13 @@ class CsvViewerWindow(QMainWindow):
         # layout y la ventana se abría cien píxeles más alta de lo que pedía.
         self._build_ui()
         self._install_zoom_shortcuts()
+        # Igual que la ventana principal: la hoja lleva el fragmento de la
+        # densidad, así que la rehace ella cuando cambia el tema.
+        gestor_tema().cambiado.connect(self._on_tema_cambiado)
+
+    def _on_tema_cambiado(self, _nombre: str) -> None:
+        """Rehace la hoja de la ventana con los tonos del tema nuevo."""
+        self._apply_density_stylesheet()
 
     def _install_zoom_shortcuts(self) -> None:
         """Atajos Ctrl++ / Ctrl+- sobre la página, como en la ventana principal.
@@ -1733,7 +1755,9 @@ class CsvViewerWindow(QMainWindow):
         self.search_next.clicked.connect(lambda: self._move_search(1))
         search_row.addWidget(self.search_next)
         self.search_context = ElidedLabel(_SEARCH_HINT)
-        self.search_context.setStyleSheet(f"color: {TEXT_SECONDARY};")
+        pintar_del_tema(
+            self.search_context, lambda: f"color: {paleta().TEXT_SECONDARY};"
+        )
         self.search_context.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
@@ -1817,7 +1841,9 @@ class CsvViewerWindow(QMainWindow):
         status_row = QHBoxLayout()
         status_row.setSpacing(SPACE_S)
         self.status_label = ElidedLabel(self._summary)
-        self.status_label.setStyleSheet(f"color: {TEXT_SECONDARY};")
+        pintar_del_tema(
+            self.status_label, lambda: f"color: {paleta().TEXT_SECONDARY};"
+        )
         status_row.addWidget(self.status_label, 1)
         self.btn_depurar = QPushButton("Depurar")
         self.btn_depurar.setEnabled(False)
@@ -1838,7 +1864,7 @@ class CsvViewerWindow(QMainWindow):
     def _apply_density_stylesheet(self) -> None:
         """Hoja de la ventana con el fragmento de medidas de la densidad."""
         self.setStyleSheet(
-            window_stylesheet(DATA_TABLE_QSS + self._density.qss)
+            window_stylesheet(data_table_qss() + self._density.qss)
         )
 
     def _update_responsive_layout(self) -> None:

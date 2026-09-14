@@ -391,7 +391,7 @@ def render_pdf_pages(pdf_path: Path, dpi: int = 200) -> List[np.ndarray]:
             elif pix.n == 4:
                 arr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
             else:
-                arr = arr[:, :, ::-1]  # RGB → BGR
+                arr = arr[:, :, ::-1]  # RGB -> BGR
 
             images.append(np.ascontiguousarray(arr))
             logger.debug(f"Página {page_num + 1} renderizada: "

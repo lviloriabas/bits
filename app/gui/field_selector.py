@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.gui.responsive import fit_to_screen
+from app.gui.theme import gestor_tema
 from app.gui.tokens import SPACE_S
 from app.gui.widgets import window_stylesheet
 
@@ -38,13 +39,24 @@ class ImportantFieldsDialog(QDialog):
         # En una pantalla baja el alto pedido no cabe y los botones de
         # aceptar y cancelar quedan por debajo del borde.
         self._density = fit_to_screen(self, 420, 520)
-        self.setStyleSheet(window_stylesheet(self._density.qss))
+        self._aplicar_hoja()
+        # La hoja lleva el fragmento de la densidad, así que la rehace el
+        # propio cuadro cuando cambia el tema.
+        gestor_tema().cambiado.connect(self._al_cambiar_tema)
         self.columns = list(columns)
         self.checks: dict[str, QCheckBox] = {}
         # Marcar en bloque no debe emitir una selección por casilla: cada
         # emisión guarda el archivo y repinta el visor.
         self._bulk_update = False
         self._build_ui(set(selected))
+
+    def _aplicar_hoja(self) -> None:
+        """La hoja del cuadro, con los tonos y las medidas de ahora."""
+        self.setStyleSheet(window_stylesheet(self._density.qss))
+
+    def _al_cambiar_tema(self, _nombre: str) -> None:
+        """Rehace la hoja del cuadro con los tonos del tema nuevo."""
+        self._aplicar_hoja()
 
     def _build_ui(self, selected: set[str]) -> None:
         layout = QVBoxLayout(self)

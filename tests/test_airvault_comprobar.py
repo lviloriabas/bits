@@ -973,7 +973,7 @@ def test_el_estado_local_no_le_pregunta_nada_a_airvault(tmp_path):
     trabajo, _cliente = trabajo_subido(tmp_path)
     parte = estado_local(trabajo)
     assert parte.estado == BUSCANDO
-    assert "falta comprobar" in parte.detalle
+    assert "falta revisar" in parte.detalle
 
 
 def test_busqueda_amplia_no_inspecciona_batches_ya_indexados(tmp_path):
@@ -1203,6 +1203,7 @@ def test_el_worker_reintenta_una_pagina_que_airvault_deja_amarilla(tmp_path):
     }
     terminado: list[dict] = []
     worker = TrabajoAirVaultWorker("indexar", estado)
+    worker._dormir = lambda _segundos: None
     worker.indexado.connect(terminado.append)
 
     worker._indexar()
@@ -1234,10 +1235,53 @@ def test_worker_reenvia_la_fecha_si_airvault_no_la_conservo(tmp_path):
     cli = PierdeFecha(paginas=base.paginas, picklist=base.picklist, page_count=2)
     plan = trabajo.planificar(cli)
     worker = TrabajoAirVaultWorker("indexar", {"tanda_hecha": True})
+    worker._dormir = lambda _segundos: None
     datos = worker._ejecutar_indexado([trabajo], [plan], cli)
     assert datos["validas"] == datos["total"] == 2
     assert [p for p, _v, _e in cli.escrituras] == [1, 2, 1]
     assert cli.escrituras[-1][1][CAMPO_END_DATE] == "08/12/2026"
+
+
+def test_worker_completa_aunque_el_mapa_tarde_en_ver_la_pagina_verde(tmp_path):
+    """Recién verificado, el mapa del batch puede traer aún una amarilla.
+
+    Antes el cierre se intentaba una sola vez y el batch quedaba en la cola
+    hasta la siguiente comprobación periódica.
+    """
+    from app.airvault.client import PaginaDelLote
+    from app.gui.airvault_window import ESPERAS_CIERRE, TrabajoAirVaultWorker
+
+    class MapaAtrasado(ClienteFalso):
+        mapas = 0
+
+        def paginas_del_lote(self, batch_id):
+            self.mapas += 1
+            paginas = super().paginas_del_lote(batch_id)
+            if self.mapas > 1:
+                return paginas
+            return [
+                PaginaDelLote(p.pagina, 3, p.inicio_documento, p.borrada)
+                if p.pagina == 1 else p
+                for p in paginas
+            ]
+
+    trabajo, base = trabajo_subido(tmp_path)
+    trabajo.fijar_lote("003SRO")
+    cli = MapaAtrasado(
+        paginas=base.paginas, lotes=base.lotes, picklist=base.picklist,
+        page_count=2,
+    )
+    plan = trabajo.planificar(cli)
+    worker = TrabajoAirVaultWorker("indexar", {"tanda_hecha": True})
+    dormidas: list = []
+    worker._dormir = dormidas.append
+
+    datos = worker._ejecutar_indexado([trabajo], [plan], cli, completar=True)
+
+    assert datos["validas"] == datos["total"] == 2
+    assert cli.completados == ["003SRO"]
+    assert [cierre.completado for _t, cierre in datos["cierres"]] == [True]
+    assert dormidas == [ESPERAS_CIERRE[0]]
 
 
 # ── la orden de subir dada a mano ──────────────────────────────────

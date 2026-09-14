@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Sequence
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QKeySequence, QShortcut
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -48,21 +48,32 @@ from app.airvault.mapping import fecha_airvault
 from app.airvault.model import EstadoRegistro, Registro
 from app.gui.responsive import Density, fit_to_screen
 from app.gui.table_sort import ColumnSortController
-from app.gui.tokens import SPACE_S, TEXT_SECONDARY
+from app.gui.theme import gestor_tema
+from app.gui.tokens import SPACE_S, paleta
 from app.gui.widgets import (
-    DATA_TABLE_QSS,
-    PANE_STATUS_COLORS,
     ElidedLabel,
     align_vertical_scrollbar_to_header,
+    data_table_qss,
+    pane_status_colors,
+    pintar_celda_del_tema,
+    pintar_del_tema,
     size_columns_once,
     style_data_table,
     window_stylesheet,
 )
 from app.utils.important_fields import default_important_columns
 
-# El mismo gris con el que las dos ventanas escriben sus líneas de ayuda.
-COLOR_AYUDA = TEXT_SECONDARY
-COLOR_HECHO = PANE_STATUS_COLORS["OK"]
+# Los mismos tonos con los que las dos ventanas escriben sus líneas de ayuda
+# y marcan lo que ya está hecho. Son funciones y no constantes porque cambian
+# con el tema.
+def color_ayuda() -> str:
+    """El gris de las líneas de ayuda."""
+    return paleta().TEXT_SECONDARY
+
+
+def color_hecho() -> str:
+    """El verde de lo que ya está subido."""
+    return pane_status_colors()["OK"]
 
 _AYUDA_BUSQUEDA = "La búsqueda selecciona cada coincidencia."
 
@@ -203,8 +214,21 @@ class _ListaBuscable(QDialog):
         """
         densidad = fit_to_screen(self, ancho, alto)
         self._densidad = densidad
-        self.setStyleSheet(window_stylesheet(DATA_TABLE_QSS + densidad.qss))
+        self._aplicar_hoja()
+        # La hoja lleva el fragmento de la densidad, así que la vuelve a pedir
+        # la propia ventana cuando cambia el tema.
+        gestor_tema().cambiado.connect(self._al_cambiar_tema)
         return densidad
+
+    def _aplicar_hoja(self) -> None:
+        """La hoja de la ventana, con los tonos y las medidas de ahora."""
+        self.setStyleSheet(
+            window_stylesheet(data_table_qss() + self._densidad.qss)
+        )
+
+    def _al_cambiar_tema(self, _nombre: str) -> None:
+        """Rehace la hoja de la ventana con los tonos del tema nuevo."""
+        self._aplicar_hoja()
 
     def mostrar(self) -> None:
         """La trae al frente, esté recién abierta o ya abierta detrás."""
@@ -247,7 +271,7 @@ class _ListaBuscable(QDialog):
         # de ``ElidedLabel``, que la termina en puntos suspensivos y deja la
         # entera en el tooltip; un QLabel a secas la cortaba a media palabra.
         self.busqueda_ayuda = ElidedLabel(_AYUDA_BUSQUEDA)
-        self.busqueda_ayuda.setStyleSheet(f"color: {COLOR_AYUDA};")
+        pintar_del_tema(self.busqueda_ayuda, lambda: f"color: {color_ayuda()};")
         self.busqueda_ayuda.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
@@ -533,11 +557,11 @@ class BitacorasDelBatch(_ListaBuscable):
                     # El mismo gris con el que la lista de batches marca lo
                     # que no llega a existir en AirVault: la divisoria se
                     # borra al cerrar el batch.
-                    item.setForeground(Qt.GlobalColor.gray)
+                    pintar_celda_del_tema(item, "TEXT_TERTIARY")
                 elif registro.estado is EstadoRegistro.ESCRITA:
                     # El mismo verde de la tabla de batches, y significa lo
                     # mismo: eso ya está escrito en AirVault.
-                    item.setForeground(QColor(COLOR_HECHO))
+                    pintar_celda_del_tema(item, "STATUS_OK")
                 self.tabla.setItem(fila, columna, item)
 
     def _cargar_paginas(self, paginas: Sequence[Registro]) -> None:
@@ -656,7 +680,7 @@ class VistaPreviaBatches(_ListaBuscable):
         self.ayuda = QLabel(
             "Elija un batch para ver las bitácoras que lleva dentro."
         )
-        self.ayuda.setStyleSheet(f"color: {COLOR_AYUDA};")
+        pintar_del_tema(self.ayuda, lambda: f"color: {color_ayuda()};")
         self.ayuda.setWordWrap(True)
         cuerpo.addWidget(self.ayuda)
 
@@ -701,11 +725,11 @@ class VistaPreviaBatches(_ListaBuscable):
                         | Qt.AlignmentFlag.AlignVCenter
                     )
                 if previsto.subido:
-                    item.setForeground(QColor(COLOR_HECHO))
+                    pintar_celda_del_tema(item, "STATUS_OK")
                 elif not previsto.existe:
                     # Gris es lo que todavía no existe en ninguna parte: el
                     # batch que solo está previsto.
-                    item.setForeground(Qt.GlobalColor.gray)
+                    pintar_celda_del_tema(item, "TEXT_TERTIARY")
                 self.tabla.setItem(fila, columna, item)
 
     def _elegido(self):

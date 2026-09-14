@@ -109,7 +109,7 @@ def test_eliminar_el_registro_de_una_fila_que_no_es_la_abierta(
         assert papelera == [manifiesto]
         assert not manifiesto.exists()
         # Y la ventana sigue donde estaba, con su ejecución cargada.
-        assert Path(ventana.corrida_edit.text()) == segunda
+        assert ventana.corrida() == segunda
         assert primera.exists()
     finally:
         ventana.close()
@@ -255,7 +255,7 @@ def test_no_se_elimina_la_ejecucion_que_se_esta_subiendo(
 def test_una_ejecucion_de_fuera_de_output_no_se_elimina_desde_aqui(
     app, tmp_path, papelera, monkeypatch
 ):
-    """«Otra ejecución…» abre CSV de cualquier sitio; eso no se borra aquí."""
+    """La ventana puede apuntar a un CSV de fuera; eso no se borra aquí."""
     suelto = tmp_path / "por_ahi" / "datos" / "suelta.csv"
     suelto.parent.mkdir(parents=True)
     suelto.write_text("file,page\n", encoding="utf-8")

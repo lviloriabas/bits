@@ -38,7 +38,7 @@ MIN_STRUCTURE_INK_RATIO = 0.004
 
 @dataclass
 class TransformResult:
-    """Transformación de similitud página → referencia.
+    """Transformación de similitud página -> referencia.
 
     Mapea coordenadas de la página al sistema de la referencia:
     [s·cosθ, −s·sinθ, tx; s·sinθ, s·cosθ, ty]
@@ -279,7 +279,7 @@ def _phase_transform(
 def compute_similarity_transform(
     page: np.ndarray, template: np.ndarray, config: AppConfig
 ) -> TransformResult:
-    """Estima la similitud (rot + escala uniforme + traslación) página→referencia.
+    """Estima la similitud (rot + escala uniforme + traslación) página->referencia.
 
     Guardarraíles: si hay pocos inliers o los parámetros son absurdos
     (rotación/escala/traslación fuera de rango de escáner), la página se

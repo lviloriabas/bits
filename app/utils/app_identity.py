@@ -56,12 +56,17 @@ def set_windows_process_taskbar_identity() -> str | None:
     return app_id
 
 
-def set_windows_native_window_style(window: Any) -> bool:
-    """Activa el marco oscuro, las esquinas y el fondo nativos de Windows.
+def set_windows_native_window_style(window: Any, oscuro: bool = True) -> bool:
+    """Activa el marco, las esquinas y el fondo nativos de Windows.
 
     Son atributos de DWM y no sustituyen ningun control Qt. En versiones de
     Windows que no los conocen, cada atributo se omite sin impedir que la
     ventana se abra.
+
+    ``oscuro`` es lo unico que decide el tema aqui: pinta la barra de titulo,
+    que es la unica parte de la ventana que no dibuja Qt. Sin este parametro,
+    la aplicacion en tema claro se quedaba con una barra de titulo negra sobre
+    una ventana blanca.
     """
     if sys.platform != "win32":
         return False
@@ -88,9 +93,10 @@ def set_windows_native_window_style(window: Any) -> bool:
                 ctypes.sizeof(native_value),
             ) == 0
 
-        dark = set_int(DWMWA_USE_IMMERSIVE_DARK_MODE, 1)
+        modo = 1 if oscuro else 0
+        dark = set_int(DWMWA_USE_IMMERSIVE_DARK_MODE, modo)
         if not dark:
-            dark = set_int(DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1, 1)
+            dark = set_int(DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1, modo)
         rounded = set_int(
             DWMWA_WINDOW_CORNER_PREFERENCE,
             DWM_WINDOW_CORNER_PREFERENCE_ROUND,

@@ -80,6 +80,7 @@ from app.gui.csv_viewer import (
     CsvViewerWindow,
     apply_csv_column_visibility,
 )
+from app.gui.cronometro import Cronometro, cronometro_qss, formato_reloj
 from app.gui.eta import estimate_remaining_seconds, wall_ms_per_page
 from app.gui.export_options import ExportOptionsGroup
 from app.gui.field_selector import ImportantFieldsDialog
@@ -106,32 +107,35 @@ from app.gui.automatizacion import (
 )
 from app.gui.csv_model import STATUS_COLORS as CSV_STATUS_COLORS
 from app.gui.depuracion_dialog import DEPURAR_TOOLTIP, DepurarPaginasDialog
+from app.gui.theme import aplicar_tema, gestor_tema
 from app.gui.tokens import (
-    CONTROL_BG,
     CONTROL_HEIGHT,
+    TEMA_CLARO,
+    TEMA_OSCURO,
     CONTROL_HEIGHT_COMPACT,
     FONT_CAPTION_PT,
     FONT_SUBTITLE_PT,
     RADIUS_CARD,
-    STROKE,
-    STROKE_STRONG,
-    TEXT,
-    TEXT_SECONDARY,
     WEIGHT_STRONG,
+    paleta,
+    qss_vars,
+    tema,
 )
 from app.gui.widgets import (
-    DATA_TABLE_QSS,
+    ICON_SIZE,
     TABLE_RADIUS,
     ElidedLabel,
     MultiSelectMenu,
-    TABLE_BASE_BG,
     ZoomableScrollArea,
     ZoomOverlay,
+    al_cambiar_tema,
     configure_combo_box,
     configure_menu_button,
+    data_table_qss,
     hide_overlay_when_tight,
     keep_overlay_clear_of_scrollbars,
     load_icon,
+    pintar_del_tema,
     style_data_table,
     style_pdf_surface,
     window_stylesheet,
@@ -212,12 +216,20 @@ _TIMES_SCROLL_MIN_HEIGHT = 26
 # entren en dos columnas dentro de un escritorio lógico de 1280 px.
 _TEMPLATE_MIN_WIDTH = 200
 _COMPACT_TEMPLATE_MIN_WIDTH = 180
-_PREVIEW_EMPTY_HTML = (
-    f'<div style="font-size:{FONT_SUBTITLE_PT}pt; font-weight:600; '
-    f'color:{TEXT};">Vista previa</div>'
-    f'<div style="margin-top:8px; color:{TEXT_SECONDARY};">'
-    "Seleccione un archivo PDF para comenzar.</div>"
-)
+def _preview_empty_html() -> str:
+    """El rótulo de la vista previa vacía, en los tonos del tema de ahora.
+
+    Va en HTML y no en la hoja de estilo porque son dos líneas con pesos
+    distintos dentro de una sola etiqueta, así que el color viaja con el
+    texto: se vuelve a armar cada vez que se pide.
+    """
+    c = paleta()
+    return (
+        f'<div style="font-size:{FONT_SUBTITLE_PT}pt; font-weight:600; '
+        f'color:{c.TEXT};">Vista previa</div>'
+        f'<div style="margin-top:8px; color:{c.TEXT_SECONDARY};">'
+        "Seleccione un archivo PDF para comenzar.</div>"
+    )
 
 
 _COLORS = {
@@ -249,7 +261,7 @@ def _visible_preview_fields(
 # Los rótulos secundarios de la ventana. Todo en puntos: los «10px» que había
 # aquí no seguían el escalado de Windows, así que en un monitor al 150 % el
 # panel de tiempos se encogía mientras el resto de la ventana crecía.
-_WINDOW_QSS = f"""
+_WINDOW_QSS_PLANTILLA = """
 QLabel#previewPlaceholder {{
     color: {TEXT_SECONDARY};
     background-color: transparent;
@@ -296,29 +308,32 @@ QProgressBar#timeBar::chunk {{
     border-radius: 3px;
 }}
 #filePages {{ color: {TEXT_SECONDARY}; }}
-#timeSummary {{
-    background-color: {CONTROL_BG};
-    border: 1px solid {STROKE};
-    border-radius: {RADIUS_CARD}px;
-}}
-#timeSummary QLabel[role="caption"] {{
-    color: {TEXT_SECONDARY};
-    font-size: {FONT_CAPTION_PT}pt;
-}}
-#timeSummary QLabel[role="value"] {{
-    color: {TEXT};
-    font-size: {FONT_CAPTION_PT}pt;
-    font-weight: {WEIGHT_STRONG};
-}}
-#timeSummary QFrame[role="metricDivider"] {{
-    background-color: {STROKE_STRONG};
-    border: 0;
-}}
 QLabel#fileProgressEmpty {{
     color: {TEXT_SECONDARY};
     padding: 12px;
 }}
-""" + DATA_TABLE_QSS
+QToolButton#themeToggle {{
+    padding: 0;
+}}
+"""
+
+
+def _window_qss() -> str:
+    """Los rótulos propios de esta ventana, en los tonos del tema de ahora.
+
+    Va con ``format`` y no con una f de literal porque la plantilla se escribe
+    una vez y se rellena cada vez que cambia el tema; escrita como f se habría
+    resuelto al importar el módulo y se habría quedado con los grises de ese
+    momento.
+    """
+    return (
+        # ``TABLE_RADIUS`` es el radio de los controles con el nombre que usa
+        # la tabla; vive en ``widgets`` y no en la paleta, así que se le pasa
+        # aparte en vez de colarlo entre los colores.
+        _WINDOW_QSS_PLANTILLA.format(TABLE_RADIUS=TABLE_RADIUS, **qss_vars())
+        + cronometro_qss()
+        + data_table_qss()
+    )
 
 
 class ResultsTableWidget(QTableWidget):
@@ -353,7 +368,7 @@ class ResultsTableWidget(QTableWidget):
 
         title_rect = QRectF(area.left(), top, area.width(), title_height)
         painter.setFont(title_font)
-        painter.setPen(QColor(TEXT))
+        painter.setPen(QColor(paleta().TEXT))
         painter.drawText(
             title_rect,
             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
@@ -367,7 +382,7 @@ class ResultsTableWidget(QTableWidget):
             body_height,
         )
         painter.setFont(body_font)
-        painter.setPen(QColor(TEXT_SECONDARY))
+        painter.setPen(QColor(paleta().TEXT_SECONDARY))
         painter.drawText(
             body_rect,
             Qt.AlignmentFlag.AlignHCenter
@@ -390,33 +405,63 @@ def _format_duration(seconds: float) -> str:
     return f"{hours} h {mins} min"
 
 
-def _format_clock(seconds: float) -> str:
-    """Muestra una duración con precisión de segundos, como un cronómetro."""
-    total_seconds = max(0, int(round(seconds)))
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes, secs = divmod(remainder, 60)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+# Cuánto pesa una hoja de la comprobación de VOID frente a una página leída, y
+# qué parte de las páginas llega a esa comprobación. Son valores de arranque:
+# la primera ejecución completa los sustituye por los medidos en el equipo.
+_DEFAULT_REVIEW_WEIGHT = 1.5
+_DEFAULT_REVIEW_RATIO = 0.6
 
 
-def _load_ms_per_page() -> float:
-    """Costo por página (ms) aprendido de la última ejecución."""
+def _load_performance() -> dict:
     try:
         import json
 
         with open(PERF_CACHE, encoding="utf-8") as fh:
-            value = float(json.load(fh).get("ms_per_page", _DEFAULT_MS_PER_PAGE))
-        return min(max(value, 100.0), 60000.0)
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
     except Exception:  # noqa: BLE001 - caché opcional
+        return {}
+
+
+def _load_ms_per_page() -> float:
+    """Costo por unidad de página (ms) aprendido de la última ejecución.
+
+    Una unidad es una página leída; cada hoja de la comprobación de VOID
+    cuenta lo que pesa frente a ella (ver ``_load_review_model``).
+    """
+    try:
+        value = float(
+            _load_performance().get("ms_per_page", _DEFAULT_MS_PER_PAGE)
+        )
+        return min(max(value, 100.0), 60000.0)
+    except (TypeError, ValueError):
         return _DEFAULT_MS_PER_PAGE
 
 
-def _save_ms_per_page(ms_per_page: float) -> None:
+def _load_review_model() -> tuple[float, float]:
+    """Peso de una hoja de VOID y proporción de páginas que la necesitan."""
+    data = _load_performance()
+    try:
+        weight = float(data.get("review_weight", _DEFAULT_REVIEW_WEIGHT))
+        ratio = float(data.get("review_ratio", _DEFAULT_REVIEW_RATIO))
+    except (TypeError, ValueError):
+        return _DEFAULT_REVIEW_WEIGHT, _DEFAULT_REVIEW_RATIO
+    return min(max(weight, 0.1), 50.0), min(max(ratio, 0.0), 1.0)
+
+
+def _save_performance(
+    ms_per_page: float, review_weight: float, review_ratio: float
+) -> None:
     try:
         import json
 
         PERF_CACHE.parent.mkdir(parents=True, exist_ok=True)
         with open(PERF_CACHE, "w", encoding="utf-8") as fh:
-            json.dump({"ms_per_page": round(ms_per_page, 1)}, fh)
+            json.dump({
+                "ms_per_page": round(ms_per_page, 1),
+                "review_weight": round(review_weight, 3),
+                "review_ratio": round(review_ratio, 3),
+            }, fh)
     except Exception as exc:  # noqa: BLE001 - no crítico
         logger.warning(f"No se pudo guardar el cálculo de rendimiento: {exc}")
 
@@ -611,6 +656,7 @@ class MainWindow(QMainWindow):
         self._input_scanning = False
         self._config: AppConfig | None = None
         self._ms_per_page = _load_ms_per_page()
+        self._review_weight, self._review_ratio = _load_review_model()
 
         self._timer = QTimer(self)
         self._timer.setInterval(250)
@@ -619,6 +665,17 @@ class MainWindow(QMainWindow):
         self._done_global = 0
         self._total_global = 0
         self._last_done = 0
+        # Comprobación de VOID por archivo (1-based): hojas revisadas, hojas
+        # por revisar y archivos ya cerrados. ``_review_reserved`` solo se
+        # enciende al procesar: reserva en la barra y en el restante la parte
+        # prevista de los archivos que todavía no llegaron a esa etapa.
+        self._review_done: dict[int, int] = {}
+        self._review_total: dict[int, int] = {}
+        self._files_closed: set[int] = set()
+        self._file_pages_done: dict[int, int] = {}
+        self._file_pages_total: dict[int, int] = {}
+        self._review_reserved = False
+        self._last_bar = 0
         self._spinner_idx = 0
         self._spinner_active = False
 
@@ -723,12 +780,77 @@ class MainWindow(QMainWindow):
         self._refresh_templates()
         self._restore_important_columns()
         self._install_zoom_shortcuts()
+        # La hoja de la ventana se compone con su fragmento de densidad, así
+        # que no puede rehacerla el módulo del tema: la vuelve a pedir ella
+        # misma cuando el tema cambia. Qt desconecta sola al cerrarse.
+        gestor_tema().cambiado.connect(self._on_tema_cambiado)
 
     def load_initial_data(self) -> None:
         """Carga los datos del disco después de mostrar la ventana."""
         self._load_default_input()
 
+    def _on_tema_cambiado(self, nombre: str) -> None:
+        """Rehace lo de esta ventana que no alcanza la hoja de la aplicación.
+
+        Son las cuatro cosas que esta ventana pinta por su cuenta: su propia
+        hoja, el rótulo de la vista previa vacía (que lleva el color dentro
+        del HTML), los iconos de Papelera y el toggle que muestra qué tema
+        está puesto.
+        """
+        self._apply_density_stylesheet()
+        # El rotulo va en RichText solo cuando lo que muestra es el mensaje de
+        # vista previa vacia; los demas mensajes son texto plano y no llevan
+        # color propio, asi que no hay nada que rehacerles.
+        if self.preview_label.textFormat() == Qt.TextFormat.RichText:
+            self.preview_label.setText(_preview_empty_html())
+        self._tenir_papeleras()
+        self._actualizar_toggle_tema(nombre)
+
+    def _actualizar_toggle_tema(self, nombre: str) -> None:
+        """Sincroniza estado, dibujo y ayuda del toggle con el tema activo."""
+        claro = nombre == TEMA_CLARO
+        with QSignalBlocker(self.tema_toggle):
+            self.tema_toggle.setChecked(claro)
+        activo = "claro" if claro else "oscuro"
+        destino = "oscuro" if claro else "claro"
+        icono = "theme_sun" if claro else "theme_moon"
+        self.tema_toggle.setIcon(load_icon(icono, paleta().PANE_TEXT))
+        ayuda = f"Tema {activo}. Clic para cambiar al tema {destino}."
+        self.tema_toggle.setToolTip(ayuda)
+        self.tema_toggle.setAccessibleName(f"Cambiar al tema {destino}")
+        self.tema_toggle.setAccessibleDescription(ayuda)
+
+    def _tenir_papeleras(self) -> None:
+        """Vuelve a pintar el dibujo de la Papelera del color del texto.
+
+        El dibujo lleva el color dentro del icono y no en la hoja de estilo,
+        así que el repintado general no lo alcanza: con el tema claro se
+        quedaba en el blanco del tema oscuro y desaparecía del botón.
+        """
+        icono = load_icon("trash", self._button_text_color())
+        for boton in getattr(self, "_botones_papelera", ()):
+            boton.setIcon(icono)
+
     # ── Adaptación a la pantalla ────────────────────────────────────────
+
+    def _paint_progress_pane(self) -> None:
+        """Pone el fondo de la tabla al panel de progreso por archivo.
+
+        El área de desplazamiento y su viewport pintan desde la paleta y no
+        desde la hoja, así que no basta con la regla de ``#fileProgressPane``:
+        sin esto, el panel se queda con el fondo que decida el estilo nativo.
+        """
+        progress_palette = self.times_scroll.palette()
+        fondo = QColor(paleta().TABLE_BASE_BG)
+        progress_palette.setColor(QPalette.ColorRole.Base, fondo)
+        progress_palette.setColor(QPalette.ColorRole.Window, fondo)
+        for progress_surface in (
+            self.times_scroll,
+            self.times_scroll.viewport(),
+            self.times_container,
+        ):
+            progress_surface.setPalette(progress_palette)
+            progress_surface.setAutoFillBackground(True)
 
     def _apply_density_stylesheet(self) -> None:
         """Hoja de la ventana con el fragmento de medidas de la densidad.
@@ -738,7 +860,7 @@ class MainWindow(QMainWindow):
         colores, las tipografías y el radio de 6 px salen de la base y son los
         mismos en las dos densidades.
         """
-        qss = window_stylesheet(_WINDOW_QSS + self._density.qss)
+        qss = window_stylesheet(_window_qss() + self._density.qss)
         if self.styleSheet() != qss:
             self.setStyleSheet(qss)
 
@@ -818,9 +940,8 @@ class MainWindow(QMainWindow):
             if density.compact
             else CONTROL_HEIGHT
         )
-        self.time_summary.setFixedHeight(summary_height)
-        for divider in self.time_dividers:
-            divider.setFixedHeight(summary_height - 2)
+        self.time_summary.fijar_alto(summary_height)
+        self.tema_toggle.setFixedWidth(summary_height)
         self.times_scroll.setMaximumHeight(density.bottom_pane_height)
         self.times_pane.setMinimumWidth(self._times_pane_min_width())
         self.bottom_splitter.setMinimumHeight(density.bottom_min_height)
@@ -1084,6 +1205,7 @@ class MainWindow(QMainWindow):
         # distingue de «Detectar» o «Seleccionar» sin leer el texto. Va del
         # color del texto del botón para que se lea con el tema claro y con
         # el oscuro, y para que no cante al lado de la palabra.
+        self._botones_papelera = [btn_clear_input]
         trash_icon = load_icon("trash", self._button_text_color())
         btn_clear_input.setIcon(trash_icon)
         btn_clear_input.setToolTip(
@@ -1094,6 +1216,7 @@ class MainWindow(QMainWindow):
 
         self.btn_clear_output = input_menu.addAction("Vaciar output")
         self.btn_clear_output.setIcon(trash_icon)
+        self._botones_papelera.append(self.btn_clear_output)
         self.btn_clear_output.setToolTip(
             "Mover todas las ejecuciones de output/ a la Papelera de reciclaje"
         )
@@ -1149,7 +1272,9 @@ class MainWindow(QMainWindow):
         self.estimate_label = ElidedLabel(
             "Seleccione los archivos PDF que desea procesar."
         )
-        self.estimate_label.setStyleSheet(f"color: {TEXT_SECONDARY};")
+        pintar_del_tema(
+            self.estimate_label, lambda: f"color: {paleta().TEXT_SECONDARY};"
+        )
         self.estimate_label.setToolTip(
             "Muestra la cantidad de archivos, páginas y el tiempo estimado."
         )
@@ -1351,50 +1476,21 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         row.addWidget(self.progress, 1)
 
-        time_summary = QFrame()
-        time_summary.setObjectName("timeSummary")
-        time_summary.setMinimumWidth(400)
         summary_height = (
             CONTROL_HEIGHT_COMPACT
             if self._density.compact
             else CONTROL_HEIGHT
         )
-        time_summary.setFixedHeight(summary_height)
-        self.time_summary = time_summary
-        time_summary.setToolTip(
+        self.time_summary = Cronometro(summary_height)
+        self.time_summary.setToolTip(
             "El tiempo restante se recalcula con las páginas completadas y el "
             "ritmo observado."
         )
-        time_layout = QHBoxLayout(time_summary)
-        time_layout.setContentsMargins(12, 0, 12, 0)
-        time_layout.setSpacing(8)
-        self.time_labels: dict[str, QLabel] = {}
-        self.time_dividers: list[QFrame] = []
-        for index, (key, caption) in enumerate((
-            ("elapsed", "Transcurrido"),
-            ("remaining", "Restante"),
-            ("total", "Estimado"),
-        )):
-            if index:
-                divider = QFrame(time_summary)
-                divider.setProperty("role", "metricDivider")
-                divider.setFixedSize(1, summary_height - 2)
-                time_layout.addWidget(
-                    divider, alignment=Qt.AlignmentFlag.AlignVCenter
-                )
-                self.time_dividers.append(divider)
-            metric = QHBoxLayout()
-            metric.setSpacing(4)
-            caption_label = QLabel(caption)
-            caption_label.setProperty("role", "caption")
-            value_label = QLabel("00:00:00")
-            value_label.setProperty("role", "value")
-            value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            metric.addWidget(caption_label)
-            metric.addWidget(value_label)
-            time_layout.addLayout(metric, 1)
-            self.time_labels[key] = value_label
-        row.addWidget(time_summary)
+        # Los dos nombres de siempre, que es como los pide el resto de la
+        # ventana: el panel guarda las cifras por su clave y las rayas aparte.
+        self.time_labels = self.time_summary.etiquetas
+        self.time_dividers = self.time_summary.separadores
+        row.addWidget(self.time_summary)
         self.btn_process = QPushButton("Procesar")
         self.btn_process.setDefault(True)
         self.btn_process.clicked.connect(self._start_processing)
@@ -1472,6 +1568,10 @@ class MainWindow(QMainWindow):
             row.addWidget(boton)
         return row
 
+    def _on_tema_elegido(self, claro: bool) -> None:
+        """Aplica a toda la aplicación el tema elegido con el toggle."""
+        aplicar_tema(TEMA_CLARO if claro else TEMA_OSCURO)
+
     def _set_time_summary(
         self,
         elapsed: float | None = None,
@@ -1479,15 +1579,7 @@ class MainWindow(QMainWindow):
         total: float | None = None,
     ) -> None:
         """Actualiza las tres métricas sin mezclar estados o estimaciones."""
-        values = {
-            "elapsed": elapsed,
-            "remaining": remaining,
-            "total": total,
-        }
-        for key, value in values.items():
-            self.time_labels[key].setText(
-                _format_clock(value) if value is not None else "00:00:00"
-            )
+        self.time_summary.actualizar(elapsed, remaining, total)
 
     def _build_splitter(self) -> QSplitter:
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -1496,7 +1588,7 @@ class MainWindow(QMainWindow):
         preview_layout = QVBoxLayout(preview_widget)
         preview_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.preview_label = QLabel(_PREVIEW_EMPTY_HTML)
+        self.preview_label = QLabel(_preview_empty_html())
         self.preview_label.setTextFormat(Qt.TextFormat.RichText)
         self.preview_label.setObjectName("previewPlaceholder")
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1688,7 +1780,9 @@ class MainWindow(QMainWindow):
         self.duplicates_label.setToolTip(
             "No hay números de bitácora repetidos en los archivos procesados."
         )
-        self.duplicates_label.setStyleSheet(f"color: {TEXT_SECONDARY};")
+        pintar_del_tema(
+            self.duplicates_label, lambda: f"color: {paleta().TEXT_SECONDARY};"
+        )
         table_controls.addWidget(self.duplicates_label)
         self.csv_columns_toggle = CsvColumnModeButton()
         self.csv_columns_toggle.setEnabled(False)
@@ -1783,20 +1877,7 @@ class MainWindow(QMainWindow):
         )
         self.times_scroll.setWidgetResizable(True)
         self.times_scroll.setWidget(self.times_container)
-        progress_palette = self.times_scroll.palette()
-        progress_palette.setColor(
-            QPalette.ColorRole.Base, QColor(TABLE_BASE_BG)
-        )
-        progress_palette.setColor(
-            QPalette.ColorRole.Window, QColor(TABLE_BASE_BG)
-        )
-        for progress_surface in (
-            self.times_scroll,
-            self.times_scroll.viewport(),
-            self.times_container,
-        ):
-            progress_surface.setPalette(progress_palette)
-            progress_surface.setAutoFillBackground(True)
+        al_cambiar_tema(self.times_scroll, self._paint_progress_pane)
         self.times_scroll.setMaximumHeight(self._density.bottom_pane_height)
         # La lista es la parte elástica del panel: cuando el alto escasea es
         # ella la que se queda con una fila y se desplaza, en vez de robarles
@@ -1965,10 +2046,90 @@ class MainWindow(QMainWindow):
         varios PDF en vuelo se llenaban los de arriba mientras avanzaban
         otros. Con el avance por archivo las dos estrategias se ven igual.
         """
+        self._file_pages_done[index] = done
+        self._file_pages_total[index] = total
+        self._paint_file_row(index)
+
+    def _paint_file_row(self, index: int) -> None:
+        """Fila del archivo: el texto cuenta páginas y la barra, todo su trabajo.
+
+        La barra suma la comprobación de VOID del archivo (la reservada o la
+        ya conocida), así que no llega al 100 % con esa etapa pendiente ni
+        vuelve a empezar cuando arranca.
+        """
         row = self._file_rows.get(index - 1)
         if row is None:
             return
-        self._set_row_pages(row, done, total or self._pages_of_file(index - 1))
+        pages = self._file_pages_total.get(index) or self._pages_of_file(index - 1)
+        done = self._file_pages_done.get(index, 0)
+        self._set_row_pages(row, done, pages)
+        review_total = self._review_units_of_file(index)
+        if review_total > 0 and pages:
+            review_done = self._review_weight * self._review_done.get(index, 0)
+            row["bar"].setValue(round(
+                (min(done, pages) + review_done) * 100 / (pages + review_total)
+            ))
+
+    def _review_units_of_file(self, index: int) -> float:
+        """Unidades de página que la comprobación de VOID suma a un archivo."""
+        if index in self._review_total:
+            return self._review_weight * self._review_total[index]
+        if self._review_reserved and index not in self._files_closed:
+            return (
+                self._review_weight * self._review_ratio
+                * self._pages_of_file(index - 1)
+            )
+        return 0.0
+
+    def _review_units(self) -> tuple[float, float]:
+        """Unidades de página (hechas, previstas) de la comprobación de VOID."""
+        done = self._review_weight * sum(self._review_done.values())
+        indices = set(self._review_total) | set(
+            range(1, len(self._file_page_counts) + 1)
+        )
+        total = sum(self._review_units_of_file(index) for index in indices)
+        return done, total
+
+    def _expected_units(self, pages: int) -> float:
+        """Trabajo previsto de ``pages`` páginas, con su comprobación de VOID."""
+        return pages * (1.0 + self._review_weight * self._review_ratio)
+
+    def _reset_review_progress(self, reserve: bool) -> None:
+        self._review_done = {}
+        self._review_total = {}
+        self._files_closed = set()
+        self._file_pages_done = {}
+        self._file_pages_total = {}
+        self._review_reserved = reserve
+        self._last_bar = 0
+
+    def _paint_progress(self, total_pages: int) -> None:
+        """Barra del batch en unidades de página: lectura y comprobación de VOID.
+
+        La parte prevista de VOID se reserva desde el principio y se ajusta
+        cuando cada archivo dice cuántas hojas lleva, así que la barra no se
+        llena con esa etapa pendiente ni retrocede cuando empieza.
+        """
+        review_done, review_total = self._review_units()
+        maximum = max(1, round(total_pages + review_total))
+        value = min(
+            maximum,
+            max(self._last_bar, round(self._done_global + review_done)),
+        )
+        self._last_bar = value
+        if self.progress.maximum() != maximum:
+            self.progress.setRange(0, maximum)
+        self.progress.setValue(value)
+
+    def _on_review_progress(self, index: int, done: int, total: int) -> None:
+        """Avance de la comprobación de VOID de un archivo (hojas, no páginas)."""
+        self._review_total[index] = max(0, total)
+        self._review_done[index] = max(
+            self._review_done.get(index, 0), min(done, total)
+        )
+        self._paint_file_row(index)
+        if self._total_global > 0:
+            self._paint_progress(self._total_global)
 
     # ── Logging ─────────────────────────────────────────────────────────
 
@@ -2093,7 +2254,7 @@ class MainWindow(QMainWindow):
         self.preview_label.setPixmap(QPixmap())
         if text == _PREVIEW_EMPTY_MESSAGE:
             self.preview_label.setTextFormat(Qt.TextFormat.RichText)
-            self.preview_label.setText(_PREVIEW_EMPTY_HTML)
+            self.preview_label.setText(_preview_empty_html())
         else:
             self.preview_label.setTextFormat(Qt.TextFormat.PlainText)
             self.preview_label.setText(text)
@@ -2507,12 +2668,12 @@ class MainWindow(QMainWindow):
         slices = self._batch_slices()
         pages = total_pages(slices)
         if pages and self._ms_per_page:
-            seconds = pages * self._ms_per_page / 1000.0
+            seconds = self._expected_units(pages) * self._ms_per_page / 1000.0
             page_unit = "página" if pages == 1 else "páginas"
             file_count = len(slices)
             file_unit = "archivo" if file_count == 1 else "archivos"
             self.estimate_label.setText(
-                f"Tiempo estimado: {_format_clock(seconds)} · "
+                f"Tiempo estimado: {formato_reloj(seconds)} · "
                 f"{pages} {page_unit} · {file_count} {file_unit}"
             )
         elif slices:
@@ -2955,6 +3116,7 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         self._total_global = total
         self._done_global = 0
+        self._reset_review_progress(reserve=False)
         self._run_started = time.monotonic()
         self._spinner_active = True
         self._timer.start()
@@ -3164,6 +3326,7 @@ class MainWindow(QMainWindow):
         self._worker.progress.connect(self._on_progress)
         self._worker.file_started.connect(self._on_file_started)
         self._worker.file_progress.connect(self._on_file_progress)
+        self._worker.review_progress.connect(self._on_review_progress)
         self._worker.file_finished.connect(self._on_file_finished)
         self._worker.succeeded.connect(self._on_succeeded)
         self._worker.failed.connect(self._on_failed)
@@ -3187,11 +3350,15 @@ class MainWindow(QMainWindow):
         self._prepare_file_rows(resolved)
         self._done_global = 0
         self._last_done = 0
+        self._reset_review_progress(reserve=True)
+        self._paint_progress(total)
         self._run_started = time.monotonic()
         self._spinner_active = True
         self._timer.start()
         self.status_label.setText("Procesando…")
-        estimate = self._total_global * self._ms_per_page / 1000.0
+        estimate = (
+            self._expected_units(self._total_global) * self._ms_per_page / 1000.0
+        )
         self._set_time_summary(0.0, estimate, estimate)
 
         logger.info(
@@ -3361,6 +3528,14 @@ class MainWindow(QMainWindow):
 
     def _on_file_finished(self, index: int, report) -> None:
         """Cierra la fila del archivo con su tiempo real."""
+        # Terminado el archivo, su comprobación de VOID ya no está pendiente:
+        # la reserva deja su sitio a lo que de verdad llevó.
+        self._files_closed.add(index)
+        review_pages = getattr(report, "review_pages", 0) or 0
+        if review_pages or index in self._review_total:
+            total = max(review_pages, self._review_total.get(index, 0))
+            self._review_total[index] = total
+            self._review_done[index] = total
         row = self._file_rows.get(index - 1)
         if row is not None:
             font = row["name"].font()
@@ -3368,9 +3543,11 @@ class MainWindow(QMainWindow):
             row["name"].setFont(font)
             self._row_ms[index - 1] = report.processing_ms
             self._set_row_pages(row, len(report.pages), len(report.pages))
-            row["secs"].setText(_format_clock(report.processing_ms / 1000.0))
+            row["secs"].setText(formato_reloj(report.processing_ms / 1000.0))
         if self._current_file_index == index:
             self._current_file_index = 0
+        if self._total_global > 0:
+            self._paint_progress(self._total_global)
 
     def _on_timer_tick(self) -> None:
         if self._spinner_active:
@@ -3384,9 +3561,13 @@ class MainWindow(QMainWindow):
         remaining = None
         total = None
         if self._total_global > 0:
+            # Lo pendiente incluye la comprobación de VOID: sin ella el
+            # restante caía a cero al leer la última página, con esa etapa
+            # todavía por delante.
+            review_done, review_total = self._review_units()
             remaining = estimate_remaining_seconds(
-                total_pages=self._total_global,
-                completed_pages=self._done_global,
+                total_pages=self._total_global + review_total,
+                completed_pages=self._done_global + review_done,
                 elapsed_seconds=elapsed,
                 cached_ms_per_page=self._ms_per_page,
             )
@@ -3399,7 +3580,7 @@ class MainWindow(QMainWindow):
                 continue
             row = self._file_rows.get(index)
             if row is not None:
-                row["secs"].setText(_format_clock(time.monotonic() - started))
+                row["secs"].setText(formato_reloj(time.monotonic() - started))
 
     def _on_progress(self, done: int, total: int, message: str) -> None:
         """Pinta el avance del batch: barra, contador del texto y ETA.
@@ -3414,10 +3595,8 @@ class MainWindow(QMainWindow):
         if total > 0:
             done = max(min(done, total), self._last_done)
             self._last_done = done
-            if self.progress.maximum() != total:
-                self.progress.setRange(0, total)
-            self.progress.setValue(done)
             self._done_global = done
+            self._paint_progress(total)
         self.status_label.setText(with_page_counter(done, total, message))
         # La calibración avisa con done=0 (es una etapa, no páginas leídas);
         # la primera página contada es la señal de que el OCR ya empezó y de
@@ -3792,10 +3971,23 @@ class MainWindow(QMainWindow):
     ) -> None:
         """Aprende throughput de pared; no suma tiempos de workers paralelos."""
         pages = sum(len(r.pages) for r in reports)
-        measured = wall_ms_per_page(elapsed_seconds or 0.0, pages)
+        review_pages = sum(getattr(r, "review_pages", 0) for r in reports)
+        # Una ejecución cancelada no llega a la comprobación de VOID de todos
+        # sus archivos: enseñaría que casi ninguna página la necesita.
+        if pages and not any(getattr(r, "cancelled", False) for r in reports):
+            pages_ms = sum(getattr(r, "pages_ms", 0.0) for r in reports)
+            review_ms = sum(getattr(r, "review_ms", 0.0) for r in reports)
+            if pages_ms > 0 and review_pages and review_ms > 0:
+                weight = (review_ms / review_pages) / (pages_ms / pages)
+                self._review_weight = min(max(weight, 0.1), 50.0)
+            self._review_ratio = min(1.0, review_pages / pages)
+        units = pages + self._review_weight * review_pages
+        measured = wall_ms_per_page(elapsed_seconds or 0.0, units)
         if measured is not None:
             self._ms_per_page = max(1.0, measured)
-            _save_ms_per_page(self._ms_per_page)
+            _save_performance(
+                self._ms_per_page, self._review_weight, self._review_ratio
+            )
 
     def _sync_depurar_button(self) -> None:
         """Solo se depura una ejecución ya guardada y sin escrituras en curso.
@@ -4044,15 +4236,19 @@ class MainWindow(QMainWindow):
         count = len(repeated)
         self.duplicates_label.setText(f"Duplicados: {count}")
         if not count:
-            self.duplicates_label.setStyleSheet(f"color: {TEXT_SECONDARY};")
+            pintar_del_tema(
+                self.duplicates_label,
+                lambda: f"color: {paleta().TEXT_SECONDARY};",
+            )
             self.duplicates_label.setToolTip(
                 "No hay números de bitácora repetidos en los archivos "
                 "procesados."
             )
             return
 
-        self.duplicates_label.setStyleSheet(
-            f"color: {_COLORS[Status.WARNING]}; font-weight: 600;"
+        pintar_del_tema(
+            self.duplicates_label,
+            lambda: f"color: {_COLORS[Status.WARNING]}; font-weight: 600;",
         )
         page_label = (
             "página duplicada" if count == 1 else "páginas duplicadas"
@@ -4218,7 +4414,7 @@ class MainWindow(QMainWindow):
                 row, Path(report.pdf_path).name, str(report.pdf_path)
             )
             self._set_row_pages(row, len(report.pages), len(report.pages))
-            row["secs"].setText(_format_clock(report.processing_ms / 1000.0))
+            row["secs"].setText(formato_reloj(report.processing_ms / 1000.0))
             self._file_rows[index] = row
             self._row_ms[index] = report.processing_ms
         self.times_vbox.addStretch()
@@ -4289,12 +4485,31 @@ class MainWindow(QMainWindow):
         # la entera en el tooltip; un QLabel a secas la cortaba a media
         # palabra contra el borde de la ventana, en cualquier tamaño.
         self.search_context = ElidedLabel(_PISTA_BUSQUEDA)
-        self.search_context.setStyleSheet(f"color: {TEXT_SECONDARY};")
+        pintar_del_tema(
+            self.search_context, lambda: f"color: {paleta().TEXT_SECONDARY};"
+        )
         self.search_context.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
         self.search_context.setMinimumWidth(0)
         row.addWidget(self.search_context, 1)
+
+        # El tema queda en el extremo de una fila de consulta, fuera del
+        # grupo de botones que inicia o detiene trabajo. Su ancho es fijo para
+        # que cambiar el dibujo no mueva ningún control vecino.
+        self.tema_toggle = QToolButton()
+        self.tema_toggle.setObjectName("themeToggle")
+        self.tema_toggle.setCheckable(True)
+        self.tema_toggle.setIconSize(ICON_SIZE)
+        alto = (
+            CONTROL_HEIGHT_COMPACT
+            if self._density.compact
+            else CONTROL_HEIGHT
+        )
+        self.tema_toggle.setFixedWidth(alto)
+        self.tema_toggle.toggled.connect(self._on_tema_elegido)
+        self._actualizar_toggle_tema(tema())
+        row.addWidget(self.tema_toggle)
         return row
 
     def _columnas_buscables(self) -> list[int]:

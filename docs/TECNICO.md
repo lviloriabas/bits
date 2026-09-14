@@ -189,13 +189,47 @@ Se conduce por pantalla y no por peticiones sueltas a propósito: así valen los
 
 Los resultados se informan uno a uno: la corrida termina con cuántas se corrigieron, cuántas no y el motivo de cada una. Los motivos que devuelve AirVault se copian tal cual, porque dicen más que cualquier frase propia.
 
-Código: `app/airvault/web_reports.py`, `correcciones.py` y `app/gui/web_reports_window.py`.
+El cronómetro de la ventana es el mismo widget de la principal (`app/gui/cronometro.py`), pero contando otra cosa: aquí la unidad es el reporte en la consulta y la bitácora en la corrección, y abrir una búsqueda en Web Search no tiene unidades porque es apertura y nada más. Cada trabajo se descompone en apertura (levantar Edge y rehacer la sesión, que no depende de cuánto haya por hacer) más tantas unidades como piezas tenga. Los dos backends cuentan lo que van terminando por un callback `progreso(hechas, total)` separado del de las frases de estado, y el total lo manda quien hace el trabajo: el plan de la ventana incluye filas de revisión manual que nunca tocan el navegador. Lo medido en cada corrida completa se guarda por tarea en `output/.web_reports.json` y es con lo que se estima la siguiente; una cancelada o fallida no escribe nada, porque dejó fuera lo que faltaba. El reparto entre el histórico y el ritmo observado es el de `app/gui/eta.py`, con un calentamiento de tres unidades en vez de veinte: una bitácora entera da mucha más información que una página, y casi ninguna corrida llega a veinte.
+
+Código: `app/airvault/web_reports.py`, `correcciones.py`, `app/gui/web_reports_window.py` y `app/gui/web_reports_tiempos.py`.
 
 ## Visor y editor
 
 El visor usa un modelo Qt (`csv_model.py`) para cargar y ordenar tablas grandes. La selección y búsqueda resuelven la página original mediante los datos de la ejecución. No edita celdas directamente; las acciones de depuración y exportación utilizan el modelo de resultados. Código: `app/gui/csv_viewer.py` y `csv_utils.py`.
 
 El editor combina `QGraphicsScene` con renderizado de PyMuPDF. Guarda zonas en coordenadas relativas `x`, `y`, `w`, `h` entre 0 y 1. Cada campo incluye identificador, tipo, obligatoriedad, formato, postproceso y umbrales; Pydantic valida el JSON. Al guardar conserva propiedades adicionales de cada campo cargado. Revise también la referencia canónica y los metadatos generales de una plantilla nueva antes de sustituir la de producción. Código: `app/gui/editor_window.py` y `app/templates/`.
+
+## Tema claro y oscuro
+
+`app/gui/tokens.py` define dos paletas (`OSCURA` y `CLARA`) con los mismos papeles: superficies de la más honda a la más cercana, textos, estados y los nombres `PANE_*` y `TABLE_*` que usan las hojas. Ningún color se importa suelto; se pide con `paleta()` en el momento de pintar, porque una constante de módulo se copia en quien la importa y se queda con el tema del arranque.
+
+`app/gui/theme.py` instala y cambia el tema. Los colores llegan a la pantalla por varios caminos y cada uno se actualiza al cambiar el tema:
+
+| Camino | Quién lo rehace |
+|---|---|
+| Paleta de Qt y hoja de la aplicación | `aplicar_tema()`, que las vuelve a poner. |
+| Hoja propia de cada ventana (lleva su fragmento de densidad) | La ventana, suscrita a `gestor_tema().cambiado`. |
+| Hoja de una línea de un rótulo y paletas fijadas a mano (tabla, panel del visor) | `repintar_del_tema()`, sobre lo anotado con `pintar_del_tema` / `al_cambiar_tema`. |
+| Colores de estado de las celdas de AirVault y sus vistas previas | `pintar_celda_del_tema()` guarda el papel en la celda; `repintar_del_tema()` actualiza el color sin recrear las filas ni perder la selección o el orden. |
+| Barra de título, que dibuja DWM y no Qt | `set_windows_native_window_style(ventana, oscuro)`. |
+
+Los iconos SVG llevan el color dentro del dibujo, así que ninguna hoja los alcanza: los de los botones se tiñen al cargarlos (`load_icon`) y la flecha de los desplegables, que QSS pide con `image: url(...)`, viaja en dos archivos y la hoja elige el del tema.
+
+La transición suspende tanto la pintura como los layouts habilitados. QSS
+retira y repone fuentes y márgenes al sustituir una hoja; si el layout mide
+ese estado intermedio, algunos botones saltan y regresan después de pintar.
+Los layouts se reactivan y calculan con el tema completo antes de volver a
+pintar. Los que ya estaban deshabilitados conservan su estado. No se usa
+`processEvents()`.
+
+Antes de sustituir la hoja global se invalida el estilo de la aplicación y
+después se repule cada widget una vez. Esto evita que el repulido global de
+Qt recorra repetidamente los descendientes de cada control cacheado. El
+esquema nativo y los títulos cambian al final, seguidos del repintado inmediato
+del contenido. Solo se actualizan los marcos de ventanas visibles: pedir
+`winId()` para menús o diálogos ocultos creaba ventanas nativas innecesarias.
+
+El tema elegido se guarda en `interfaz.json` (`app/utils/preferencias_ui.py`), junto al programa y no en el registro de Windows, para que viaje con la copia portable.
 
 ## Configuración y diagnóstico
 
@@ -204,6 +238,7 @@ El editor combina `QGraphicsScene` con renderizado de PyMuPDF. Guarda zonas en c
 | `template/` | Plantillas y referencias del formulario. |
 | `fleet.json` | Matrículas válidas para OCR. |
 | `important_fields.json` | Columnas importantes por plantilla. |
+| `interfaz.json` | Preferencias de la interfaz; de momento el tema, claro u oscuro. |
 | `airvault.json` | Configuración y preferencias de AirVault; ejemplo en `airvault.example.json`. |
 | `airvault_flota.json` | Correspondencias de aeronave, flota y arrendador. |
 | `book_*.json` | Memorias de libros y turno de comprobación. |

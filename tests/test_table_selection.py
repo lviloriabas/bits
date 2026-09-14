@@ -14,30 +14,29 @@ from PySide6.QtCore import QSize
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication, QStyleFactory, QTableWidget, QTableWidgetItem
 
-from app.gui.tokens import accent_color
+from app.gui.tokens import accent_color, paleta
 from app.gui.widgets import (
-    DATA_TABLE_QSS,
+    data_table_qss,
     FlatSelectionDelegate,
-    PANE_BORDER,
     style_data_table,
 )
-from app.gui.depuracion_dialog import _ARBOL_QSS
+from app.gui.depuracion_dialog import _arbol_qss
 
 _COLUMNS = 5
 _ROWS = 4
 
 
 def test_todas_las_tablas_usan_el_borde_gris_claro():
-    borde = f"border: 1px solid {PANE_BORDER}"
-    assert borde in DATA_TABLE_QSS
-    assert borde in _ARBOL_QSS
+    borde = f"border: 1px solid {paleta().PANE_BORDER}"
+    assert borde in data_table_qss()
+    assert borde in _arbol_qss()
 
 
 def _table() -> QTableWidget:
     table = QTableWidget(_ROWS, _COLUMNS)
     table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
     table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-    table.setStyleSheet(DATA_TABLE_QSS)
+    table.setStyleSheet(data_table_qss())
     style_data_table(table)
     for row in range(_ROWS):
         for column in range(_COLUMNS):

@@ -438,6 +438,109 @@ def test_verificar_no_cuenta_una_verde_con_identidad_equivocada():
     assert any("HP-1852CMP" in problema for problema in problemas)
 
 
+# ── lo recien escrito que AirVault tarda en devolver ───────────────
+
+class ClienteQueTardaEnReflejar(ClienteFalso):
+    """Devuelve una version vieja de ciertas paginas las primeras lecturas.
+
+    Es lo que se vio tras indexar: la verificacion leyo una pagina sin un
+    obligatorio que si estaba guardado, y minutos despues la misma lectura
+    la traia entera.
+    """
+
+    def __init__(self, viejas, lecturas_viejas=1, **extra):
+        super().__init__(**extra)
+        self.viejas = dict(viejas)
+        self.quedan = {numero: lecturas_viejas for numero in self.viejas}
+
+    def leer_pagina(self, batch_id, numero):
+        if self.quedan.get(numero, 0) > 0:
+            self.quedan[numero] -= 1
+            self.lecturas.append(numero)
+            return self.viejas[numero]
+        return super().leer_pagina(batch_id, numero)
+
+
+def _completa(m, registro, estado=ESTADO_VALIDO):
+    from app.airvault.mapping import valores_de_indice
+
+    return pagina(registro.seq, estado=estado, valores=valores_de_indice(
+        registro, m.doc_type, m.audit_status,
+    ))
+
+
+def _sin_fleet(m, registro):
+    from app.airvault.config import CAMPO_FLEET
+
+    completa = _completa(m, registro)
+    valores = dict(completa.valores)
+    valores.pop(CAMPO_FLEET)
+    return pagina(registro.seq, estado=ESTADO_VALIDO, valores=valores)
+
+
+def test_verificar_relee_la_pagina_que_airvault_aun_no_refleja():
+    m = manifiesto(2)
+    cliente = ClienteQueTardaEnReflejar(
+        {2: _sin_fleet(m, m.registros[1])},
+        paginas={r.seq: _completa(m, r) for r in m.registros},
+    )
+    dormidas: list = []
+
+    resultado = verificar_lote(
+        cliente, m, esperas=(5, 15), dormir=dormidas.append,
+    )
+
+    assert resultado == (2, 2, [])
+    # Solo se espera lo necesario y solo se relee la pagina dudosa.
+    assert dormidas == [5]
+    assert cliente.lecturas == [1, 2, 2]
+
+
+def test_sin_esperas_la_lectura_vieja_cuenta_como_problema():
+    m = manifiesto(2)
+    cliente = ClienteQueTardaEnReflejar(
+        {2: _sin_fleet(m, m.registros[1])},
+        paginas={r.seq: _completa(m, r) for r in m.registros},
+    )
+
+    validas, total, problemas = verificar_lote(cliente, m)
+
+    assert (validas, total) == (1, 2)
+    assert any("faltan datos obligatorios" in p for p in problemas)
+
+
+def test_agotadas_las_relecturas_el_problema_se_informa():
+    m = manifiesto(1)
+    cliente = ClienteFalso(paginas={1: _sin_fleet(m, m.registros[0])})
+    dormidas: list = []
+
+    validas, total, problemas = verificar_lote(
+        cliente, m, esperas=(5, 15), dormir=dormidas.append,
+    )
+
+    assert (validas, total) == (0, 1)
+    assert dormidas == [5, 15]
+    assert problemas == [
+        "pagina 1: faltan datos obligatorios en AirVault: Fleet"
+    ]
+
+
+def test_una_fecha_dudosa_no_se_relee():
+    """Lo que falta es del manifiesto: esperar a AirVault no lo arregla."""
+    m = manifiesto(1)
+    m.registros[0].fecha_dudosa = True
+    cliente = ClienteFalso(paginas={1: _completa(m, m.registros[0])})
+    dormidas: list = []
+
+    validas, _total, _problemas = verificar_lote(
+        cliente, m, esperas=(5, 15), dormir=dormidas.append,
+    )
+
+    assert validas == 0
+    assert dormidas == []
+    assert cliente.lecturas == [1]
+
+
 def test_matricula_fuera_de_picklist_se_escribe_completa_y_valida():
     m = manifiesto(1)
     m.registros[0].matricula = "HP-0000CMP"

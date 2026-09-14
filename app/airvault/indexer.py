@@ -8,6 +8,7 @@ deja dudas sobre que se alcanzo a escribir.
 
 from __future__ import annotations
 
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Mapping, Optional, Sequence
@@ -66,6 +67,11 @@ AVISOS_DE_REVISION = {
     "matricula_desconocida",
     "log_duplicado",
 }
+
+# Segundos entre relecturas de las paginas que no se confirmaron al
+# verificar lo recien escrito. Crecen porque lo que se espera es que AirVault
+# termine de reflejar el guardado; ver :func:`_con_relecturas`.
+ESPERAS_TRAS_ESCRIBIR = (5, 15, 40)
 
 
 @dataclass
@@ -642,63 +648,43 @@ def campos_distintos(esperados: Mapping[int, str], recibidos: Mapping[int, str])
     return distintos
 
 
-def verificar_revision(cliente, manifiesto: Manifiesto, al_avanzar=None) -> tuple[int, int, List[str]]:
-    """El trabajo automatico acaba cuando lo disponible esta guardado.
+@dataclass
+class _Revision:
+    """Lo que dijo una lectura de una pagina al compararla con el manifiesto."""
 
-    Una discrepancia o un dato ilegible pueden conservar el estado amarillo.
-    Exigir Valid a esas paginas repetia un guardado que ya habia terminado.
-    Esta comprobacion no publica ni completa el batch.
-    """
-    confirmadas = 0
-    problemas = []
-    registros = list(manifiesto.bitacoras())
-    for numero, registro in enumerate(registros):
-        if al_avanzar:
-            al_avanzar(numero, len(registros))
-        pagina = registro.pagina_batch or registro.seq
-        try:
-            remota = cliente.leer_pagina(manifiesto.batch_id, pagina)
-        except FALLOS_DE_CAMINO:
-            raise
-        except Exception as exc:
-            problemas.append(f"pagina {pagina}: no se pudo comprobar ({exc})")
-            continue
-        esperados = valores_de_indice(
-            registro, manifiesto.doc_type, manifiesto.audit_status,
-            manifiesto.nombre_batch, manifiesto.audit_status_discrepancia,
-        )
-        esperados = {campo: valor for campo, valor in esperados.items()
-                     if campo not in CAMPOS_OBLIGATORIOS or str(valor or "").strip()}
-        esperados[CAMPO_WORK_LOCATION] = ""
-        from app.airvault.ecn import conservar_razones
-        esperados = conservar_razones(esperados, remota.valores)
-        distintos = campos_distintos(esperados, remota.valores)
-        if distintos or remota.estado not in (ESTADO_VALIDO, ESTADO_NECESITA_CORRECCION):
-            problemas.append(f"pagina {pagina}: falta confirmar "
-                             + (", ".join(distintos) or "el estado de indexacion"))
-            continue
-        confirmadas += 1
-        registro.estado = EstadoRegistro.ESCRITA
-        registro.pagina_batch = pagina
-    if al_avanzar:
-        al_avanzar(len(registros), len(registros))
-    return confirmadas, len(registros), problemas
+    valida: bool
+    problemas: List[str] = field(default_factory=list)
+    # Ninguna relectura la puede arreglar: lo que falta es del manifiesto
+    # (una fecha dudosa o sin confirmar), no de lo que devolvio AirVault.
+    definitiva: bool = False
 
 
-def verificar_lote(
-    cliente, manifiesto: Manifiesto
+def _con_relecturas(
+    cliente,
+    manifiesto: Manifiesto,
+    revisar: Callable[[Registro, object, int], _Revision],
+    esperas: Sequence[float] = (),
+    dormir: Optional[Callable[[float], None]] = None,
+    al_avanzar: Optional[Callable[[int, int], None]] = None,
 ) -> tuple[int, int, List[str]]:
-    """Relee el batch y cuenta cuantas paginas quedaron validas.
+    """Lee cada bitacora y vuelve a leer las que no se pudieron confirmar.
 
-    Devuelve ``(validas, revisadas, problemas)``. Se usa despues de escribir
-    para confirmar contra el servidor, no contra lo que creemos haber
-    hecho.
+    AirVault no siempre devuelve lo guardado en la primera lectura: justo
+    despues de escribir un batch y soltarlo, una pagina puede llegar sin
+    algun obligatorio aunque este guardado. Esa lectura sola dejaba el batch
+    en «Indexado incompleto» y sin completar, y solo la comprobacion
+    periodica, minutos despues, lo encontraba entero y lo cerraba.
+
+    Por eso una pagina no confirmada no se da por mala a la primera: tras
+    cada espera de ``esperas`` se releen solo las que siguen sin confirmar,
+    hasta que cuadren o se acaben las esperas. Una lectura buena nunca se
+    deshace, y una pagina cuyo problema es del manifiesto no se relee.
     """
     batch_id = manifiesto.batch_id or ""
-    validas = 0
-    problemas: List[str] = []
-    bitacoras = [r for r in manifiesto.registros if not r.es_separador]
-    for registro in bitacoras:
+    registros = list(manifiesto.bitacoras())
+    dormir = dormir or time.sleep
+
+    def leer(registro: Registro) -> _Revision:
         pagina = registro.pagina_batch or registro.seq
         try:
             remota = cliente.leer_pagina(batch_id, pagina)
@@ -707,8 +693,104 @@ def verificar_lote(
         except Exception as exc:  # noqa: BLE001 - se anota y se sigue
             # Comprobar es leer: una pagina que no carga se cuenta como no
             # comprobada, no como mal escrita.
-            problemas.append(f"pagina {pagina}: no se pudo leer ({exc})")
-            continue
+            return _Revision(False, [f"pagina {pagina}: no se pudo leer ({exc})"])
+        return revisar(registro, remota, pagina)
+
+    revisiones: Dict[int, _Revision] = {}
+    for numero, registro in enumerate(registros):
+        if al_avanzar:
+            al_avanzar(numero, len(registros))
+        revisiones[registro.seq] = leer(registro)
+    for ronda, espera in enumerate(esperas, start=1):
+        dudosas = [
+            registro for registro in registros
+            if not revisiones[registro.seq].valida
+            and not revisiones[registro.seq].definitiva
+        ]
+        if not dudosas:
+            break
+        logger.info(
+            "Batch {}: {} paginas sin confirmar ({}); se releen en {:.0f} s "
+            "(relectura {}/{})",
+            batch_id, len(dudosas), revisiones[dudosas[0].seq].problemas[0],
+            espera, ronda, len(esperas),
+        )
+        dormir(espera)
+        for registro in dudosas:
+            revision = leer(registro)
+            revisiones[registro.seq] = revision
+            if revision.valida:
+                logger.info(
+                    "Batch {}: la pagina {} quedo confirmada al releerla",
+                    batch_id, registro.pagina_batch or registro.seq,
+                )
+    if al_avanzar:
+        al_avanzar(len(registros), len(registros))
+    validas = sum(1 for revision in revisiones.values() if revision.valida)
+    problemas = [
+        problema for registro in registros
+        for problema in revisiones[registro.seq].problemas
+    ]
+    if problemas:
+        logger.warning(
+            "Batch {}: {}/{} paginas confirmadas. Primer problema: {}",
+            batch_id, validas, len(registros), problemas[0],
+        )
+    return validas, len(registros), problemas
+
+
+def verificar_revision(
+    cliente, manifiesto: Manifiesto, al_avanzar=None,
+    esperas: Sequence[float] = (),
+    dormir: Optional[Callable[[float], None]] = None,
+) -> tuple[int, int, List[str]]:
+    """El trabajo automatico acaba cuando lo disponible esta guardado.
+
+    Una discrepancia o un dato ilegible pueden conservar el estado amarillo.
+    Exigir Valid a esas paginas repetia un guardado que ya habia terminado.
+    Esta comprobacion no publica ni completa el batch.
+    """
+    from app.airvault.ecn import conservar_razones
+
+    def revisar(registro: Registro, remota, pagina: int) -> _Revision:
+        esperados = valores_de_indice(
+            registro, manifiesto.doc_type, manifiesto.audit_status,
+            manifiesto.nombre_batch, manifiesto.audit_status_discrepancia,
+        )
+        esperados = {campo: valor for campo, valor in esperados.items()
+                     if campo not in CAMPOS_OBLIGATORIOS or str(valor or "").strip()}
+        esperados[CAMPO_WORK_LOCATION] = ""
+        esperados = conservar_razones(esperados, remota.valores)
+        distintos = campos_distintos(esperados, remota.valores)
+        if distintos or remota.estado not in (ESTADO_VALIDO, ESTADO_NECESITA_CORRECCION):
+            return _Revision(False, [
+                f"pagina {pagina}: falta confirmar "
+                + (", ".join(distintos) or "el estado de indexacion")
+            ])
+        registro.estado = EstadoRegistro.ESCRITA
+        registro.pagina_batch = pagina
+        return _Revision(True)
+
+    return _con_relecturas(
+        cliente, manifiesto, revisar, esperas, dormir, al_avanzar,
+    )
+
+
+def verificar_lote(
+    cliente, manifiesto: Manifiesto,
+    esperas: Sequence[float] = (),
+    dormir: Optional[Callable[[float], None]] = None,
+) -> tuple[int, int, List[str]]:
+    """Relee el batch y cuenta cuantas paginas quedaron validas.
+
+    Devuelve ``(validas, revisadas, problemas)``. Se usa despues de escribir
+    para confirmar contra el servidor, no contra lo que creemos haber
+    hecho. Con ``esperas`` las paginas no confirmadas se vuelven a leer
+    antes de contarlas como problema (ver :func:`_con_relecturas`).
+    """
+
+    def revisar(registro: Registro, remota, pagina: int) -> _Revision:
+        problemas: List[str] = []
         work_location = str(
             remota.valores.get(CAMPO_WORK_LOCATION, "") or ""
         ).strip()
@@ -754,15 +836,24 @@ def verificar_lote(
                 f"{matricula_remota or '(vacia)'} y se esperaba "
                 f"{registro.matricula or '(vacia)'}"
             )
+        valida = False
         if remota.estado == ESTADO_VALIDO:
             if work_location:
                 problemas.append(
                     f"pagina {pagina}: Work Location no quedo vacio"
                 )
-            if not work_location and identidad_correcta and fecha_correcta and not faltantes:
-                validas += 1
+            valida = bool(
+                not work_location and identidad_correcta and fecha_correcta
+                and not faltantes
+            )
         else:
             problemas.append(
                 f"pagina {pagina}: estado {remota.estado}"
             )
-    return validas, len(bitacoras), problemas
+        return _Revision(
+            valida,
+            [] if valida else problemas,
+            definitiva=not fecha_esperada or registro.fecha_dudosa,
+        )
+
+    return _con_relecturas(cliente, manifiesto, revisar, esperas, dormir)

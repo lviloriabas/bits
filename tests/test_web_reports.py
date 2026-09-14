@@ -243,3 +243,61 @@ def test_la_ventana_principal_abre_un_solo_web_reports(app) -> None:
         assert principal.btn_web_reports.text() == "Web Reports…"
     finally:
         principal.close()
+
+
+def test_la_consulta_cuenta_los_reportes_que_va_terminando(
+    monkeypatch,
+) -> None:
+    """La cuenta es la que mueve el cronometro de la ventana."""
+    pasos: list[tuple[int, int]] = []
+
+    class _SesionFalsa:
+        def __init__(self, _perfil, visible=True):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return None
+
+        def abrir(self, url, espera_s=30.0):
+            return {"webSocketDebuggerUrl": "ws://127.0.0.1:4321/x"}
+
+        def abrir_pestana(self, url):
+            return "x"
+
+        def cookies(self, _version):
+            return {"airvault.criticaltech.com": [
+                {"name": "Critical", "value": "x"}
+            ]}
+
+    class _PaginaFalsa:
+        def __init__(self, *_args):
+            pass
+
+        def esperar(self, _condicion, _segundos):
+            return True
+
+        def cerrar(self):
+            return None
+
+    monkeypatch.setattr(web_reports, "SesionDeNavegador", _SesionFalsa)
+    monkeypatch.setattr(web_reports, "_Pagina", _PaginaFalsa)
+    monkeypatch.setattr(
+        ClienteLogPageAudit, "_elegir_repositorio", staticmethod(lambda _p: None)
+    )
+    monkeypatch.setattr(
+        ClienteLogPageAudit, "_correr_reporte", lambda *_args: []
+    )
+
+    ClienteLogPageAudit(AirVaultConfig()).consultar(
+        date(2026, 9, 1),
+        date(2026, 9, 7),
+        ["8", "9"],
+        progreso=lambda hechos, total: pasos.append((hechos, total)),
+    )
+
+    # El cero no sobra: es el aviso de que la sesion ya esta en pie y de que
+    # lo que se cuente desde ahi es el costo de los reportes, no el de abrir.
+    assert pasos == [(0, 2), (1, 2), (2, 2)]

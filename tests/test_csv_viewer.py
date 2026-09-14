@@ -20,16 +20,8 @@ from app.gui.csv_viewer import (
     run_dir_for_csv,
     source_pdf_paths_for_rows,
 )
-from app.gui.widgets import (
-    PANE_BG,
-    PANE_STATUS_COLORS,
-    PANE_SURFACE_BG,
-    PANE_TEXT,
-    TABLE_ALTERNATE_BG,
-    TABLE_BASE_BG,
-    TABLE_HEADER_BG,
-    TABLE_TEXT,
-)
+from app.gui.tokens import paleta
+from app.gui.widgets import pane_status_colors
 from app.gui.csv_utils import (
     csv_field_id,
     find_csv_files,
@@ -365,8 +357,8 @@ def test_row_and_column_indicators_are_visible(tmp_path: Path):
     # La cabecera se pinta explícitamente: sin fondo y color propios, sobre la
     # tabla oscura el estilo nativo dejaría los rótulos ilegibles.
     stylesheet = viewer.styleSheet()
-    assert f"background-color: {TABLE_HEADER_BG}" in stylesheet
-    assert f"color: {TABLE_TEXT}" in stylesheet
+    assert f"background-color: {paleta().TABLE_HEADER_BG}" in stylesheet
+    assert f"color: {paleta().TABLE_TEXT}" in stylesheet
     viewer.close()
     app.processEvents()
 
@@ -389,13 +381,13 @@ def test_csv_tables_use_the_grey_of_the_interface(tmp_path: Path):
             ):
                 base = palette.color(group, QPalette.ColorRole.Base)
                 alternate = palette.color(group, QPalette.ColorRole.AlternateBase)
-                assert base == QColor(TABLE_BASE_BG)
-                assert alternate == QColor(TABLE_ALTERNATE_BG)
+                assert base == QColor(paleta().TABLE_BASE_BG)
+                assert alternate == QColor(paleta().TABLE_ALTERNATE_BG)
                 assert base != QColor("white")
-        assert f"background-color: {TABLE_BASE_BG}" in viewer.styleSheet()
-        assert f"background-color: {TABLE_BASE_BG}" in main.styleSheet()
+        assert f"background-color: {paleta().TABLE_BASE_BG}" in viewer.styleSheet()
+        assert f"background-color: {paleta().TABLE_BASE_BG}" in main.styleSheet()
         # El panel del PDF comparte el gris; en blanco resaltaba junto a la tabla.
-        assert f"background: {PANE_BG}" in viewer.pdf_viewer.styleSheet()
+        assert f"background: {paleta().PANE_BG}" in viewer.pdf_viewer.styleSheet()
     finally:
         main.close()
         viewer.close()
@@ -420,13 +412,13 @@ def test_pdf_surface_is_not_the_white_of_qt(tmp_path: Path):
             QPalette.ColorGroup.Disabled,
         ):
             base = viewport.palette().color(group, QPalette.ColorRole.Base)
-            assert base == QColor(PANE_SURFACE_BG)
+            assert base == QColor(paleta().PANE_SURFACE_BG)
             assert base != QColor("white")
         # El panel que lo rodea acompaña a la tabla, y su texto se aclara para
         # seguir leyéndose sobre el gris oscuro.
         pane = viewer.palette()
-        assert pane.color(QPalette.ColorRole.Window) == QColor(PANE_BG)
-        assert pane.color(QPalette.ColorRole.WindowText) == QColor(PANE_TEXT)
+        assert pane.color(QPalette.ColorRole.Window) == QColor(paleta().PANE_BG)
+        assert pane.color(QPalette.ColorRole.WindowText) == QColor(paleta().PANE_TEXT)
     finally:
         viewer.close()
         app.processEvents()
@@ -439,7 +431,7 @@ def test_source_status_stays_readable_on_the_dark_pane(tmp_path: Path):
     try:
         viewer.load_paths([], ["falta.pdf"])
         stylesheet = viewer.source_status.styleSheet()
-        assert PANE_STATUS_COLORS["ERROR"].lower() in stylesheet.lower()
+        assert pane_status_colors()["ERROR"].lower() in stylesheet.lower()
         # El rojo oscuro de las celdas quedaría casi invisible sobre el panel.
         assert "#cf222e" not in stylesheet.lower()
     finally:

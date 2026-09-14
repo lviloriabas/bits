@@ -31,15 +31,12 @@ from PySide6.QtWidgets import (
 )
 
 from app.gui.responsive import fit_to_screen
-from app.gui.tokens import SPACE_S, TEXT_SECONDARY
+from app.gui.theme import gestor_tema
+from app.gui.tokens import SPACE_S, on_accent_text, paleta
 from app.gui.widgets import (
-    TABLE_BASE_BG,
-    TABLE_GRID,
-    TABLE_HEADER_BG,
-    PANE_BORDER,
     TABLE_RADIUS,
     TABLE_SELECTION_BG,
-    TABLE_TEXT,
+    pintar_del_tema,
     window_stylesheet,
 )
 from app.validation.depuracion import (
@@ -67,26 +64,31 @@ _AVISO_GRUPO = (
 # después se le pasa a ``depurar_claves`` y no depende de en qué fila quedó.
 _CLAVE = Qt.ItemDataRole.UserRole
 
-# Las listas del cuadro son tablas de datos como las de las dos ventanas, y
-# tienen que verse igual: los mismos grises y el mismo radio de 6 px. La hoja
-# compartida solo nombra QTableView y QTableWidget, así que el árbol se queda
-# con el estilo nativo (esquinas en pico y colores del sistema) si no se le
-# repiten aquí los mismos valores.
-_ARBOL_QSS = (
-    "QTreeWidget {"
-    f" background-color: {TABLE_BASE_BG};"
-    f" color: {TABLE_TEXT};"
-    f" selection-background-color: palette(highlight);"
-    f" selection-color: {TABLE_TEXT};"
-    f" border: 1px solid {PANE_BORDER};"
-    f" border-radius: {TABLE_RADIUS}px; }}"
-    "QTreeWidget::item { padding: 3px 2px; }"
-    f"QTreeWidget::item:selected {{ background-color: palette(highlight); }}"
-    f"QTreeWidget::branch {{ background-color: {TABLE_BASE_BG}; }}"
-    f"QTreeWidget QHeaderView::section {{ background-color: {TABLE_HEADER_BG};"
-    f" color: {TABLE_TEXT}; border: 0;"
-    f" border-right: 1px solid {TABLE_GRID}; }}"
-)
+def _arbol_qss() -> str:
+    """Las listas del cuadro, con los mismos tonos que las tablas.
+
+    Son tablas de datos como las de las dos ventanas y tienen que verse igual:
+    las mismas superficies y el mismo radio de 6 px. La hoja compartida solo
+    nombra QTableView y QTableWidget, así que el árbol se queda con el estilo
+    nativo (esquinas en pico y colores del sistema) si no se le repiten aquí
+    los mismos valores.
+    """
+    c = paleta()
+    return (
+        "QTreeWidget {"
+        f" background-color: {c.TABLE_BASE_BG};"
+        f" color: {c.TABLE_TEXT};"
+        f" selection-background-color: palette(highlight);"
+        f" selection-color: {on_accent_text()};"
+        f" border: 1px solid {c.PANE_BORDER};"
+        f" border-radius: {TABLE_RADIUS}px; }}"
+        "QTreeWidget::item { padding: 3px 2px; }"
+        f"QTreeWidget::item:selected {{ background-color: palette(highlight); }}"
+        f"QTreeWidget::branch {{ background-color: {c.TABLE_BASE_BG}; }}"
+        f"QTreeWidget QHeaderView::section {{ background-color: {c.TABLE_HEADER_BG};"
+        f" color: {c.TABLE_TEXT}; border: 0;"
+        f" border-right: 1px solid {c.TABLE_GRID}; }}"
+    )
 
 
 def _texto_conteo(cantidad: int) -> str:
@@ -127,8 +129,19 @@ class DepurarPaginasDialog(QDialog):
         # Como el resto de los cuadros: la pantalla decide el tamaño, que en
         # un portátil bajo el alto pedido deja los botones fuera del borde.
         self._density = fit_to_screen(self, 560, 560)
-        self.setStyleSheet(window_stylesheet(self._density.qss))
+        self._aplicar_hoja()
         self._build_ui()
+        # La hoja lleva el fragmento de la densidad, así que la rehace el
+        # propio cuadro cuando cambia el tema.
+        gestor_tema().cambiado.connect(self._al_cambiar_tema)
+
+    def _aplicar_hoja(self) -> None:
+        """La hoja del cuadro, con los tonos y las medidas de ahora."""
+        self.setStyleSheet(window_stylesheet(self._density.qss))
+
+    def _al_cambiar_tema(self, _nombre: str) -> None:
+        """Rehace la hoja del cuadro con los tonos del tema nuevo."""
+        self._aplicar_hoja()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -181,7 +194,9 @@ class DepurarPaginasDialog(QDialog):
         layout.addWidget(self.arbol_blancas, 1)
 
         self.total_label = QLabel()
-        self.total_label.setStyleSheet(f"color: {TEXT_SECONDARY};")
+        pintar_del_tema(
+            self.total_label, lambda: f"color: {paleta().TEXT_SECONDARY};"
+        )
         self.total_label.setWordWrap(True)
         layout.addWidget(self.total_label)
 
@@ -211,7 +226,7 @@ class DepurarPaginasDialog(QDialog):
         arbol.setUniformRowHeights(True)
         arbol.setRootIsDecorated(True)
         arbol.setAlternatingRowColors(False)
-        arbol.setStyleSheet(_ARBOL_QSS)
+        arbol.setStyleSheet(_arbol_qss())
         arbol.itemChanged.connect(self._al_cambiar_marca)
         return arbol
 

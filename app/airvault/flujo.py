@@ -1430,7 +1430,7 @@ class Trabajo:
             f"AirVault recibió el archivo como ID {lote.batch_id}, pero no "
             f"confirmó el título «{nombre}» y todavía puede figurar como "
             f"«{lote.nombre or 'Empty-Batch'}». No se indexó ninguna página. "
-            "El programa seguirá comprobándolo, leerá el Batch Name interno "
+            "El programa lo seguirá revisando, leerá el Batch Name interno "
             "y volverá a identificarlo y renombrarlo automáticamente."
         )
 
@@ -1587,7 +1587,7 @@ class Trabajo:
         largo, y AirVault admite un solo dueno.
         """
         if plan.batch_id != self.manifiesto.batch_id:
-            raise ErrorDeCorrida("El batch cambio desde la revision; vuelva a comprobar antes de indexar")
+            raise ErrorDeCorrida("El batch cambio desde la revision; vuelva a revisar antes de indexar")
         self.manifiesto.etapa("indexar").marcar(EstadoEtapa.EN_CURSO)
         self.guardar()
         avanzar = None
@@ -1628,18 +1628,28 @@ class Trabajo:
         self.guardar()
         return resultado
 
-    def verificar(self, cliente, al_avanzar=None) -> Tuple[int, int, Sequence[str]]:
-        """Relee el batch y confirma contra el servidor como quedo."""
+    def verificar(
+        self, cliente, al_avanzar=None, esperas: Sequence[float] = (),
+        dormir: Optional[Callable[[float], None]] = None,
+    ) -> Tuple[int, int, Sequence[str]]:
+        """Relee el batch y confirma contra el servidor como quedo.
+
+        ``esperas`` y ``dormir`` van a las relecturas de las paginas que no
+        se confirmen a la primera; ver :func:`app.airvault.indexer.verificar_lote`.
+        """
         if self.manifiesto.solo_subir:
             from app.airvault.indexer import verificar_revision
 
             validas, total, problemas = verificar_revision(
                 cliente, self.manifiesto, al_avanzar=al_avanzar,
+                esperas=esperas, dormir=dormir,
             )
-            detalle = (f"{validas}/{total} con los datos disponibles comprobados; "
+            detalle = (f"{validas}/{total} con los datos disponibles revisados; "
                        "las incidencias quedan para revision humana")
         else:
-            validas, total, problemas = verificar_lote(cliente, self.manifiesto)
+            validas, total, problemas = verificar_lote(
+                cliente, self.manifiesto, esperas=esperas, dormir=dormir,
+            )
             detalle = f"{validas}/{total} en Valid"
         if validas != total and problemas:
             detalle += f"; {problemas[0]}"
@@ -3716,7 +3726,7 @@ def estado_local(trabajo: "Trabajo") -> EstadoParte:
         return EstadoParte(
             trabajo, SOLO_REVISAR, "subido; falta escribir los datos disponibles"
         )
-    return EstadoParte(trabajo, BUSCANDO, "subido; falta comprobar")
+    return EstadoParte(trabajo, BUSCANDO, "subido; falta revisar")
 
 
 def _nombre_embebido_empty_batch(cliente, lote: ResumenLote) -> str:
@@ -4765,7 +4775,7 @@ def detectar_indexados(
             continue
         if avisar is not None:
             avisar(
-                f"{_prefijo(trabajo)}Comprobando si el batch ya esta "
+                f"{_prefijo(trabajo)}Revisando si el batch ya esta "
                 "indexado",
                 0,
                 0,
@@ -4940,6 +4950,8 @@ def indexar_partes(
 
 def verificar_partes(
     trabajos: Sequence["Trabajo"], cliente, avisar=None,
+    esperas: Sequence[float] = (),
+    dormir: Optional[Callable[[float], None]] = None,
 ) -> Tuple[int, int, List[str]]:
     """Relee todas las partes y suma como quedaron."""
     validas = total = 0
@@ -4949,11 +4961,14 @@ def verificar_partes(
         if avisar and trabajo.manifiesto.solo_subir:
             propias, suyas, suyos = trabajo.verificar(
                 cliente, al_avanzar=lambda n, t: avisar(
-                    f"{cabeza}Comprobando datos guardados", n, t,
+                    f"{cabeza}Revisando datos guardados", n, t,
                 ),
+                esperas=esperas, dormir=dormir,
             )
         else:
-            propias, suyas, suyos = trabajo.verificar(cliente)
+            propias, suyas, suyos = trabajo.verificar(
+                cliente, esperas=esperas, dormir=dormir,
+            )
         validas += propias
         total += suyas
         problemas.extend(f"{cabeza}{p}" for p in suyos)

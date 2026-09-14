@@ -1,6 +1,6 @@
 # BITS - Clasificación de Bitácoras
 
-BITS lee bitácoras de vuelo escaneadas y las convierte en una entrega revisable: reconoce los datos de cada página, los valida contra las reglas del libro y la flota, arma los PDF y los CSV de la entrega, y la sube e indexa en AirVault.
+BITS lee bitácoras de vuelo y mantenimiento escaneadas y las convierte en una entrega revisable: reconoce los datos de cada página, los valida contra las reglas del libro y la flota, arma los PDF y los CSV de la entrega, y la sube e indexa en AirVault.
 
 Es una aplicación de escritorio para Windows. El OCR corre local, en CPU y sin internet; solo la parte de AirVault necesita conexión, Microsoft Edge y una cuenta autorizada.
 
@@ -17,12 +17,12 @@ Abra `BITS.exe` desde la carpeta completa del programa. No requiere instalación
 
 Para reconstruir ese entorno desde el código, ejecute `setup.cmd` (o `setup.ps1`). Los puntos de entrada son:
 
-| Archivo | Para qué |
-|---|---|
-| `run_gui.py` | Ventana principal. Es lo que abre `BITS.exe`. |
-| `run_cli.py` | Procesado por consola, con rangos de páginas. |
+| Archivo           | Para qué                                      |
+| ----------------- | --------------------------------------------- |
+| `run_gui.py`      | Ventana principal. Es lo que abre `BITS.exe`. |
+| `run_cli.py`      | Procesado por consola, con rangos de páginas. |
 | `run_airvault.py` | Carga e indexado en AirVault sin la interfaz. |
-| `run_editor.py` | Editor de plantillas. |
+| `run_editor.py`   | Editor de plantillas.                         |
 
 Pruebas: `python -m pytest`.
 

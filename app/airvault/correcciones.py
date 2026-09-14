@@ -634,6 +634,7 @@ class CorrectorLogPageAudit:
         avisar: Callable[[str], None] | None = None,
         cancelar: Callable[[], bool] | None = None,
         ensayo: bool = True,
+        progreso: Callable[[int, int], None] | None = None,
     ) -> list[Resultado]:
         """Recorre el plan. Con ``ensayo`` comprueba pero no escribe nada.
 
@@ -641,9 +642,17 @@ class CorrectorLogPageAudit:
         y se hace igual en los dos. Abre la busqueda de esa bitacora, lee la
         rejilla y contrasta lo que hay ahora con lo que decia el reporte. Lo
         unico que cambia es si despues se toca algo.
+
+        ``avisar`` es la frase de estado y ``progreso`` la cuenta: cuantas
+        bitacoras van de cuantas. La cuenta la usa el cronometro de la
+        ventana, que necesita numeros y no texto, y por eso no viaja el plan
+        entero sino lo que de verdad se abre en Edge: las filas de revision
+        manual salen resueltas sin tocar el navegador. El primer aviso llega
+        con cero hechas, en cuanto la sesion esta en pie.
         """
         notificar = avisar or (lambda _texto: None)
         esta_cancelado = cancelar or (lambda: False)
+        avanzar = progreso or (lambda _hechos, _total: None)
         pendientes = [
             correccion
             for correccion in plan
@@ -674,6 +683,7 @@ class CorrectorLogPageAudit:
                 espera_s=self.config.espera_login_s,
             )
             esperar_acceso(lambda: navegador.cookies(version), self.config)
+            avanzar(0, len(pendientes))
             for numero, correccion in enumerate(pendientes, start=1):
                 if esta_cancelado():
                     raise ConsultaCancelada()
@@ -687,6 +697,7 @@ class CorrectorLogPageAudit:
                         esta_cancelado, ensayo,
                     )
                 )
+                avanzar(numero, len(pendientes))
         return resultados
 
     def _un_caso(

@@ -657,7 +657,7 @@ def learn_book_matriculas(
     path: Path,
     fleet: Collection[str] = (),
 ) -> int:
-    """Guarda asociaciones fuertes libro→matrícula para otras ejecuciones.
+    """Guarda asociaciones fuertes libro->matrícula para otras ejecuciones.
 
     Solo aprende cuando dos páginas físicas independientes respaldan la
     lectura con la confianza normal del corrector y el resultado final no

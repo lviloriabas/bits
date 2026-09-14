@@ -396,6 +396,7 @@ def test_los_controles_vecinos_comparten_alto_y_ancho():
                 ventana.progress,
                 ventana.btn_process,
                 ventana.btn_cancel,
+                ventana.tema_toggle,
                 ventana.more_actions_button,
                 ventana.btn_automatico,
                 ventana.search_edit,
@@ -410,6 +411,7 @@ def test_los_controles_vecinos_comparten_alto_y_ancho():
             assert {control.height() for control in controles} == {
                 CONTROL_HEIGHT
             }
+            assert ventana.tema_toggle.width() == CONTROL_HEIGHT
             assert ventana.time_summary.height() == CONTROL_HEIGHT
             divisores = [
                 child
@@ -450,12 +452,17 @@ def test_los_controles_vecinos_comparten_alto_y_ancho():
             )
             progreso = ventana.progress.mapTo(ventana, QPoint())
             automatico = ventana.btn_automatico.mapTo(ventana, QPoint())
+            tema = ventana.tema_toggle.mapTo(ventana, QPoint())
             assert progreso.x() == ventana._density.window_margin
             assert (
                 automatico.x() + ventana.btn_automatico.width()
                 == ventana.width() - ventana._density.window_margin
             )
             assert progreso.x() + ventana.progress.width() < automatico.x()
+            assert (
+                tema.x() + ventana.tema_toggle.width()
+                == ventana.width() - ventana._density.window_margin
+            )
             assert all(
                 etiqueta.text() == "00:00:00"
                 for etiqueta in ventana.time_labels.values()
@@ -465,6 +472,7 @@ def test_los_controles_vecinos_comparten_alto_y_ancho():
             assert {control.height() for control in controles} == {
                 CONTROL_HEIGHT_COMPACT
             }
+            assert ventana.tema_toggle.width() == CONTROL_HEIGHT_COMPACT
             assert ventana.time_summary.height() == CONTROL_HEIGHT_COMPACT
             # La compacta aprieta el relleno, pero la celda de la flecha mide
             # lo mismo: el botón sigue teniendo que reservarla.

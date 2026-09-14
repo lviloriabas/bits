@@ -7,8 +7,8 @@ sin mostrar consola y sin instalar nada. Toda la aplicación vive dentro de
 la misma carpeta; solo hay que copiar la carpeta completa a otra máquina.
 
 Métodos de uso:
-    - Doble clic en ``BITS.exe`` → abre la GUI.
-    - ``python launcher_gui.py`` → equivalente durante el desarrollo.
+    - Doble clic en ``BITS.exe`` -> abre la GUI.
+    - ``python launcher_gui.py`` -> equivalente durante el desarrollo.
 """
 
 from __future__ import annotations

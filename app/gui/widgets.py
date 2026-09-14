@@ -29,6 +29,8 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QStyle,
     QStyledItemDelegate,
+    QTableWidget,
+    QTableWidgetItem,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -36,55 +38,52 @@ from PySide6.QtWidgets import (
 
 from app.gui.tokens import (
     ACCENT_FALLBACK,
-    CARD_BG,
-    CONTROL_BG,
     CONTROL_BOX_H,
-    CONTROL_DISABLED,
     CONTROL_HEIGHT,
-    CONTROL_HOVER,
     CONTROL_PAD_H,
-    CONTROL_PRESSED,
     FONT_BODY_PT,
     FONT_CAPTION_PT,
     FONT_FAMILY,
     RADIUS_CARD,
     RADIUS_CONTROL,
     SPACE_S,
-    STATUS_ERROR,
-    STATUS_OK,
-    STATUS_WARNING,
-    STROKE,
-    STROKE_STRONG,
-    TEXT,
-    TEXT_DISABLED,
-    TEXT_SECONDARY,
     WEIGHT_STRONG,
-    WINDOW_BG,
+    TEMA_CLARO,
+    TEMA_OSCURO,
     accent_color,
     blend,
     checked_row_color,
     hover_row_color,
+    link_text_color,
+    on_accent_text,
+    paleta,
+    tema,
 )
 
 _ASSETS = Path(__file__).resolve().parents[2] / "assets"
-_DROPDOWN_ARROW = (_ASSETS / "dropdown_arrow.svg").as_posix()
+# La flecha de los desplegables, una por tema. Va por archivo y no por color
+# porque QSS la pide con ``image: url(...)`` y a un archivo no se le puede
+# cambiar la tinta desde la hoja; los iconos de los botones si se tinan al
+# vuelo (ver ``load_icon``), pero esos los pone Python y no la hoja.
+_DROPDOWN_ARROWS = {
+    TEMA_OSCURO: (_ASSETS / "dropdown_arrow.svg").as_posix(),
+    TEMA_CLARO: (_ASSETS / "dropdown_arrow_claro.svg").as_posix(),
+}
 
-# Los nombres de siempre, ya apuntando a los tonos de ``tokens``. Se conservan
-# porque los usan el visor de CSV, el diálogo de depuración y el tema, y porque
-# dicen dónde va cada color («la base de la tabla», «el borde del panel»), que
-# es lo que hace falta al leer una hoja de estilo. Lo que cambia es que ya no
-# los define nadie a mano: antes convivían dos paletas, la de GitHub y la de
-# Windows, y el mismo gris estaba escrito de dos formas —«#313131» y
-# «rgb(49, 49, 49)»— en archivos distintos.
-TABLE_BASE_BG = CARD_BG
-TABLE_ALTERNATE_BG = "#313131"
-TABLE_HEADER_BG = "#252525"
-TABLE_GRID = STROKE_STRONG
-TABLE_TEXT = TEXT
 
-# El azul de la selección ya no es un valor escrito aquí: es el acento que el
-# usuario eligió en Windows. Este queda como reserva, para el código que
-# necesita un literal antes de que exista la aplicación a la que preguntarle.
+def _dropdown_arrow() -> str:
+    """La flecha que se lee sobre la superficie del tema puesto ahora."""
+    return _DROPDOWN_ARROWS[tema()]
+
+# Los tonos ya no se copian aqui. Los nombres siguen siendo los mismos
+# («la base de la tabla», «el borde del panel»), pero viven en
+# ``tokens.Paleta`` y se piden con ``paleta()`` en el momento de armar la
+# hoja: una constante de modulo se quedaria con los grises del arranque y el
+# cambio de tema no llegaria a ninguna ventana ya abierta.
+
+# El azul de la seleccion no es un valor escrito aqui: es el acento que el
+# usuario eligio en Windows. Este queda como reserva, para el codigo que
+# necesita un literal antes de que exista la aplicacion a la que preguntarle.
 TABLE_SELECTION_BG = ACCENT_FALLBACK
 
 # La fila bajo el cursor y la fila marcada con su casilla viven en
@@ -92,25 +91,21 @@ TABLE_SELECTION_BG = ACCENT_FALLBACK
 # acento en lugar de ser dos azules escritos a mano, que era lo que dejaba una
 # banda azul en una aplicación con el acento en rojo.
 
-# El visor de PDF acompaña a la tabla dentro de la misma ventana, así que va
-# en su mismo gris. La superficie que rodea la página baja al tono más oscuro:
-# el papel del escaneo es blanco y necesita flotar sobre algo, como en
-# cualquier lector de PDF.
-PANE_BG = TABLE_BASE_BG
-PANE_SURFACE_BG = WINDOW_BG
-PANE_CONTROL_BG = CONTROL_BG
-PANE_CONTROL_HOVER = CONTROL_HOVER
-PANE_BORDER = STROKE
-PANE_TEXT = TEXT
-# Los estados se leen como texto sobre el gris oscuro, no como relleno de
-# celda: los tonos de la tabla están pensados para llevar texto blanco encima
-# y sobre el panel quedarían casi invisibles. Son los tres de Windows para
-# fondo oscuro; los de antes venían de la paleta de GitHub.
-PANE_STATUS_COLORS = {
-    "OK": STATUS_OK,
-    "WARNING": STATUS_WARNING,
-    "ERROR": STATUS_ERROR,
-}
+
+def pane_status_colors() -> dict[str, str]:
+    """Los tres estados, en los tonos del tema puesto ahora.
+
+    Se leen como texto sobre la superficie del panel y no como relleno de
+    celda, asi que cambian con el tema: el verde claro que se lee de noche
+    desaparece sobre el blanco, y al reves.
+    """
+    tonos = paleta()
+    return {
+        "OK": tonos.STATUS_OK,
+        "WARNING": tonos.STATUS_WARNING,
+        "ERROR": tonos.STATUS_ERROR,
+    }
+
 
 # Radio de esquina. El de los controles; las superficies que los contienen
 # llevan el suyo, mayor, para que un botón dentro de un cuadro no tenga la
@@ -131,48 +126,66 @@ SPLIT_MENU_WIDTH = 24
 SPLIT_PAD_LEFT = 10
 SPLIT_PAD_RIGHT = SPLIT_PAD_LEFT + SPLIT_MENU_WIDTH
 
-# Ambas ventanas comparten esta hoja para que la tabla se vea igual en las dos.
-DATA_TABLE_QSS = (
-    "QTableView, QTableWidget {"
-    f" background-color: {TABLE_BASE_BG};"
-    f" alternate-background-color: {TABLE_ALTERNATE_BG};"
-    f" color: {TABLE_TEXT};"
-    f" gridline-color: {TABLE_GRID};"
-    f" selection-background-color: palette(highlight);"
-    f" selection-color: {TABLE_TEXT};"
-    f" border: 1px solid {PANE_BORDER};"
-    f" border-radius: {TABLE_RADIUS}px; }}"
-    "QHeaderView { background-color: transparent; }"
-    "QHeaderView::section {"
-    f" background-color: {TABLE_HEADER_BG};"
-    f" color: {TABLE_TEXT}; padding: 6px 8px; font-weight: 600;"
-    f" border: 0; border-right: 1px solid {TABLE_GRID};"
-    f" border-bottom: 1px solid {TABLE_GRID}; }}"
-    "QTableCornerButton::section {"
-    f" background-color: {TABLE_HEADER_BG};"
-    f" border: 0; border-right: 1px solid {TABLE_GRID};"
-    f" border-bottom: 1px solid {TABLE_GRID}; }}"
-    # El hueco entre las dos barras de desplazamiento lo pinta la propia área
-    # de scroll y es lo único que no respeta el radio: sin dejarlo
-    # transparente, la esquina inferior derecha se queda en pico.
-    "QTableView::corner, QTableWidget::corner { background: transparent; }"
-)
 
-# Las barras de desplazamiento son parte de la superficie: dejarlas en el
-# blanco nativo ponía una franja luminosa al borde de cada widget oscuro. Se
-# aplican por descendencia para que sirvan igual a la tabla y al visor de PDF.
-def scrollbars_qss(scope: str) -> str:  # noqa: E302 - va junto a la hoja
-    """Barras de desplazamiento oscuras para los widgets de ``scope``."""
+def data_table_qss() -> str:
+    """La tabla, en los tonos del tema puesto ahora.
+
+    La comparten todas las ventanas con tabla para que se vea igual en
+    todas. Se arma al pedirla y no al importar el modulo: es lo que hace
+    que al cambiar de tema la ventana ya abierta pueda volver a pedirla.
+    """
+    c = paleta()
+    return (
+        "QTableView, QTableWidget {"
+        f" background-color: {c.TABLE_BASE_BG};"
+        f" alternate-background-color: {c.TABLE_ALTERNATE_BG};"
+        f" color: {c.TABLE_TEXT};"
+        f" gridline-color: {c.TABLE_GRID};"
+        f" selection-background-color: palette(highlight);"
+        # El texto de la fila seleccionada va sobre el acento, no sobre la
+        # tabla: lo decide la luminancia del acento y no el tema, porque en
+        # los dos hay acentos claros sobre los que el blanco no se lee.
+        f" selection-color: {on_accent_text()};"
+        f" border: 1px solid {c.PANE_BORDER};"
+        f" border-radius: {TABLE_RADIUS}px; }}"
+        "QHeaderView { background-color: transparent; }"
+        "QHeaderView::section {"
+        f" background-color: {c.TABLE_HEADER_BG};"
+        f" color: {c.TABLE_TEXT}; padding: 6px 8px; font-weight: 600;"
+        f" border: 0; border-right: 1px solid {c.TABLE_GRID};"
+        f" border-bottom: 1px solid {c.TABLE_GRID}; }}"
+        "QTableCornerButton::section {"
+        f" background-color: {c.TABLE_HEADER_BG};"
+        f" border: 0; border-right: 1px solid {c.TABLE_GRID};"
+        f" border-bottom: 1px solid {c.TABLE_GRID}; }}"
+        # El hueco entre las dos barras de desplazamiento lo pinta la propia área
+        # de scroll y es lo único que no respeta el radio: sin dejarlo
+        # transparente, la esquina inferior derecha se queda en pico.
+        "QTableView::corner, QTableWidget::corner { background: transparent; }"
+        # Las barras de la propia tabla van en la hoja: aplicadas por
+        # descendencia sirven igual aqui y en el visor de PDF.
+    ) + scrollbars_qss("QTableView") + scrollbars_qss("QTableWidget")
+
+
+def scrollbars_qss(scope: str) -> str:
+    """Barras de desplazamiento del tema para los widgets de ``scope``.
+
+    Son parte de la superficie: dejarlas en el blanco nativo ponia una franja
+    luminosa al borde de cada widget oscuro. Se aplican por descendencia para
+    que sirvan igual a la tabla y al visor de PDF.
+    """
+    c = paleta()
     return (
         f"{scope} QScrollBar:vertical, {scope} QScrollBar:horizontal {{"
-        f" background: {TABLE_HEADER_BG}; border: 0; margin: 0; }}"
+        f" background: {c.TABLE_HEADER_BG}; border: 0; margin: 0; }}"
         f"{scope} QScrollBar:vertical {{ width: 12px; }}"
         f"{scope} QScrollBar:horizontal {{ height: 12px; }}"
         f"{scope} QScrollBar::handle:vertical,"
         f"{scope} QScrollBar::handle:horizontal {{"
-        f" background: {TABLE_GRID}; border-radius: 6px; margin: 2px; }}"
+        f" background: {c.TABLE_GRID}; border-radius: 6px; margin: 2px; }}"
         f"{scope} QScrollBar::handle:vertical:hover,"
-        f"{scope} QScrollBar::handle:horizontal:hover {{ background: #5f5f5f; }}"
+        f"{scope} QScrollBar::handle:horizontal:hover {{"
+        f" background: {c.SCROLL_HANDLE_HOVER}; }}"
         f"{scope} QScrollBar::handle:vertical {{ min-height: 24px; }}"
         f"{scope} QScrollBar::handle:horizontal {{ min-width: 24px; }}"
         # Sin esto Qt reserva el hueco de los botones de flecha y deja dos
@@ -184,22 +197,25 @@ def scrollbars_qss(scope: str) -> str:  # noqa: E302 - va junto a la hoja
     )
 
 
-DATA_TABLE_QSS += scrollbars_qss("QTableView") + scrollbars_qss("QTableWidget")
+def zoom_overlay_qss() -> str:
+    """El recuadro flotante de zoom, en los tonos del tema puesto ahora.
 
-# Recuadro flotante de zoom: el mismo bloque en la vista previa de la ventana
-# principal y en el visor de PDF del visor de CSV. Vive aquí para que los dos
-# no puedan separarse; cada ventana lo añade al final de su hoja, después de
-# sus reglas de panel, para ganar a las que tienen la misma especificidad.
-ZOOM_OVERLAY_QSS = f"""
+    El mismo bloque en la vista previa de la ventana principal y en el visor
+    de PDF del visor de CSV. Vive aqui para que los dos no puedan separarse;
+    cada ventana lo anade al final de su hoja, despues de sus reglas de panel,
+    para ganar a las que tienen la misma especificidad.
+    """
+    c = paleta()
+    return f"""
 #zoomOverlay {{
-    background-color: {CARD_BG};
-    border: 1px solid {STROKE};
+    background-color: {c.CARD_BG};
+    border: 1px solid {c.STROKE};
     border-radius: {RADIUS_CARD}px;
 }}
 #zoomOverlay QLabel {{
     border: 0;
     background: transparent;
-    color: {TEXT};
+    color: {c.TEXT};
     font-size: {FONT_CAPTION_PT}pt;
     font-weight: {WEIGHT_STRONG};
 }}
@@ -211,59 +227,78 @@ ZOOM_OVERLAY_QSS = f"""
     padding: 0;
     border: 1px solid transparent;
     border-radius: {RADIUS_CONTROL}px;
-    background-color: {CARD_BG};
+    background-color: {c.CARD_BG};
 }}
 #zoomOverlay QToolButton#zoomControl:hover {{
-    background-color: {CONTROL_HOVER};
-    border-color: {STROKE_STRONG};
+    background-color: {c.CONTROL_HOVER};
+    border-color: {c.STROKE_STRONG};
 }}
 #zoomOverlay QToolButton#zoomControl:pressed {{
-    background-color: {CONTROL_PRESSED};
-    border-color: {STROKE_STRONG};
+    background-color: {c.CONTROL_PRESSED};
+    border-color: {c.STROKE_STRONG};
 }}
 #zoomOverlay QToolButton#zoomControl:disabled {{
-    background-color: {CARD_BG};
+    background-color: {c.CARD_BG};
 }}
 #zoomOverlay QLabel#zoomValue {{
     min-width: 40px;
     padding: 0 2px;
-    color: {TEXT};
+    color: {c.TEXT};
     font-size: {FONT_CAPTION_PT}pt;
     font-weight: {WEIGHT_STRONG};
 }}
 """
 
-# Tipografia y controles de la aplicacion. Los colores salen de las mismas
-# superficies oscuras de las tablas y visores para que todas las ventanas se
-# lean como una sola aplicacion. El marco del sistema lo completa theme.py.
-APP_CHROME_QSS = f"""
+
+def app_chrome_qss() -> str:
+    """Tipografia, controles y superficies de toda la aplicacion.
+
+    Los colores salen de las mismas superficies que las tablas y los
+    visores para que todas las ventanas se lean como una sola aplicacion.
+    El marco del sistema lo completa ``theme.py``.
+
+    Antes se armaba al importar el modulo, cuando todavia no hay
+    ``QApplication`` a la que preguntarle el acento: por eso tantas reglas
+    piden ``palette(highlight)``, que es el unico acento que QSS sabe leer
+    solo. Ahora se arma al instalarla, asi que el texto que va encima del
+    acento (``ON_ACCENT``) si puede decidirse por luminancia en vez de dar
+    por hecho que el acento es un azul oscuro y escribir blanco encima.
+    """
+    c = paleta()
+    on_accent = on_accent_text()
+    flecha = _dropdown_arrow()
+    flecha_acento = _DROPDOWN_ARROWS[
+        TEMA_CLARO if QColor(on_accent).lightness() < 128 else TEMA_OSCURO
+    ]
+    separador_acento = blend(on_accent, accent_color(), 0.45)
+    return f"""
 QMainWindow, QDialog {{
-    background-color: {PANE_SURFACE_BG};
+    background-color: {c.PANE_SURFACE_BG};
 }}
 QWidget {{
-    color: {PANE_TEXT};
+    color: {c.PANE_TEXT};
     font-family: {FONT_FAMILY};
     font-size: {FONT_BODY_PT}pt;
 }}
 QLabel:disabled, QCheckBox:disabled, QRadioButton:disabled {{
-    color: {TEXT_DISABLED};
+    color: {c.TEXT_DISABLED};
 }}
 QPushButton {{
     min-height: {CONTROL_BOX_H}px;
     max-height: {CONTROL_BOX_H}px;
     padding: 0 {CONTROL_PAD_H}px;
-    color: {PANE_TEXT};
-    background-color: {PANE_CONTROL_BG};
-    border: 1px solid {PANE_BORDER};
+    color: {c.PANE_TEXT};
+    background-color: {c.PANE_CONTROL_BG};
+    border: 1px solid {c.PANE_BORDER};
     border-radius: {TABLE_RADIUS}px;
 }}
 QToolButton {{
     min-height: {CONTROL_BOX_H}px;
     max-height: {CONTROL_BOX_H}px;
     padding: 0 {CONTROL_PAD_H}px;
-    color: {PANE_TEXT};
-    background-color: {PANE_CONTROL_BG};
-    border: 1px solid {PANE_BORDER};
+    color: {c.PANE_TEXT};
+    background-color: {c.PANE_CONTROL_BG};
+    border: 1px solid {c.PANE_BORDER};
     border-radius: {TABLE_RADIUS}px;
 }}
 QToolButton#primaryButton {{
@@ -283,7 +318,7 @@ QToolButton[menuRole="dropdown"]::menu-indicator {{
     right: 7px;
     width: 10px;
     height: 6px;
-    image: url("{_DROPDOWN_ARROW}");
+    image: url("{flecha}");
 }}
 QToolButton[menuRole="split"] {{
     min-height: {CONTROL_BOX_H}px;
@@ -295,17 +330,17 @@ QToolButton[menuRole="split"]::menu-button {{
     subcontrol-position: top right;
     width: {SPLIT_MENU_WIDTH}px;
     border: 0;
-    border-left: 1px solid {PANE_BORDER};
+    border-left: 1px solid {c.PANE_BORDER};
     border-top-right-radius: {TABLE_RADIUS}px;
     border-bottom-right-radius: {TABLE_RADIUS}px;
 }}
 QToolButton[menuRole="split"]::menu-button:hover {{
-    background-color: {PANE_CONTROL_HOVER};
+    background-color: {c.PANE_CONTROL_HOVER};
 }}
 QToolButton[menuRole="split"]::menu-arrow {{
     width: 10px;
     height: 6px;
-    image: url("{_DROPDOWN_ARROW}");
+    image: url("{flecha}");
 }}
 /* El relleno se repite aquí a propósito. En QSS un selector de ID pesa más
    que uno de atributo, así que «QToolButton#primaryButton» le gana a
@@ -318,11 +353,11 @@ QToolButton#primaryButton[menuRole="split"] {{
     padding: 0 {SPLIT_PAD_RIGHT}px 0 {SPLIT_PAD_LEFT}px;
 }}
 QPushButton:hover, QToolButton:hover {{
-    background-color: {PANE_CONTROL_HOVER};
+    background-color: {c.PANE_CONTROL_HOVER};
 }}
 QPushButton:pressed, QToolButton:pressed,
 QPushButton:checked, QToolButton:checked {{
-    background-color: {PANE_SURFACE_BG};
+    background-color: {c.CONTROL_PRESSED};
 }}
 QPushButton:focus, QToolButton:focus {{
     border-color: palette(highlight);
@@ -331,41 +366,41 @@ QPushButton:default {{
     border-color: palette(highlight);
 }}
 QPushButton:disabled, QToolButton:disabled {{
-    color: {TEXT_DISABLED};
-    background-color: {TABLE_HEADER_BG};
-    border-color: {PANE_BG};
+    color: {c.TEXT_DISABLED};
+    background-color: {c.CONTROL_DISABLED};
+    border-color: {c.PANE_BG};
 }}
 #primaryButton {{
     background-color: palette(highlight);
-    color: {PANE_TEXT};
+    color: {on_accent};
     border-color: palette(highlight);
 }}
-/* El separador de la celda de la flecha. El gris del marco se apagaba sobre
-   el acento, así que es blanco translúcido: no trae color propio y vale para
-   cualquier acento del sistema. Lo que le pasa a esa celda al pasar el cursor
-   lo fija ``accent_button_qss``, con el acento ya conocido; aquí no se puede
-   porque la hoja se arma al importar el módulo. */
+/* Flecha y separador acompañan al texto sobre el acento, que puede ser
+   distinto del texto sobre las superficies del tema. */
 QToolButton#primaryButton[menuRole="split"]::menu-button {{
-    border-left: 1px solid rgba(255, 255, 255, 0.45);
+    border-left: 1px solid {separador_acento};
+}}
+QToolButton#primaryButton[menuRole="split"]::menu-arrow {{
+    image: url("{flecha_acento}");
 }}
 QToolButton#spinStepButton {{
     min-width: 18px; max-width: 18px; min-height: 0;
     padding: 0;
-    border: 1px solid {PANE_BORDER};
+    border: 1px solid {c.PANE_BORDER};
     border-radius: {TABLE_RADIUS}px;
-    background-color: {PANE_CONTROL_BG};
+    background-color: {c.PANE_CONTROL_BG};
 }}
 QToolButton#spinStepButton:hover {{
-    background-color: {PANE_CONTROL_HOVER};
-    border-color: {TEXT_DISABLED};
+    background-color: {c.PANE_CONTROL_HOVER};
+    border-color: {c.TEXT_DISABLED};
 }}
 QToolButton#spinStepButton:pressed {{
-    background-color: {PANE_SURFACE_BG};
-    border-color: {TEXT_DISABLED};
+    background-color: {c.CONTROL_PRESSED};
+    border-color: {c.TEXT_DISABLED};
 }}
 QToolButton#spinStepButton:disabled {{
-    background-color: {TABLE_HEADER_BG};
-    color: {TEXT_DISABLED};
+    background-color: {c.CONTROL_DISABLED};
+    color: {c.TEXT_DISABLED};
 }}
 /* El campo numérico va en la lista. Fuera de ella se quedaba con el marco
    nativo, que mide 3 px por lado en vez de 1, y acababa 4 px más alto que sus
@@ -375,34 +410,34 @@ QDateEdit, QTimeEdit, QDateTimeEdit {{
     min-height: {CONTROL_BOX_H}px;
     max-height: {CONTROL_BOX_H}px;
     padding: 0 {CONTROL_PAD_H}px;
-    color: {PANE_TEXT};
-    background-color: {PANE_CONTROL_BG};
-    border: 1px solid {PANE_BORDER};
+    color: {c.PANE_TEXT};
+    background-color: {c.PANE_CONTROL_BG};
+    border: 1px solid {c.PANE_BORDER};
     /* Fluent marca el foco con una linea fina abajo, y solo al enfocar. Los
        2 px permanentes que habia aqui son de Material, y ponian un subrayado
        claro bajo cada campo de la ventana. */
-    border-bottom: 1px solid {STROKE_STRONG};
+    border-bottom: 1px solid {c.STROKE_STRONG};
     border-radius: {TABLE_RADIUS}px;
     selection-background-color: palette(highlight);
-    selection-color: {PANE_TEXT};
+    selection-color: {on_accent};
 }}
 QLineEdit:hover, QSpinBox:hover, QDoubleSpinBox:hover, QComboBox:hover,
 QDateEdit:hover, QTimeEdit:hover, QDateTimeEdit:hover {{
-    background-color: {PANE_CONTROL_HOVER};
+    background-color: {c.PANE_CONTROL_HOVER};
 }}
 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus,
 QDateEdit:focus, QTimeEdit:focus, QDateTimeEdit:focus {{
     border-bottom: 2px solid palette(highlight);
 }}
 QLineEdit:read-only {{
-    background-color: {PANE_CONTROL_BG};
+    background-color: {c.PANE_CONTROL_BG};
 }}
 QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled,
 QComboBox:disabled, QDateEdit:disabled, QTimeEdit:disabled,
 QDateTimeEdit:disabled {{
-    color: {TEXT_DISABLED};
-    background-color: {TABLE_HEADER_BG};
-    border-color: {PANE_BG};
+    color: {c.TEXT_DISABLED};
+    background-color: {c.CONTROL_DISABLED};
+    border-color: {c.PANE_BG};
 }}
 QComboBox::drop-down {{
     subcontrol-origin: padding;
@@ -426,25 +461,30 @@ QComboBox {{
 QComboBox::down-arrow {{
     width: 10px;
     height: 6px;
-    image: url("{_DROPDOWN_ARROW}");
+    image: url("{flecha}");
 }}
 QComboBox:hover::drop-down, QComboBox:on::drop-down {{
-    background-color: {PANE_CONTROL_HOVER};
-    border-left-color: {PANE_BORDER};
+    background-color: {c.PANE_CONTROL_HOVER};
+    border-left-color: {c.PANE_BORDER};
 }}
 QComboBox QAbstractItemView {{
-    color: {PANE_TEXT};
-    background-color: {PANE_BG};
-    border: 1px solid {PANE_BORDER};
+    color: {c.PANE_TEXT};
+    background-color: {c.PANE_BG};
+    border: 1px solid {c.PANE_BORDER};
     border-radius: {TABLE_RADIUS}px;
     padding: 4px;
     selection-background-color: palette(highlight);
+    selection-color: {on_accent};
     outline: 0;
 }}
 QComboBox QAbstractItemView::item {{
     min-height: {CONTROL_BOX_H}px;
     padding: 3px 8px;
     border-radius: 4px;
+}}
+QComboBox QAbstractItemView::item:selected {{
+    color: {on_accent};
+    background-color: palette(highlight);
 }}
 /* El campo de fecha es el unico desplegable de la aplicacion que no es un
    QComboBox, y era el unico sin reglas: se quedaba con lo que dibuja
@@ -464,11 +504,11 @@ QDateEdit::drop-down, QTimeEdit::drop-down, QDateTimeEdit::drop-down {{
 QDateEdit::down-arrow, QTimeEdit::down-arrow, QDateTimeEdit::down-arrow {{
     width: 10px;
     height: 6px;
-    image: url("{_DROPDOWN_ARROW}");
+    image: url("{flecha}");
 }}
 QDateEdit:hover::drop-down, QDateEdit:on::drop-down,
 QTimeEdit:hover::drop-down, QDateTimeEdit:hover::drop-down {{
-    background-color: {PANE_CONTROL_HOVER};
+    background-color: {c.PANE_CONTROL_HOVER};
 }}
 /* Y el calendario que sale al pulsarla. Es una ventana con sus propios
    hijos, asi que hay que nombrarlos uno a uno: la barra del mes, sus
@@ -477,12 +517,12 @@ QTimeEdit:hover::drop-down, QDateTimeEdit:hover::drop-down {{
    de datos: lineas de cuadricula, filas alternas y cabecera en negrita
    sobre lo que tiene que ser un calendario. */
 QCalendarWidget QWidget#qt_calendar_navigationbar {{
-    background-color: {TABLE_HEADER_BG};
+    background-color: {c.TABLE_HEADER_BG};
     border-top-left-radius: {TABLE_RADIUS}px;
     border-top-right-radius: {TABLE_RADIUS}px;
 }}
 QCalendarWidget QToolButton {{
-    color: {PANE_TEXT};
+    color: {c.PANE_TEXT};
     background-color: transparent;
     border: 0;
     border-radius: {TABLE_RADIUS}px;
@@ -490,29 +530,29 @@ QCalendarWidget QToolButton {{
     padding: 0 {SPACE_S}px;
 }}
 QCalendarWidget QToolButton:hover {{
-    background-color: {PANE_CONTROL_HOVER};
+    background-color: {c.PANE_CONTROL_HOVER};
 }}
 QCalendarWidget QToolButton::menu-indicator {{
     image: none;
 }}
 QCalendarWidget QAbstractItemView {{
-    color: {PANE_TEXT};
-    background-color: {PANE_BG};
-    alternate-background-color: {PANE_BG};
+    color: {c.PANE_TEXT};
+    background-color: {c.PANE_BG};
+    alternate-background-color: {c.PANE_BG};
     gridline-color: transparent;
     selection-background-color: palette(highlight);
-    selection-color: {PANE_TEXT};
+    selection-color: {on_accent};
     border: 0;
     outline: 0;
 }}
 QCalendarWidget QAbstractItemView:disabled {{
-    color: {TEXT_DISABLED};
+    color: {c.TEXT_DISABLED};
 }}
 QGroupBox {{
-    color: {PANE_TEXT};
-    background-color: {TABLE_BASE_BG};
+    color: {c.PANE_TEXT};
+    background-color: {c.TABLE_BASE_BG};
     font-weight: 600;
-    border: 1px solid {PANE_BORDER};
+    border: 1px solid {c.PANE_BORDER};
     border-radius: {RADIUS_CARD}px;
     margin-top: 0;
     padding: 24px 12px 12px 12px;
@@ -523,7 +563,7 @@ QGroupBox::title {{
     left: 8px;
     top: 5px;
     padding: 0;
-    color: {PANE_TEXT};
+    color: {c.PANE_TEXT};
     background: transparent;
 }}
 /* La casilla comparte fila con campos y botones, asi que comparte alto: sin
@@ -538,9 +578,9 @@ QCheckBox, QRadioButton {{
 QProgressBar {{
     min-height: {CONTROL_BOX_H}px;
     max-height: {CONTROL_BOX_H}px;
-    color: {PANE_TEXT};
-    background-color: {PANE_CONTROL_BG};
-    border: 1px solid {PANE_BORDER};
+    color: {c.PANE_TEXT};
+    background-color: {c.PANE_CONTROL_BG};
+    border: 1px solid {c.PANE_BORDER};
     border-radius: {TABLE_RADIUS}px;
     text-align: center;
 }}
@@ -549,32 +589,32 @@ QProgressBar::chunk {{
     border-radius: 5px;
 }}
 QPlainTextEdit, QTextEdit, QListView, QListWidget, QTreeView, QTreeWidget {{
-    color: {PANE_TEXT};
-    background-color: {PANE_BG};
-    alternate-background-color: {TABLE_ALTERNATE_BG};
-    border: 1px solid {PANE_BORDER};
+    color: {c.PANE_TEXT};
+    background-color: {c.PANE_BG};
+    alternate-background-color: {c.TABLE_ALTERNATE_BG};
+    border: 1px solid {c.PANE_BORDER};
     border-radius: {TABLE_RADIUS}px;
     selection-background-color: palette(highlight);
-    selection-color: {PANE_TEXT};
+    selection-color: {on_accent};
     outline: 0;
 }}
 QToolBar {{
-    color: {PANE_TEXT};
-    background-color: {PANE_SURFACE_BG};
+    color: {c.PANE_TEXT};
+    background-color: {c.PANE_SURFACE_BG};
     border: 0;
-    border-bottom: 1px solid {PANE_BORDER};
+    border-bottom: 1px solid {c.PANE_BORDER};
     spacing: 4px;
     padding: 4px;
 }}
 QToolBar::separator {{
     width: 1px;
     margin: 5px 4px;
-    background-color: {PANE_BORDER};
+    background-color: {c.PANE_BORDER};
 }}
 QMenu {{
-    color: {PANE_TEXT};
-    background-color: {PANE_BG};
-    border: 1px solid {PANE_BORDER};
+    color: {c.PANE_TEXT};
+    background-color: {c.PANE_BG};
+    border: 1px solid {c.PANE_BORDER};
     border-radius: {TABLE_RADIUS}px;
     padding: 4px;
 }}
@@ -588,8 +628,8 @@ QMenu::item {{
     min-height: 22px;
     padding: 5px 28px 5px 12px;
 }}
-QMenu::item:selected {{ background-color: {PANE_CONTROL_HOVER}; }}
-QMenu::item:disabled {{ color: {TEXT_DISABLED}; }}
+QMenu::item:selected {{ background-color: {c.PANE_CONTROL_HOVER}; }}
+QMenu::item:disabled {{ color: {c.TEXT_DISABLED}; }}
 QMenu::indicator {{
     width: 16px;
     height: 16px;
@@ -597,41 +637,41 @@ QMenu::indicator {{
 QMenu::separator {{
     height: 1px;
     margin: 4px 8px;
-    background-color: {PANE_BORDER};
+    background-color: {c.PANE_BORDER};
 }}
 QTabWidget::pane {{
-    border: 1px solid {PANE_BORDER};
+    border: 1px solid {c.PANE_BORDER};
     border-radius: {TABLE_RADIUS}px;
-    background-color: {TABLE_BASE_BG};
+    background-color: {c.TABLE_BASE_BG};
 }}
 QTabBar::tab {{
-    color: {PANE_TEXT};
+    color: {c.PANE_TEXT};
     background-color: transparent;
     border: 0;
     border-radius: {TABLE_RADIUS}px;
     padding: 6px 12px;
 }}
-QTabBar::tab:hover {{ background-color: {PANE_CONTROL_HOVER}; }}
+QTabBar::tab:hover {{ background-color: {c.PANE_CONTROL_HOVER}; }}
 QTabBar::tab:selected {{
-    background-color: {PANE_CONTROL_BG};
+    background-color: {c.PANE_CONTROL_BG};
     border-bottom: 2px solid palette(highlight);
 }}
-QSplitter::handle {{ background-color: {PANE_SURFACE_BG}; }}
-QSplitter::handle:hover {{ background-color: {PANE_BORDER}; }}
+QSplitter::handle {{ background-color: {c.PANE_SURFACE_BG}; }}
+QSplitter::handle:hover {{ background-color: {c.PANE_BORDER}; }}
 QScrollBar:vertical, QScrollBar:horizontal {{
-    background: {TABLE_HEADER_BG};
+    background: {c.TABLE_HEADER_BG};
     border: 0;
     margin: 0;
 }}
 QScrollBar:vertical {{ width: 12px; }}
 QScrollBar:horizontal {{ height: 12px; }}
 QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{
-    background: {PANE_BORDER};
+    background: {c.PANE_BORDER};
     border-radius: 6px;
     margin: 2px;
 }}
 QScrollBar::handle:vertical:hover,
-QScrollBar::handle:horizontal:hover {{ background: #5f5f5f; }}
+QScrollBar::handle:horizontal:hover {{ background: {c.SCROLL_HANDLE_HOVER}; }}
 QScrollBar::handle:vertical {{ min-height: 24px; }}
 QScrollBar::handle:horizontal {{ min-width: 24px; }}
 QScrollBar::add-line, QScrollBar::sub-line {{
@@ -642,17 +682,18 @@ QScrollBar::add-line, QScrollBar::sub-line {{
 }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: none; }}
 QToolTip {{
-    color: {PANE_TEXT};
-    background-color: {PANE_CONTROL_BG};
-    border: 1px solid {PANE_BORDER};
+    color: {c.PANE_TEXT};
+    background-color: {c.PANE_CONTROL_BG};
+    border: 1px solid {c.PANE_BORDER};
     border-radius: {TABLE_RADIUS}px;
     padding: 4px 7px;
 }}
 QStatusBar {{
-    color: {PANE_TEXT};
-    background-color: {PANE_SURFACE_BG};
+    color: {c.PANE_TEXT};
+    background-color: {c.PANE_SURFACE_BG};
 }}
-""" + ZOOM_OVERLAY_QSS
+""" + zoom_overlay_qss()
+
 
 
 _APPLICATION_THEME_PROPERTY = "bitsApplicationThemeInstalled"
@@ -706,12 +747,68 @@ QToolButton#primaryButton[menuRole="split"]::menu-button:pressed {{
 """
 
 
+# Donde se guarda, en el propio widget, como volver a vestirlo. Es un atributo
+# de Python y no una propiedad de Qt porque lo que se guarda es una funcion.
+#
+# Hace falta un registro asi porque hay dos clases de color que la hoja global
+# no alcanza: la etiqueta que lleva el suyo en una hoja de una linea, y el
+# widget al que se le fijo la paleta a mano (la tabla, el panel del visor)
+# porque el estilo nativo de Windows pinta el fondo desde la paleta y no desde
+# la hoja. Ninguno de los dos se entera de que la aplicacion cambio de tema.
+_REPINTAR_TEMA = "_bits_repintar_tema"
+
+
+def al_cambiar_tema(widget: QWidget, repintar) -> None:
+    """Viste el widget ahora y deja anotado como volver a hacerlo."""
+    setattr(widget, _REPINTAR_TEMA, repintar)
+    repintar()
+
+
+def pintar_del_tema(widget: QWidget, hoja) -> None:
+    """Le pone al widget una hoja propia que sabe rehacerse al cambiar de tema.
+
+    Las etiquetas de ayuda, los resumenes y los rotulos de estado llevan su
+    color en una hoja de una linea, puesta al construirlas. Escrito asi el
+    color se congelaba: al cambiar de tema la ventana se repintaba entera y
+    esos rotulos se quedaban con el gris del tema anterior, que sobre la
+    superficie nueva o desaparece o grita.
+
+    ``hoja`` es la funcion que devuelve esa linea, no la linea ya armada.
+    """
+    al_cambiar_tema(widget, lambda: widget.setStyleSheet(hoja()))
+
+
+def repintar_del_tema(app: QApplication) -> None:
+    """Vuelve a vestir a todos los widgets anotados con ``al_cambiar_tema``."""
+    for widget in app.allWidgets():
+        repintar = getattr(widget, _REPINTAR_TEMA, None)
+        if repintar is not None:
+            repintar()
+        if isinstance(widget, QTableWidget):
+            for row in range(widget.rowCount()):
+                for column in range(widget.columnCount()):
+                    item = widget.item(row, column)
+                    papel = item.data(_ROL_COLOR_TEMA) if item is not None else None
+                    if papel:
+                        pintar_celda_del_tema(item, papel)
+
+
+_ROL_COLOR_TEMA = Qt.ItemDataRole.UserRole + 128
+
+
+def pintar_celda_del_tema(item: QTableWidgetItem, papel: str) -> None:
+    """Conserva el papel del color para repintar sin rehacer ni ordenar filas."""
+    item.setData(_ROL_COLOR_TEMA, papel)
+    color = link_text_color() if papel == "acento" else getattr(paleta(), papel)
+    item.setForeground(QColor(color))
+
+
 def window_stylesheet(local_qss: str) -> str:
     """Compone una hoja local sin duplicar el tema global instalado."""
     app = QApplication.instance()
     if app is not None and app.property(_APPLICATION_THEME_PROPERTY):
         return local_qss
-    return APP_CHROME_QSS + accent_button_qss() + local_qss
+    return app_chrome_qss() + accent_button_qss() + local_qss
 
 
 class MultiSelectMenu(QMenu):
@@ -978,7 +1075,7 @@ class FlatSelectionDelegate(QStyledItemDelegate):
             QPalette.ColorRole.WindowText,
             QPalette.ColorRole.HighlightedText,
         ):
-            palette.setColor(role, QColor(TABLE_TEXT))
+            palette.setColor(role, QColor(paleta().TABLE_TEXT))
         option.palette = palette
 
 
@@ -1021,30 +1118,42 @@ def round_corners(widget: QWidget, radius: int = TABLE_RADIUS) -> None:
         widget.setMask(QRegion(path.toFillPolygon().toPolygon()))
 
 
-def style_data_table(table: QAbstractItemView) -> None:
-    """Deja la tabla en el gris oscuro de la aplicación.
-
-    La hoja de estilo por sí sola no basta: el estilo nativo de Windows pinta
-    el viewport y las filas desde la paleta, así que se fijan también los
-    roles de color. Se aplican a *todos* los grupos (``setColor`` sin grupo
-    cubre Active, Inactive y Disabled) para que la tabla no vuelva al blanco
-    al perder el foco ni mientras está deshabilitada durante el procesamiento.
-    """
-    table.setAlternatingRowColors(True)
+def _paleta_data_table(table: QAbstractItemView) -> None:
+    """Los roles de color de la tabla, con el tema puesto ahora."""
     palette = table.palette()
-    palette.setColor(QPalette.ColorRole.Base, QColor(TABLE_BASE_BG))
-    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(TABLE_ALTERNATE_BG))
+    c = paleta()
+    palette.setColor(QPalette.ColorRole.Base, QColor(c.TABLE_BASE_BG))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(c.TABLE_ALTERNATE_BG))
     # Sin el rol de texto, Qt seguiría escribiendo en negro sobre el gris.
-    palette.setColor(QPalette.ColorRole.Text, QColor(TABLE_TEXT))
-    palette.setColor(QPalette.ColorRole.WindowText, QColor(TABLE_TEXT))
+    palette.setColor(QPalette.ColorRole.Text, QColor(c.TABLE_TEXT))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor(c.TABLE_TEXT))
     palette.setColor(QPalette.ColorRole.Highlight, QColor(accent_color()))
-    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(TABLE_TEXT))
+    palette.setColor(
+        QPalette.ColorRole.HighlightedText, QColor(on_accent_text())
+    )
     table.setPalette(palette)
     # El viewport usa el rol ``Base``; sin autorrelleno conserva el blanco que
     # el estilo nativo pinta bajo las filas y en el área sobrante.
     viewport = table.viewport()
     viewport.setPalette(palette)
     viewport.setAutoFillBackground(True)
+
+
+def style_data_table(table: QAbstractItemView) -> None:
+    """Deja la tabla en las superficies de la aplicación.
+
+    La hoja de estilo por sí sola no basta: el estilo nativo de Windows pinta
+    el viewport y las filas desde la paleta, así que se fijan también los
+    roles de color. Se aplican a *todos* los grupos (``setColor`` sin grupo
+    cubre Active, Inactive y Disabled) para que la tabla no cambie de fondo
+    al perder el foco ni mientras está deshabilitada durante el procesamiento.
+
+    Solo la paleta se vuelve a poner al cambiar de tema. El delegado, el
+    resaltado de fila y el recorte de esquinas se instalan una vez: no
+    dependen del tema y volver a montarlos apilaría filtros de evento.
+    """
+    table.setAlternatingRowColors(True)
+    al_cambiar_tema(table, lambda: _paleta_data_table(table))
     table.setItemDelegate(FlatSelectionDelegate(table))
     enable_row_hover(table)
     round_corners(table)
@@ -1166,50 +1275,72 @@ def configure_menu_button(
     button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
     button.setProperty("menuRole", "split" if split else "dropdown")
 
-def style_dark_pane(pane: QWidget) -> None:
-    """Deja un panel completo en el gris oscuro, con sus controles.
 
-    Los hijos heredan la paleta del padre, así que fijarla aquí cubre de una
-    vez las etiquetas, las flechas de los ``QToolButton`` y el texto de los
-    campos: todos ellos se pintan desde roles de paleta, no desde la hoja de
-    estilo, y sin esto quedarían en negro sobre el gris oscuro.
-    """
+def _paleta_pane(pane: QWidget) -> None:
+    """Los roles de color del panel, con el tema puesto ahora."""
+    c = paleta()
     palette = pane.palette()
-    palette.setColor(QPalette.ColorRole.Window, QColor(PANE_BG))
-    palette.setColor(QPalette.ColorRole.WindowText, QColor(PANE_TEXT))
-    palette.setColor(QPalette.ColorRole.Base, QColor(PANE_CONTROL_BG))
-    palette.setColor(QPalette.ColorRole.Text, QColor(PANE_TEXT))
-    palette.setColor(QPalette.ColorRole.Button, QColor(PANE_CONTROL_BG))
-    palette.setColor(QPalette.ColorRole.ButtonText, QColor(PANE_TEXT))
+    palette.setColor(QPalette.ColorRole.Window, QColor(c.PANE_BG))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor(c.PANE_TEXT))
+    palette.setColor(QPalette.ColorRole.Base, QColor(c.PANE_CONTROL_BG))
+    palette.setColor(QPalette.ColorRole.Text, QColor(c.PANE_TEXT))
+    palette.setColor(QPalette.ColorRole.Button, QColor(c.PANE_CONTROL_BG))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor(c.PANE_TEXT))
     palette.setColor(QPalette.ColorRole.Highlight, QColor(accent_color()))
-    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(PANE_TEXT))
+    palette.setColor(
+        QPalette.ColorRole.HighlightedText, QColor(on_accent_text())
+    )
     pane.setPalette(palette)
     pane.setAutoFillBackground(True)
 
 
-def style_pdf_surface(scroll: QScrollArea) -> None:
-    """Pinta de oscuro el área que rodea a la página del PDF.
+def style_dark_pane(pane: QWidget) -> None:
+    """Deja un panel completo en la superficie del tema, con sus controles.
 
-    El fondo blanco que se ve detrás de la página no es del panel sino del
-    *viewport* del área de desplazamiento, que Qt pinta desde el rol ``Base``
-    y que ninguna regla sobre el ``QScrollArea`` alcanza. Es el mismo motivo
-    por el que la tabla volvía al blanco (ver ``style_data_table``).
+    Los hijos heredan la paleta del padre, así que fijarla aquí cubre de una
+    vez las etiquetas, las flechas de los ``QToolButton`` y el texto de los
+    campos: todos ellos se pintan desde roles de paleta, no desde la hoja de
+    estilo, y sin esto quedarían en el color que decida el estilo nativo.
     """
+    al_cambiar_tema(pane, lambda: _paleta_pane(pane))
+
+
+def _paleta_pdf_surface(scroll: QScrollArea) -> None:
+    """Los roles de color de la superficie del PDF, con el tema de ahora."""
+    c = paleta()
     palette = scroll.palette()
-    palette.setColor(QPalette.ColorRole.Base, QColor(PANE_SURFACE_BG))
-    palette.setColor(QPalette.ColorRole.Window, QColor(PANE_SURFACE_BG))
-    palette.setColor(QPalette.ColorRole.Text, QColor(PANE_TEXT))
-    palette.setColor(QPalette.ColorRole.WindowText, QColor(PANE_TEXT))
+    palette.setColor(QPalette.ColorRole.Base, QColor(c.PANE_SURFACE_BG))
+    palette.setColor(QPalette.ColorRole.Window, QColor(c.PANE_SURFACE_BG))
+    palette.setColor(QPalette.ColorRole.Text, QColor(c.PANE_TEXT))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor(c.PANE_TEXT))
     scroll.setPalette(palette)
     viewport = scroll.viewport()
     viewport.setPalette(palette)
     viewport.setAutoFillBackground(True)
 
 
+def style_pdf_surface(scroll: QScrollArea) -> None:
+    """Pinta el área que rodea a la página del PDF con la superficie del tema.
+
+    El fondo que se ve detrás de la página no es del panel sino del *viewport*
+    del área de desplazamiento, que Qt pinta desde el rol ``Base`` y que
+    ninguna regla sobre el ``QScrollArea`` alcanza. Es el mismo motivo por el
+    que la tabla se quedaba en blanco (ver ``style_data_table``).
+    """
+    al_cambiar_tema(scroll, lambda: _paleta_pdf_surface(scroll))
+
+
 def load_zoom_icon(name: str) -> QIcon:
-    """Carga un icono de zoom local para que los visores se vean igual en Windows."""
+    """Un icono de zoom local, pintado del color del texto del tema.
+
+    Local para que los visores se vean igual en Windows, que no trae tema de
+    iconos. Tenido porque el dibujo viene en blanco: sobre la superficie clara
+    del tema claro no se veia nada, solo el hueco del boton.
+    """
     path = _ASSETS / f"zoom_{name}.svg"
-    return QIcon(str(path)) if path.is_file() else QIcon.fromTheme(f"zoom-{name}")
+    if not path.is_file():
+        return QIcon.fromTheme(f"zoom-{name}")
+    return load_icon(f"zoom_{name}", paleta().TEXT)
 
 
 # Los iconos de los botones acompañan al texto: van al alto de una letra, la
@@ -1286,11 +1417,23 @@ class ZoomOverlay(QFrame):
         self.btn_out = self._button("out", zoom_out, panel)
         self.btn_fit = self._button("fit", fit, panel)
         self.btn_in = self._button("in", zoom_in, panel)
+        # El dibujo lleva el color dentro, no en la hoja, asi que hay que
+        # volver a pedirlo al cambiar de tema.
+        al_cambiar_tema(self, self._tenir_iconos)
 
         self.value_label = QLabel("100%")
         self.value_label.setObjectName("zoomValue")
         self.value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         panel.addWidget(self.value_label, 0, Qt.AlignmentFlag.AlignVCenter)
+
+    def _tenir_iconos(self) -> None:
+        """Vuelve a pintar los tres dibujos con el color del tema de ahora."""
+        for nombre, boton in (
+            ("out", self.btn_out),
+            ("fit", self.btn_fit),
+            ("in", self.btn_in),
+        ):
+            boton.setIcon(load_zoom_icon(nombre))
 
     def _button(self, icon: str, action, panel: QHBoxLayout) -> QToolButton:
         tooltip, accessible, slot = action

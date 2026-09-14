@@ -36,12 +36,12 @@ no tienen sobre qué trabajar.
 
 Esperar a que AirVault deje los batches listos no es un paso que se elija:
 va dentro de subir. Subir sin esperar la respuesta no deja nada terminado
-—el batch se queda en la cola y nadie vuelve a mirarlo—, así que la casilla
+(el batch se queda en la cola y nadie vuelve a mirarlo), así que la casilla
 solo servía para dejar la cadena a medias. Por eso la entrada dice solo
 «Subir a AirVault» y no nombra la espera: la espera no es algo que se
 marque, sino parte de lo que hace subir. Se sigue viendo en la línea de
 pasos, que es donde importa saber que el tiempo se va ahí, y el intervalo
-se elige en «Comprobar cada», en la ventana de AirVault.
+se elige en «Revisar cada», en la ventana de AirVault.
 """
 
 from __future__ import annotations
@@ -62,8 +62,8 @@ from app.airvault.config import (
     AirVaultConfig,
     guardar_preferencias,
 )
-from app.gui.tokens import STATUS_ERROR, STATUS_OK, TEXT_DISABLED, TEXT_TERTIARY
-from app.gui.widgets import MultiSelectMenu
+from app.gui.tokens import paleta
+from app.gui.widgets import MultiSelectMenu, pintar_del_tema
 
 # Pasos que la persona elige, en el orden en que ocurren. Los tres son la
 # cadena de AirVault y se arrastran entre ellos.
@@ -84,8 +84,8 @@ PASOS = CADENA
 #
 # «Preprocesar» es la primera parte del procesamiento, no un botón aparte:
 # el pipeline recorre el batch entero enderezando y alineando cada página
-# (la calibración) antes de leer ninguna. Es un tramo largo —en un libro de
-# 50 páginas son unos diez segundos— y hasta ahora la línea de pasos lo
+# (la calibración) antes de leer ninguna. Es un tramo largo (en un libro de
+# 50 páginas son unos diez segundos) y hasta ahora la línea de pasos lo
 # contaba como si ya estuviera procesando, así que el primer paso parecía
 # atascado. Como paso propio se ve dónde está de verdad.
 PREPROCESAR = "preprocesar"
@@ -289,15 +289,23 @@ class CadenaAutomatica(QWidget):
     «Exportar» y no había forma de saber desde aquí si el batch llegó.
     """
 
-    # Gris del texto de ayuda, el verde y el rojo de los estados de panel, y
-    # el azul de la selección. No se estrena ningún color.
-    _COLORES = {
-        PENDIENTE: TEXT_TERTIARY,
-        OMITIDO: TEXT_DISABLED,
-        EN_CURSO: "palette(highlight)",
-        HECHO: STATUS_OK,
-        CORTADO: STATUS_ERROR,
-    }
+    @staticmethod
+    def _color(estado: str) -> str:
+        """El color de un estado, en los tonos del tema puesto ahora.
+
+        Gris del texto de ayuda, el verde y el rojo de los estados de panel, y
+        el azul de la selección. No se estrena ningún color. Va como función
+        porque los tres primeros cambian con el tema; el de la selección no,
+        que lo resuelve QSS solo contra la paleta de la aplicación.
+        """
+        c = paleta()
+        return {
+            PENDIENTE: c.TEXT_TERTIARY,
+            OMITIDO: c.TEXT_DISABLED,
+            EN_CURSO: "palette(highlight)",
+            HECHO: c.STATUS_OK,
+            CORTADO: c.STATUS_ERROR,
+        }[estado]
 
     _AYUDAS = {
         PENDIENTE: "todavía no empezó",
@@ -333,7 +341,9 @@ class CadenaAutomatica(QWidget):
         for indice, paso in enumerate(RECORRIDO):
             if indice:
                 flecha = QLabel("›")
-                flecha.setStyleSheet(f"color: {self._COLORES[OMITIDO]};")
+                pintar_del_tema(
+                    flecha, lambda: f"color: {self._color(OMITIDO)};"
+                )
                 fila.addWidget(flecha)
             etiqueta = QLabel(NOMBRES_CORTOS[paso])
             etiqueta.setAccessibleName(f"Paso {NOMBRES_CORTOS[paso]}")
@@ -428,8 +438,14 @@ class CadenaAutomatica(QWidget):
         for paso, etiqueta in self._etiquetas.items():
             estado = self._estados[paso]
             peso = "600" if estado in (EN_CURSO, CORTADO) else "400"
-            etiqueta.setStyleSheet(
-                f"color: {self._COLORES[estado]}; font-weight: {peso};"
+            # Anotada y no escrita a secas: el paso se queda con su estado
+            # hasta que la cadena avanza, y al cambiar de tema hay que volver
+            # a resolver el color de ese mismo estado.
+            pintar_del_tema(
+                etiqueta,
+                lambda estado=estado, peso=peso: (
+                    f"color: {self._color(estado)}; font-weight: {peso};"
+                ),
             )
             etiqueta.setToolTip(
                 f"{NOMBRES_CORTOS[paso]}: {self._AYUDAS[estado]}"

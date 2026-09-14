@@ -57,15 +57,10 @@ from PySide6.QtWidgets import (  # noqa: E402
     QWidget,
 )
 
+from app.gui.tokens import paleta  # noqa: E402
 from app.gui.widgets import (  # noqa: E402
-    PANE_BG,
-    PANE_BORDER,
-    PANE_CONTROL_BG,
-    PANE_CONTROL_HOVER,
-    PANE_STATUS_COLORS,
-    PANE_SURFACE_BG,
-    PANE_TEXT,
     TABLE_SELECTION_BG,
+    pane_status_colors,
     scrollbars_qss,
     style_dark_pane,
 )
@@ -79,13 +74,18 @@ from tools.signature_labeling.dataset import (  # noqa: E402
 
 DEFAULT_DIR = ROOT / "output" / "firmas_dataset"
 
-# Cada etiqueta tiene un color de borde: la rejilla se lee de un vistazo y un
-# despiste (todo un bloque marcado igual por error) salta a la vista.
-LABEL_COLORS = {
-    LABEL_PRESENT: PANE_STATUS_COLORS["OK"],
-    LABEL_ABSENT: PANE_STATUS_COLORS["ERROR"],
-    LABEL_UNSURE: PANE_STATUS_COLORS["WARNING"],
-}
+def label_colors() -> dict:
+    """Cada etiqueta con su color de borde, en los tonos del tema puesto ahora.
+
+    La rejilla se lee de un vistazo y un despiste (todo un bloque marcado
+    igual por error) salta a la vista.
+    """
+    estados = pane_status_colors()
+    return {
+        LABEL_PRESENT: estados["OK"],
+        LABEL_ABSENT: estados["ERROR"],
+        LABEL_UNSURE: estados["WARNING"],
+    }
 LABEL_KEYS = {
     Qt.Key.Key_F: LABEL_PRESENT,
     Qt.Key.Key_A: LABEL_ABSENT,
@@ -99,46 +99,49 @@ CELL_WIDTH = 380
 CELL_IMAGE_HEIGHT = 130
 DETAIL_HEIGHT = 190
 
-_QSS = f"""
+def _qss() -> str:
+    """La hoja de la herramienta, en los tonos del tema puesto ahora."""
+    c = paleta()
+    return f"""
 QWidget {{
     font-family: "Segoe UI", "Noto Sans", sans-serif;
     font-size: 10pt;
-    color: {PANE_TEXT};
+    color: {c.PANE_TEXT};
 }}
-QMainWindow, QWidget#barra, QWidget#detalle {{ background-color: {PANE_BG}; }}
+QMainWindow, QWidget#barra, QWidget#detalle {{ background-color: {c.PANE_BG}; }}
 QPushButton {{
     min-height: 26px;
     padding: 4px 12px;
-    background-color: {PANE_CONTROL_BG};
-    border: 1px solid {PANE_BORDER};
+    background-color: {c.PANE_CONTROL_BG};
+    border: 1px solid {c.PANE_BORDER};
     border-radius: 6px;
 }}
-QPushButton:hover {{ background-color: {PANE_CONTROL_HOVER}; }}
+QPushButton:hover {{ background-color: {c.PANE_CONTROL_HOVER}; }}
 QComboBox {{
     padding: 3px 6px;
-    background-color: {PANE_CONTROL_BG};
-    border: 1px solid {PANE_BORDER};
+    background-color: {c.PANE_CONTROL_BG};
+    border: 1px solid {c.PANE_BORDER};
     border-radius: 6px;
 }}
 QComboBox QAbstractItemView {{
-    background-color: {PANE_CONTROL_BG};
+    background-color: {c.PANE_CONTROL_BG};
     selection-background-color: {TABLE_SELECTION_BG};
 }}
 QLabel#contador {{ font-weight: 600; }}
-QLabel#ayuda {{ color: #a0a0a0; font-size: 9pt; }}
-QLabel#pie {{ color: #a0a0a0; font-size: 9pt; }}
+QLabel#ayuda {{ color: {c.TEXT_TERTIARY}; font-size: 9pt; }}
+QLabel#pie {{ color: {c.TEXT_TERTIARY}; font-size: 9pt; }}
 QFrame#celda {{
-    background-color: {PANE_SURFACE_BG};
-    border: 2px solid {PANE_BORDER};
+    background-color: {c.PANE_SURFACE_BG};
+    border: 2px solid {c.PANE_BORDER};
     border-radius: 6px;
 }}
 QFrame#detalleMarco {{
-    background-color: {PANE_SURFACE_BG};
-    border: 1px solid {PANE_BORDER};
+    background-color: {c.PANE_SURFACE_BG};
+    border: 1px solid {c.PANE_BORDER};
     border-radius: 6px;
 }}
 QLabel#pie, QLabel#celdaTexto {{ font-size: 9pt; }}
-QScrollArea {{ border: 0; background-color: {PANE_BG}; }}
+QScrollArea {{ border: 0; background-color: {c.PANE_BG}; }}
 """ + scrollbars_qss("QScrollArea")
 
 
@@ -191,18 +194,19 @@ class CropCell(QFrame):
         super().mousePressEvent(event)
 
     def paint_state(self, label: Optional[str], current: bool) -> None:
-        color = LABEL_COLORS.get(label or "", PANE_BORDER)
+        c = paleta()
+        color = label_colors().get(label or "", c.PANE_BORDER)
         width = 3 if current else 2
         if current:
             self.setStyleSheet(
-                f"QFrame#celda {{ background-color: {PANE_SURFACE_BG};"
+                f"QFrame#celda {{ background-color: {c.PANE_SURFACE_BG};"
                 f" border: {width}px solid {TABLE_SELECTION_BG};"
                 f" border-radius: 6px; }}"
                 f"QFrame#celda QLabel {{ color: {color}; }}"
             )
         else:
             self.setStyleSheet(
-                f"QFrame#celda {{ background-color: {PANE_SURFACE_BG};"
+                f"QFrame#celda {{ background-color: {c.PANE_SURFACE_BG};"
                 f" border: {width}px solid {color};"
                 f" border-radius: 6px; }}"
             )
@@ -231,7 +235,7 @@ class LabelWindow(QMainWindow):
         self._dirty = False
 
         self.setWindowTitle("Etiquetado de firmas")
-        self.setStyleSheet(_QSS)
+        self.setStyleSheet(_qss())
         self.resize(1360, 900)
         self._build_ui()
 
@@ -522,7 +526,7 @@ class LabelWindow(QMainWindow):
                else f"\nalineación: {sample.alignment}")
         )
         label = self.dataset.labels.get(sample.id)
-        color = LABEL_COLORS.get(label or "", "#a0a0a0")
+        color = label_colors().get(label or "", paleta().TEXT_TERTIARY)
         text = label or "sin etiquetar"
         if self.show_verdict.isChecked():
             text += f"   ·   detector: {self._verdict(sample)}"

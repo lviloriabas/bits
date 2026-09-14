@@ -50,7 +50,7 @@ _OCR_CHAR_MAP = str.maketrans({"0": "o", "1": "i", "5": "s", "8": "b"})
 _MESES_CHAR_MAP = str.maketrans({
     "0": "O", "1": "L", "5": "S", "8": "B", "I": "L",
 })
-# OCR manuscrito: confunde letras y dígitos. Mapeo letra→dígito para
+# OCR manuscrito: confunde letras y dígitos. Mapeo letra->dígito para
 # usar solo en lecturas donde la pieza esperada es numérica.
 _OCR_LETTER_TO_DIGIT_DICT = {
     "O": "0", "o": "0", "Q": "0",
@@ -203,8 +203,8 @@ def _parse_month(value: str) -> Optional[int]:
 def _normalize_year(anio: int) -> Optional[int]:
     """Año 4 dígitos dentro de la ventana en que existen bitácoras.
 
-    Acepta 2 dígitos (26 → 2026) y rechaza lecturas absurdas
-    ("216" → 2216, "1751" → fuera de rango) y las adelantadas: una página
+    Acepta 2 dígitos (26 -> 2026) y rechaza lecturas absurdas
+    ("216" -> 2216, "1751" -> fuera de rango) y las adelantadas: una página
     no se firma después del día en que se escanea, así que un '96' o un
     '28' leídos en 2026 son un año mal leído (ver
     ``app.utils.date_window``).
@@ -222,7 +222,7 @@ def _day(value: str) -> Tuple[str, str]:
     dígitos separados por el separador de casilla impreso (p. ej. '2 0')
     se unen cuando forman un día válido.
     """
-    # OCR manuscrito: "Z0" → "20". Pre-normalizamos letras ambiguas
+    # OCR manuscrito: "Z0" -> "20". Pre-normalizamos letras ambiguas
     # SOLO cuando la cadena es corta (parece manuscrito puro, sin
     # etiquetas como "DATE", "DAY", "OF CAPTAIN").
     if len(value) <= 8 and not re.search(r"[A-Z]{3,}", value):
@@ -308,7 +308,7 @@ def _year(value: str) -> Tuple[str, str]:
     runs de 1 dígito forman el de 4 ('2 0 2 6' -> '2026').
     """
     # OCR manuscrito suele leer "Z" en lugar de "2" en el primer dígito
-    # del año ("Z6" → "26"). Pre-normalizamos letras ambiguas a dígitos
+    # del año ("Z6" -> "26"). Pre-normalizamos letras ambiguas a dígitos
     # cuando están pegadas a un run numérico (no en medio de palabras de
     # etiqueta como "YEAR" o "EMPLOYEE NUMBER OF CAPTAIN").
     normalized = []
@@ -410,9 +410,9 @@ def _matricula(value: str) -> Tuple[str, str]:
 
     Si no hay cuatro dígitos seguidos se reconstruye el número a partir de
     los caracteres que el OCR confunde con dígitos manuscritos
-    (``HP-I7I7CMP`` → 1717), anotando la lectura para que quede auditable.
+    (``HP-I7I7CMP`` -> 1717), anotando la lectura para que quede auditable.
     La lectura es "débil" cuando el número solo puede reconstruirse con
-    dígitos dispersos (p. ej. "wAT 1Hp i712cmp" → 1712); en ese caso el
+    dígitos dispersos (p. ej. "wAT 1Hp i712cmp" -> 1712); en ese caso el
     pipeline reduce la confianza y el corrector por libro decide.
 
     Cuando no hay un número de 4 dígitos recuperable, devuelve un valor

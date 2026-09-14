@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.gui.responsive import fit_to_screen
+from app.gui.theme import gestor_tema
 from app.gui.tokens import SPACE_S
 from app.gui.widgets import window_stylesheet
 from app.utils.fleet import FLEET_FILENAME, load_fleet, normalise_matricula
@@ -55,9 +56,20 @@ class FleetEditorDialog(QDialog):
         self.store = store
         self.setWindowTitle("Lista de flota")
         self._density = fit_to_screen(self, 430, 440)
-        self.setStyleSheet(window_stylesheet(self._density.qss))
+        self._aplicar_hoja()
+        # La hoja lleva el fragmento de la densidad, así que la rehace el
+        # propio cuadro cuando cambia el tema.
+        gestor_tema().cambiado.connect(self._al_cambiar_tema)
         self._build_ui()
         self._load_values()
+
+    def _aplicar_hoja(self) -> None:
+        """La hoja del cuadro, con los tonos y las medidas de ahora."""
+        self.setStyleSheet(window_stylesheet(self._density.qss))
+
+    def _al_cambiar_tema(self, _nombre: str) -> None:
+        """Rehace la hoja del cuadro con los tonos del tema nuevo."""
+        self._aplicar_hoja()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)

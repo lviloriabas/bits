@@ -625,3 +625,53 @@ def test_la_correccion_sin_edge_visible_abre_uno_oculto(
 
     assert estados[0] == ("visible", False)
     assert estados[-1] == "cerrar"
+
+
+def test_la_correccion_cuenta_las_bitacoras_que_abre_en_edge(
+    monkeypatch,
+) -> None:
+    """La cuenta mueve el cronometro, y solo cuenta lo que cuesta tiempo."""
+    pasos: list[tuple[int, int]] = []
+
+    class _NavegadorFalso:
+        def __init__(self, _perfil):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return None
+
+        def abrir(self, url, espera_s):
+            return {"webSocketDebuggerUrl": "ws://x"}
+
+        def cookies(self, _version):
+            return {"airvault.criticaltech.com": [
+                {"name": "Critical", "value": "x"}
+            ]}
+
+    monkeypatch.setattr(
+        modulo_correcciones, "_NavegadorDeCorrecciones", _NavegadorFalso
+    )
+    monkeypatch.setattr(
+        CorrectorLogPageAudit,
+        "_un_caso",
+        lambda self, *_args: modulo_correcciones.Resultado(_args[1]),
+    )
+    plan = planificar(
+        _excepciones(
+            ("HP-9913CMP", "DUPLICATED 2008159(2x)"),
+            ("HP-9913CMP", "2008152 MIS-INDEX to ACN [HP-9813CMP]"),
+            # Esta queda para revisar a mano: se resuelve sin navegador y no
+            # tiene por que estirar el pronostico de las que si lo usan.
+            ("HP-9913CMP", "DUPLICATED 2008170(1x)"),
+        )
+    )
+
+    CorrectorLogPageAudit(AirVaultConfig(), ResolutorFlota()).aplicar(
+        plan,
+        progreso=lambda hechas, total: pasos.append((hechas, total)),
+    )
+
+    assert pasos == [(0, 2), (1, 2), (2, 2)]

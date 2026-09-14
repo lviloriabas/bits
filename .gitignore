@@ -42,10 +42,15 @@ desktop.ini
 # Preferencias de la copia portable (se generan al usar la aplicación)
 important_fields.json
 
+# Preferencias de la interfaz (de momento el tema, claro u oscuro). Es una
+# eleccion de quien usa la maquina, no del repositorio.
+interfaz.json
+
 .claude/
 .vscode/
 .agents/
 .codex*/
+.codex*/*
 img/
 AGENTS.md
 

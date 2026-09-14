@@ -9,7 +9,7 @@ from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app.gui.main_window import MainWindow
-from app.gui.widgets import TABLE_BASE_BG
+from app.gui.tokens import paleta
 from app.models.schemas import PageResult, ValidationReport
 
 
@@ -68,7 +68,7 @@ def test_file_progress_is_one_aligned_surface():
             window.times_scroll.viewport().palette().color(
                 QPalette.ColorRole.Base
             )
-            == QColor(TABLE_BASE_BG)
+            == QColor(paleta().TABLE_BASE_BG)
         )
     finally:
         window.close()

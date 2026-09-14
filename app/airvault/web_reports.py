@@ -389,13 +389,23 @@ class ClienteLogPageAudit:
         filtros: Sequence[str],
         avisar: Callable[[str], None] | None = None,
         cancelar: Callable[[], bool] | None = None,
+        progreso: Callable[[int, int], None] | None = None,
     ) -> list[ExcepcionLogPageAudit]:
+        """Trae las excepciones del reporte en el rango y los filtros dados.
+
+        ``avisar`` es la frase de estado y ``progreso`` la cuenta: cuantos
+        reportes van de cuantos. Van por separado porque la frase la lee una
+        persona y la cuenta la usa el cronometro de la ventana, que necesita
+        numeros y no texto. El primer aviso llega con cero hechos, en cuanto
+        el formulario responde: es la senal de que la apertura termino.
+        """
         if desde > hasta:
             raise ValueError("La fecha inicial no puede ser posterior a la final")
         if not filtros:
             return []
         notificar = avisar or (lambda _texto: None)
         esta_cancelado = cancelar or (lambda: False)
+        avanzar = progreso or (lambda _hechos, _total: None)
         perfil = _perfil_de(self.config)
         notificar("Abriendo Log Page Audit en Edge")
         pagina: _Pagina | None = None
@@ -432,7 +442,8 @@ class ClienteLogPageAudit:
                     )
 
                 resultado: list[ExcepcionLogPageAudit] = []
-                for filtro in filtros:
+                avanzar(0, len(filtros))
+                for numero, filtro in enumerate(filtros, start=1):
                     nombre = (
                         "mal indexadas"
                         if filtro == FILTRO_MAL_INDEXADAS
@@ -441,6 +452,7 @@ class ClienteLogPageAudit:
                     notificar(f"Consultando páginas {nombre}")
                     filas = self._correr_reporte(pagina, desde, hasta, filtro)
                     resultado.extend(parsear_filas(filas, self.config))
+                    avanzar(numero, len(filtros))
                 return self._sin_repetidos(resultado)
             finally:
                 if pagina is not None:
