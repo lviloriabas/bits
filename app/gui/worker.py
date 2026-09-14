@@ -311,7 +311,9 @@ class PreprocessWorker(QThread):
             from app.vision.alignment import (
                 compute_similarity_transform,
                 load_template_reference,
+                warp_with_transform,
             )
+            from app.vision.field_geometry import place_fields
             from app.core.config import config_for_pdf
             from app.vision.pdf_loader import PdfPageRenderer, page_count
             from app.vision.preprocessing import deskew
@@ -382,11 +384,21 @@ class PreprocessWorker(QThread):
                                         float(reference.shape[0]) / max(height, 1)
                                     ),
                                 }
+                                image = warp_with_transform(
+                                    image, transform,
+                                    (reference.shape[1], reference.shape[0]),
+                                )
+                        placement = place_fields(template, image)
+                        boxes = {
+                            field.id: [field.x, field.y, field.w, field.h]
+                            for field in placement.template.fields
+                        }
                         done += 1
                         self.page_ready.emit(
                             str(pdf_path),
                             page_number,
-                            {"skew_angle": float(angle), "alignment": alignment},
+                            {"skew_angle": float(angle), "alignment": alignment,
+                             "boxes": boxes},
                         )
                         self.progress.emit(
                             done,

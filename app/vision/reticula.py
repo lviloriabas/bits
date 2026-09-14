@@ -419,14 +419,13 @@ def rect_de_campo(
         )
         if izquierda is not None and derecha is not None and derecha > izquierda:
             x, w = izquierda, derecha - izquierda
+        else:
+            return None
 
-    # Un campo que se sale del lienzo rompe el recorte y la plantilla lo
-    # rechaza en su validador, así que se recorta aquí: vale más un campo
-    # pegado al borde que una página entera sin leer.
-    x = min(max(x, 0.0), 1.0)
-    y = min(max(y, 0.0), 1.0)
-    w = min(max(w, 1e-6), 1.0 - x)
-    h = min(max(h, 1e-6), 1.0 - y)
+    # Un borde fuera del lienzo indica un ajuste incompleto. No achicar el
+    # campo y presentarlo como localizado: el llamador conserva el respaldo.
+    if x < 0 or y < 0 or w <= 0 or h <= 0 or x + w > 1 or y + h > 1:
+        return None
     return x, y, w, h
 
 

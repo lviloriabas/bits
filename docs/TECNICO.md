@@ -17,6 +17,14 @@ El [manual](MANUAL.md) describe la operación. Esta guía resume tecnologías, p
 
 Consulte [requirements.txt](../requirements.txt) para las dependencias declaradas. Los modelos habituales son `PP-OCRv6_medium_det` y `PP-OCRv5_mobile_rec`; las marcas VOID usan `PP-OCRv6_medium_rec`.
 
+### Redes convolucionales en el OCR
+
+Sí se usan redes neuronales convolucionales, pero están encapsuladas en los modelos preentrenados de PaddleOCR; BITS no define ni entrena una CNN propia. `PP-OCRv6_medium_det` localiza las regiones con texto mediante el backbone convolucional LCNetV4 y el cuello RepLKFPN. `PP-OCRv5_mobile_rec` reconoce los caracteres de cada recorte con una arquitectura híbrida que contiene convoluciones, un codificador SVTR y una salida CTC. `PP-OCRv6_medium_rec`, usado para leer las marcas VOID, también combina un backbone convolucional con un codificador SVTR. Por eso es más preciso describir estos modelos como redes híbridas con componentes CNN, no como una CNN aislada.
+
+`PaddleOcrEngine`, en `app/ocr/engine.py`, carga el detector y el reconocedor para el OCR completo. En campos configurados como una sola línea omite el detector y ejecuta directamente el reconocedor; `app/vision/void_mark.py` reutiliza ese camino con el modelo de VOID. Todas estas inferencias se ejecutan en CPU. La clasificación de firmas de `app/vision/signature.py` no usa una red neuronal: aplica operaciones morfológicas y umbrales de densidad de tinta.
+
+El ajuste local de campos descrito abajo tampoco agrega una CNN: usa OpenCV y NumPy, ya declarados en `requirements.txt`. Los tres modelos neuronales del OCR se precargan con `tools/precache_paddle.py`; el setup comprueba también el reconocedor de VOID. No se requiere GPU, entrenamiento ni una descarga adicional para localizar las casillas.
+
 La distribución incluye intérprete, bibliotecas y modelos dentro de `portable/`. `ensure_portable_env()`, en `app/utils/portable.py`, configura el entorno antes de importar Paddle:
 
 ```text
@@ -51,6 +59,25 @@ La alineación extrae estructura impresa y estima rotación, escala uniforme y d
 **Preprocesar**, por separado, ejecuta la preparación y actualiza la vista previa sin OCR ni entrega. **Procesar** incorpora esa preparación antes de leer.
 
 Código: `app/vision/pdf_loader.py`, `preprocessing.py`, `alignment.py`, `date_geometry.py` y `app/gui/worker.py`.
+
+### Anclajes por página y por campo
+
+`template/aircraft_log.json` guarda un patrón de líneas impresas y las anclas de cada borde del campo. `reticula.py` identifica esas líneas por su orden y separación. El patrón identifica la raya; su posición de recorte se mide en la página actual después de enderezarla y alinearla. Las esquinas exteriores de la hoja no bastan para corregir deformaciones distintas entre cabecera, firmas y pie.
+
+`app/vision/field_geometry.py` añade una comprobación local:
+
+1. Calcula una sola imagen de estructura impresa por página y la reutiliza para el ajuste global y los perfiles de cada campo.
+2. Busca cada raya cerca de su posición medida. El radio no supera el 0,6% del eje ni el 30% de la distancia a la raya vecina; exige una línea fina que cubra al menos el 55% de la banda observada.
+3. Si falta una raya global, interpola entre rayas identificadas de esa misma página solo para acotar la búsqueda. La interpolación no se acepta como una detección: debe aparecer una única raya local. Sin referencias que encierren el hueco no extrapola desde otras páginas.
+4. Rechaza candidatos ambiguos, separaciones incompatibles y rectángulos fuera de la imagen. Una referencia lateral ausente ya no permite presentar una coordenada horizontal fija como un ajuste completo. Las celdas de fecha comparten la banda de observación para evitar confundir un carácter con una línea; el detector específico DD|MMM|AA conserva la última palabra cuando localiza la fecha.
+
+Cuando una raya no aparece localmente pero sí se identificó globalmente, conserva esa medida de la página. Si el campo no puede comprobarse, conserva el ajuste global disponible o el recorte de respaldo y añade `Posicion del campo sin confirmar; revisar recorte` a su comentario; eleva a `WARNING` un campo que estaba en `OK`. Esto no inventa una ausencia de firma, no borra la lectura y no añade columnas ni modifica las reglas de exportación del CSV. Un aviso de geometría no implica por sí solo pertenecer al batch REVISAR.
+
+Los rectángulos efectivos viajan normalizados en `PageResult.preview_boxes`, que no se serializa en los reportes. El OCR, las firmas y la revisión posterior de firmas usan esos recortes. Preprocesar también calcula cajas por página para el visor; una vez procesada, prevalece la geometría final del OCR, incluida la fecha.
+
+Validación: `tests/test_field_geometry.py` cubre desplazamientos por página, movimiento local, rayas que solo sobreviven junto al campo, referencias ausentes, candidatos ambiguos, funcionamiento sin red y correspondencia entre OCR y vista previa. La prueba con páginas reales sirve para medir coste y observar desplazamientos, pero no demuestra exactitud universal: hacen falta casillas etiquetadas para medir errores de localización. Las líneas borradas, formularios distintos o deformaciones mayores que la ventana pueden quedar sin confirmar.
+
+Medición del 13 de septiembre de 2026, en este equipo: páginas 3, 31 y 91 de `Image_001.pdf` a `Image_004.pdf`, renderizadas a 200 DPI y enderezadas. La mediana de detección global más ajuste local fue 79 ms por página; el coste adicional mediano frente al ajuste global fue 33 ms. Excluye renderizado, deskew y OCR. Es una muestra de doce páginas, no un límite de tiempo ni una garantía de precisión para otros equipos o escaneos.
 
 ### 2. Procesado: OCR y firmas
 
@@ -209,6 +236,10 @@ powershell -ExecutionPolicy Bypass -File setup.ps1 -Launcher
 ```
 
 `setup.ps1 -Force` reconstruye intérprete y modelos; úselo sobre una copia controlada. Después de cambiar modelos, precárguelos en `portable/` y compruebe su uso con la red bloqueada.
+
+Para agregar dependencias o reparar faltantes basta volver a ejecutar `setup.cmd`. El setup resuelve siempre `requirements.txt`, incluidos extras nuevos, sin reinstalar los paquetes ya satisfechos. `tools/check_portable.py` comprueba versiones, importaciones de las dependencias directas y `pip check`; si un paquete figura instalado pero no se puede importar, lo reinstala conservando su versión. También repone pip con `ensurepip` si falta. Un fallo de instalación o una comprobación final fallida termina con error, sin anunciar éxito.
+
+Para cada uno de los tres modelos exige `inference.json`, `inference.pdiparams` e `inference.yml`, presentes y no vacíos. Si falta alguno, elimina únicamente la carpeta incompleta dentro de `portable/` y vuelve a ejecutar la precarga; los modelos completos se conservan. La precarga realiza inferencia en CPU. Esta comprobación de archivos detecta ausencias y archivos vacíos, no toda corrupción posible de pesos: en ese caso corresponde reconstruir con `-Force`. `-Check` solo comprueba, no descarga ni repara. Las pruebas de reparación están en `tests/test_setup_portable.py`.
 
 Para liberar cambios: ejecute las pruebas pertinentes, procese una muestra por GUI y consola, compare CSV/JSON/PDF y pruebe la carpeta copiada a otra ubicación sin administrador. Las pruebas de AirVault con clientes simulados no prueban la aceptación real del servidor. No distribuya sesiones personales del perfil `portable/edge-airvault/`.
 

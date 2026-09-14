@@ -4594,12 +4594,17 @@ class MainWindow(QMainWindow):
             template = self._processed_template or self._load_template()
             if template is not None:
                 page = self._current_preview_result()
+                boxes = page.preview_boxes if page is not None else None
+                if page is None and self._preview_pending is not None:
+                    number, path = self._preview_pending
+                    geometry = self._preprocess_geometry.get((path, number), {})
+                    boxes = geometry.get("boxes")
                 self._draw_template_boxes(
                     pixmap,
                     template,
                     qimage.width(),
                     qimage.height(),
-                    boxes=page.preview_boxes if page is not None else None,
+                    boxes=boxes,
                 )
         self._preview_source_pixmap = pixmap
         self._render_preview_pixmap()

@@ -101,7 +101,7 @@ from app.vision.signature import (
     detect_signature,
     review_with_background,
 )
-from app.vision.reticula import leer_reticula, plantilla_ajustada
+from app.vision.field_geometry import place_fields
 from app.vision.date_geometry import (
     DateFieldGeometry,
     field_override,
@@ -588,23 +588,18 @@ def process_page_image(
                 "target_height_ratio": float(height) / max(source_height, 1),
             })
 
-    # 3.4) Colocar los campos sobre las rayas impresas de *esta* página. Las
-    # coordenadas de la plantilla miden desde el borde del lienzo, que depende
-    # de cómo cayó la hoja en el escáner; la retícula impresa no. Medido sobre
-    # doce páginas de ocho bitácoras, el borde de un campo se separaba de su
-    # raya real entre 8 y 11 px según el libro, hasta el 22% del alto del
-    # campo. Se mide después de alinear, así el resultado no depende de lo
-    # bien que saliera la alineación. Si la retícula no se identifica, la
-    # plantilla vuelve tal cual y los campos se quedan donde siempre.
+    # 3.4) Anclas de esta pagina, refinadas cerca de cada campo. La falta
+    # de una raya no obliga a descartar los ajustes de todos los demas.
+    unverified_positions = set()
     if template.reticula is not None:
-        reticula = leer_reticula(template, image)
-        page.reticula_rayas = len(reticula.y) + len(reticula.x)
-        if reticula.fiable:
-            template = plantilla_ajustada(template, reticula)
-        else:
+        placement = place_fields(template, image)
+        template = placement.template
+        page.reticula_rayas = placement.lines
+        unverified_positions.update(placement.unverified)
+        if unverified_positions:
             logger.warning(
-                f"[Página {page_number}] Retícula impresa no identificada: "
-                f"los campos se leen en su posición de plantilla"
+                f"[Página {page_number}] Posicion sin confirmar: "
+                f"{', '.join(sorted(unverified_positions))}"
             )
 
     # 3.5) Preparar una copia sin fondo impreso para las casillas. No se usa
@@ -698,6 +693,7 @@ def process_page_image(
         template, date_geometries, geom_shape,
     )
     ocr_overrides = {**date_overrides, **char_overrides}
+    unverified_positions.difference_update(ocr_overrides)
 
     # Rectángulos efectivos usados por esta página. Incluyen tanto la
     # geometría dinámica DD|MMM|AA como sus siete celdas individuales.
@@ -909,6 +905,15 @@ def process_page_image(
         # es y se deja en WARNING, que es donde el corrector lo recoge para
         # completarlo con el último día que cabe en el libro.
         _mark_day_not_read(page)
+    for result in page.fields:
+        if result.field_id in unverified_positions:
+            if result.status is Status.OK:
+                result.status = Status.WARNING
+            result.comment = " | ".join(filter(None, (
+                result.comment, "Posicion del campo sin confirmar; revisar recorte",
+            )))
+    if unverified_positions:
+        recompute_page_status(page)
     if page.alignment_quality != "ok":
         if page.status is Status.OK:
             page.status = Status.WARNING
@@ -2283,8 +2288,12 @@ class Pipeline:
             page_crops: Dict[str, np.ndarray] = {}
             for field in fields:
                 try:
+                    box = reviewed.preview_boxes.get(field.id) if reviewed else None
+                    effective = (field.model_copy(update=dict(zip(
+                        ("x", "y", "w", "h"), box,
+                    ))) if box is not None else field)
                     page_crops[field.id] = crop_region(
-                        image, field, pad_x=0.0, pad_y=0.0
+                        image, effective, pad_x=0.0, pad_y=0.0
                     )
                 except ValueError:
                     continue

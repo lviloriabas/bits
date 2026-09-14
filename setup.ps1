@@ -51,7 +51,7 @@ $PythonUrl = "https://globalcdn.nuget.org/packages/python.$PythonVersion.nupkg"
 $PythonSha = '0EB85C2DFCCCCF1B17352DE4C397F69194035B7D37149EACC16F1147D93DE3B8'
 
 # Los mismos nombres que fija app/ocr/engine.py y descarga tools\precache_paddle.py.
-$PaddleModels = @('PP-OCRv6_medium_det', 'PP-OCRv5_mobile_rec')
+$PaddleModels = @('PP-OCRv6_medium_det', 'PP-OCRv5_mobile_rec', 'PP-OCRv6_medium_rec')
 
 # --- Rutas -----------------------------------------------------------------
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Definition
@@ -61,6 +61,10 @@ $PythonDir = Join-Path $Portable 'python312'
 $PythonExe = Join-Path $PythonDir 'tools\python.exe'
 $ModelsDir = Join-Path $Portable 'paddlex\official_models'
 $LauncherExe = Join-Path $Root 'BITS.exe'
+$env:PADDLE_PDX_CACHE_HOME = Join-Path $Portable 'paddlex'
+$env:PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK = '1'
+$env:PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT = '0'
+$env:FLAGS_use_mkldnn = '0'
 
 # --- Salida ----------------------------------------------------------------
 
@@ -138,17 +142,42 @@ function Test-PythonPortable {
 
 function Test-Dependencias {
     if (-not (Test-Path $PythonExe)) { return $false }
-    # Imports representativos, incluido el puente al almacen TLS de Windows.
     return (Invoke-Programa -Ruta $PythonExe -Argumentos @(
-            '-c', 'import paddleocr, fitz, PySide6, truststore'))
+            (Join-Path $Root 'tools\check_portable.py'), '--check',
+            '--requirements', (Join-Path $Root 'requirements.txt')))
+}
+
+function Test-Modelo {
+    param([string]$Nombre)
+    foreach ($archivo in @('inference.json', 'inference.pdiparams', 'inference.yml')) {
+        $ruta = Join-Path $ModelsDir "$Nombre\$archivo"
+        if (-not (Test-Path -LiteralPath $ruta -PathType Leaf)) { return $false }
+        if ((Get-Item -LiteralPath $ruta).Length -eq 0) { return $false }
+    }
+    return $true
 }
 
 function Test-Modelos {
     foreach ($modelo in $PaddleModels) {
-        $pesos = Join-Path $ModelsDir "$modelo\inference.pdiparams"
-        if (-not (Test-Path $pesos)) { return $false }
+        if (-not (Test-Modelo $modelo)) { return $false }
     }
     return $true
+}
+
+function Remove-CarpetaPortable {
+    param([string]$Ruta)
+    $base = [System.IO.Path]::GetFullPath($Portable).TrimEnd('\') + '\'
+    $destinoAbsoluto = [System.IO.Path]::GetFullPath($Ruta)
+    if (-not $destinoAbsoluto.StartsWith($base, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Ruta fuera de portable: $destinoAbsoluto"
+    }
+    if (Test-Path -LiteralPath $destinoAbsoluto) {
+        $resuelta = (Resolve-Path -LiteralPath $destinoAbsoluto).Path
+        if (-not $resuelta.StartsWith($base, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Ruta resuelta fuera de portable: $resuelta"
+        }
+        Remove-Item -LiteralPath $resuelta -Recurse -Force
+    }
 }
 
 function Get-TamanoMB {
@@ -236,16 +265,16 @@ function Install-Python {
     # El paquete NuGet trae el interprete completo bajo tools\, que es la
     # ruta que usan el launcher, el README y los scripts de tools\.
     $temporal = Join-Path $Cache "python-$PythonVersion-extract"
-    if (Test-Path $temporal) { Remove-Item -LiteralPath $temporal -Recurse -Force }
+    Remove-CarpetaPortable $temporal
     Write-Detalle 'descomprimiendo'
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [System.IO.Compression.ZipFile]::ExtractToDirectory($paquete, $temporal)
 
     $destino = Join-Path $PythonDir 'tools'
-    if (Test-Path $destino) { Remove-Item -LiteralPath $destino -Recurse -Force }
+    Remove-CarpetaPortable $destino
     New-Item -ItemType Directory -Path $PythonDir -Force | Out-Null
     Move-Item -LiteralPath (Join-Path $temporal 'tools') -Destination $destino
-    Remove-Item -LiteralPath $temporal -Recurse -Force
+    Remove-CarpetaPortable $temporal
 
     # El paquete NuGet no trae pip; ensurepip lo instala desde la rueda incluida.
     Write-Detalle 'instalando pip'
@@ -260,18 +289,18 @@ function Install-Python {
 
 function Install-Dependencias {
     Write-Paso 'Dependencias de Python'
-    if ((Test-Dependencias) -and -not $Force) {
-        Write-Listo 'requirements.txt ya satisfecho'
-        return
+    # Resolver siempre requirements, incluidos extras nuevos. pip conserva
+    # los paquetes satisfechos; los imports solos no prueban todos los extras.
+    if (-not (Invoke-Programa -Ruta $PythonExe -Argumentos @('-m', 'pip', '--version'))) {
+        & $PythonExe -m ensurepip --upgrade --default-pip
+        if ($LASTEXITCODE -ne 0) { throw 'No se pudo reparar pip.' }
     }
-    $requisitos = Join-Path $Root 'requirements.txt'
-    Write-Detalle 'pip install -r requirements.txt (PaddlePaddle y PySide6 tardan)'
-    & $PythonExe -m pip install --disable-pip-version-check `
-        --no-warn-script-location -r $requisitos
+    Write-Detalle 'comprobando requisitos e instalando o reparando lo faltante'
+    $argumentos = @((Join-Path $Root 'tools\check_portable.py'),
+        '--requirements', (Join-Path $Root 'requirements.txt'))
+    if ($Force) { $argumentos += '--force' }
+    & $PythonExe @argumentos
     if ($LASTEXITCODE -ne 0) { throw 'Fallo la instalacion de dependencias.' }
-    if (-not (Test-Dependencias)) {
-        throw 'Las dependencias se instalaron pero no se pueden importar.'
-    }
     Write-Listo 'dependencias instaladas'
 }
 
@@ -281,10 +310,10 @@ function Install-Modelos {
         Write-Listo "$($PaddleModels -join ' + ') ya estan en portable\paddlex"
         return
     }
-    if ($Force) {
-        foreach ($modelo in $PaddleModels) {
+    foreach ($modelo in $PaddleModels) {
+        if ($Force -or -not (Test-Modelo $modelo)) {
             $ruta = Join-Path $ModelsDir $modelo
-            if (Test-Path $ruta) { Remove-Item -LiteralPath $ruta -Recurse -Force }
+            Remove-CarpetaPortable $ruta
         }
     }
     Write-Detalle 'tools\precache_paddle.py (descarga y prueba los modelos)'
@@ -365,7 +394,7 @@ Install-Modelos
 if ($Launcher) { Build-Launcher }
 
 if ($CleanCache -and (Test-Path $Cache)) {
-    Remove-Item -LiteralPath $Cache -Recurse -Force
+    Remove-CarpetaPortable $Cache
     Write-Detalle 'cache de instaladores borrada'
 }
 
