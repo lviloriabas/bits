@@ -40,7 +40,8 @@ La decisión tiene tres estados:
   más ancha que alta la extensión sola no basta —un sello compacto llega a
   cruzar más de medio ancho sin ser escritura—, así que el campo puede
   exigir además una cobertura mínima (``min_ink_coverage``): cuánta tinta
-  hay en el recorte entero, no en su punto más denso.
+  hay en el recorte entero, no en su punto más denso. Si la exige, ni un
+  pico alto confirma escritura sin alcanzar tambien la extension exigida.
 - ``false``: densidad por debajo de ``max_empty_peak``, poca tinta total y
   ninguna evidencia ni siquiera con el umbral de tinta relajado.
 - ``unclear`` (WARNING): todo lo demás, escritura que se sale del campo,
@@ -291,6 +292,15 @@ def _classify(metrics: dict, field: FieldTemplate) -> tuple[str, float, str]:
         and span >= field.min_ink_span
         and metrics["coverage"] >= field.min_ink_coverage
     )
+    if concentrated and field.min_ink_coverage > 0.0 and not spread:
+        # Las casillas que exigen reparto no se confirman por un pico:
+        # un sello invasor puede ser mas denso que una correccion escrita.
+        # Tampoco se declara vacio: podria ser texto corto o una rubrica.
+        return (
+            UNCLEAR, 0.40,
+            f"Escritura incierta: tinta concentrada sin el reparto "
+            f"exigido para esta casilla; {evidence}",
+        )
     if concentrated or spread:
         margin = min(1.0, peak / (3.0 * field.min_ink_peak))
         return (

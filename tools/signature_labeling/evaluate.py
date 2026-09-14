@@ -191,19 +191,23 @@ def decision_masks(
     dark_ratio = features[:, 4]
 
     usable = ~np.isnan(peak) & (dark_ratio <= thresholds.max_ink_ratio)
-    present = (peak >= thresholds.min_ink_peak) | (
+    concentrated = peak >= thresholds.min_ink_peak
+    spread = (
         (peak >= thresholds.max_empty_peak)
         & (span >= thresholds.min_ink_span)
         & (coverage >= thresholds.min_ink_coverage)
     )
+    present = concentrated | spread
     spread_ink = (peak >= _SPREAD_PEAK) & (span >= _SPREAD_SPAN)
     if thresholds.min_ink_coverage > 0.0:
+        present = spread
         empty = (
             (
                 (span < _REPARTO_MARGEN * thresholds.min_ink_span)
                 | (coverage < _REPARTO_MARGEN * thresholds.min_ink_coverage)
             )
             & ~spread_ink
+            & ~concentrated
         )
     else:
         empty = (

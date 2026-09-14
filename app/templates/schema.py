@@ -205,7 +205,9 @@ class FieldTemplate(BaseModel):
     min_ink_coverage: float = Field(
         default=0.0, ge=0.0, le=1.0,
         description="fracción del recorte entero que debe ser tinta para dar "
-                    "por escrita una casilla por su extensión. En una casilla "
+                    "por escrita una casilla, junto con min_ink_span. Si es "
+                    "mayor que cero, un pico denso sin ese reparto queda "
+                    "incierto. En una casilla "
                     "mucho más ancha que alta la extensión sola no distingue "
                     "una línea de texto de un sello compacto: el sello cruza "
                     "medio ancho pero apenas ensucia el recuadro. En 0 (por "

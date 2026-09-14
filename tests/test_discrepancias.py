@@ -28,6 +28,7 @@ from app.validation.discrepancias import (
     clasificar_lote,
     confirmadas_para_revision,
 )
+from app.vision.signature import _classify, _result
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = TemplateManager().load(
@@ -84,6 +85,40 @@ def _mant_ok(pn: int = 1, log: str = "2147337", mat: str = "HP-1534CMP",
     }
     sigs.update(extra)
     return _page(pn, log, mat, **sigs)
+
+
+class TestRepartoDeCorreccion(unittest.TestCase):
+    """El veredicto visual llega al reparto sin ocultar faltas reales."""
+
+    def _clasificar(self, page, *, span=0.304, coverage=0.0258):
+        campo = TEMPLATE.field("correction_block")
+        valor, confianza, comentario = _classify(dict(
+            peak=0.1382, weak_peak=0.15, coverage=coverage,
+            span=span, dark_ratio=0.05,
+        ), campo)
+        page.add_field(_result(campo, page.page_number, valor, confianza, comentario))
+        reporte = ValidationReport(
+            pdf_path="fixture.pdf", template_name=TEMPLATE.name, pages=[page],
+        )
+        clasificar_lote([reporte], TEMPLATE)
+        return page
+
+    def test_sello_no_exige_licencia_de_tecnico_en_vuelo_completo(self):
+        page = self._clasificar(_vuelo_ok())
+        self.assertFalse(page.discrepancy)
+        self.assertFalse(por_revisar(page))
+
+    def test_correccion_repartida_sin_licencia_sigue_en_revision(self):
+        page = self._clasificar(_vuelo_ok(), span=0.8, coverage=0.06)
+        self.assertTrue(page.discrepancy)
+        self.assertIn("technician_license", page.discrepancy_fields)
+        self.assertTrue(por_revisar(page))
+
+    def test_sello_no_oculta_firma_de_piloto_ausente(self):
+        page = self._clasificar(_vuelo_ok(pilot_signature=("false", AUSENTE)))
+        self.assertTrue(page.discrepancy)
+        self.assertIn("pilot_signature", page.discrepancy_fields)
+        self.assertTrue(por_revisar(page))
 
 
 def _corregida(pn: int = 1, log: str = "2147337", mat: str = "HP-1534CMP",

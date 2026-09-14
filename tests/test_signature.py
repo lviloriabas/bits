@@ -268,18 +268,13 @@ class TestCoberturaMinima(unittest.TestCase):
         )
         self.assertEqual(valor, "true")
 
-    def test_un_trazo_denso_no_pasa_por_la_puerta(self):
-        """La cobertura solo condiciona la vía de la tinta repartida.
-
-        Una rúbrica concentra tinta en un punto y puede dejar limpio el resto
-        del recorte; eso ya lo resuelve ``min_ink_peak`` y no tiene que pedir
-        permiso a la cobertura.
-        """
+    def test_un_trazo_denso_sin_reparto_no_confirma_una_correccion(self):
+        """Un sello denso no elude la cobertura que exige este campo."""
         campo = self._bloque()
         valor, _conf, _motivo = _classify(
             self._metricas(0.40, 0.20, 0.0100), campo
         )
-        self.assertEqual(valor, "true")
+        self.assertEqual(valor, UNCLEAR)
 
 
 if __name__ == "__main__":
@@ -359,6 +354,17 @@ class TestBloqueDeCorreccion(unittest.TestCase):
         self.assertEqual(
             self._veredicto(peak=0.088, weak_peak=0.092, coverage=0.0440,
                             span=0.691), "true")
+
+    def test_un_sello_denso_no_confirma_trabajo_escrito(self):
+        # fix.pdf p4: tinta localizada, sin texto de correccion repartido.
+        self.assertEqual(
+            self._veredicto(peak=0.1382, weak_peak=0.15, coverage=0.0258,
+                            span=0.304), UNCLEAR)
+
+    def test_mucha_extension_sin_cobertura_no_elude_la_guarda(self):
+        self.assertEqual(
+            self._veredicto(peak=0.20, weak_peak=0.22, coverage=0.010,
+                            span=0.80), UNCLEAR)
 
     def test_la_casilla_vacia_es_ausencia(self):
         # fix.pdf p7: solo el gris del escaneo sobre el papel rayado.

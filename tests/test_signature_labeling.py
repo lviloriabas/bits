@@ -103,11 +103,14 @@ class TestDecisionVectorizada(unittest.TestCase):
                        min_ink_span=0.55),
             Thresholds(min_ink_peak=0.06, max_empty_peak=0.06,
                        min_ink_span=1.0, max_ink_ratio=0.30),
+            Thresholds(min_ink_peak=0.13, max_empty_peak=0.02,
+                       min_ink_span=0.50, min_ink_coverage=0.024),
         ):
             campo = _campo(
                 min_ink_peak=umbrales.min_ink_peak,
                 max_empty_peak=umbrales.max_empty_peak,
                 min_ink_span=umbrales.min_ink_span,
+                min_ink_coverage=umbrales.min_ink_coverage,
                 max_ink_ratio=umbrales.max_ink_ratio,
             )
             vectorizado = classify_vector(features, umbrales)
