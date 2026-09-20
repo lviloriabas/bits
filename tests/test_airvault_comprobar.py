@@ -1284,6 +1284,49 @@ def test_worker_completa_aunque_el_mapa_tarde_en_ver_la_pagina_verde(tmp_path):
     assert dormidas == [ESPERAS_CIERRE[0]]
 
 
+def test_worker_retoma_el_indexado_cortado_y_solo_escribe_lo_que_falta(tmp_path):
+    """Una escritura que se corta a la mitad se retoma sola, sin repetirla.
+
+    Es lo que pasaba delante del usuario: la sesion se caia a mitad del
+    batch, el bucle se rendia en el acto y el lote se quedaba a medias
+    hasta que alguien volvia a pulsar. Ahora la pasada siguiente
+    replanifica, ve en verde lo que ya quedo escrito y vuelve solo por las
+    que faltan, asi que el batch termina y se puede cerrar.
+    """
+    from app.airvault.session import ErrorDeConexion
+    from app.gui.airvault_window import TrabajoAirVaultWorker
+
+    class SeCortaUnaVez(ClienteFalso):
+        cortes = 0
+
+        def guardar_pagina(self, batch_id, pagina, valores, estado,
+                           pagina_siguiente=None):
+            if pagina == 2 and not self.cortes:
+                self.cortes += 1
+                raise ErrorDeConexion("se corto la sesion a mitad del batch")
+            return super().guardar_pagina(
+                batch_id, pagina, valores, estado, pagina_siguiente
+            )
+
+    trabajo, base = trabajo_subido(tmp_path)
+    trabajo.fijar_lote("003SRO")
+    cli = SeCortaUnaVez(
+        paginas=base.paginas, lotes=base.lotes, picklist=base.picklist,
+        page_count=2,
+    )
+    plan = trabajo.planificar(cli)
+    worker = TrabajoAirVaultWorker("indexar", {"tanda_hecha": True})
+    worker._dormir = lambda _segundos: None
+
+    datos = worker._ejecutar_indexado([trabajo], [plan], cli, completar=True)
+
+    assert datos["validas"] == datos["total"] == 2
+    # La 1 se escribe una sola vez: la segunda pasada ya la ve en verde y no
+    # la vuelve a tocar. Solo se reescribe la 2, que es la que falto.
+    assert [p for p, _v, _e in cli.escrituras] == [1, 2]
+    assert cli.completados == ["003SRO"]
+
+
 # ── la orden de subir dada a mano ──────────────────────────────────
 #
 # La automatizacion es prudente a proposito: ante la duda espera, cuenta

@@ -859,7 +859,7 @@ class TrabajoAirVaultWorker(QThread):
                                         comprobar_tanda_de_libros,
                                         indexar_partes, planificar_partes,
                                         verificar_partes)
-        from app.airvault.indexer import Resultado
+        from app.airvault.indexer import FALLOS_DE_CAMINO, Resultado
 
         def esperar_confirmacion(segundos: float) -> None:
             self._avisar(
@@ -871,6 +871,7 @@ class TrabajoAirVaultWorker(QThread):
         cierres: list = []
         resultado = Resultado()
         validas = total = 0
+        faltan_previas: Optional[int] = None
         try:
             for intento in range(1, INTENTOS_INDEXADO + 1):
                 parcial = indexar_partes(
@@ -897,18 +898,36 @@ class TrabajoAirVaultWorker(QThread):
                     else ESPERAS_CONFIRMACION[intento - 1],
                     dormir=esperar_confirmacion,
                 )
-                if validas == total or parcial.interrumpido:
+                if validas == total:
                     break
+                # Una escritura que se corto a la mitad es justo la que hay
+                # que retomar: lo escrito queda escrito y el plan siguiente
+                # solo mira las que no quedaron en verde. Antes se
+                # abandonaba aqui mismo y el batch se quedaba a medias
+                # esperando a que alguien lo repitiera a mano. Ahora se deja
+                # cuando una pasada entera no reduce las que faltan, que es
+                # la senal de que reintentar ya no va a cambiar nada.
+                faltan = total - validas
+                if faltan_previas is not None and faltan >= faltan_previas:
+                    break
+                faltan_previas = faltan
                 if intento < INTENTOS_INDEXADO:
                     self._avisar(
                         f"Reintentando páginas sin confirmar "
                         f"({intento + 1}/{INTENTOS_INDEXADO})", 0, 0,
                     )
                     resolutor = planes[0][1].resolutor if planes else None
-                    planes = planificar_partes(
-                        trabajos, cliente, resolutor=resolutor,
-                        avisar=self._avisar,
-                    )
+                    try:
+                        planes = planificar_partes(
+                            trabajos, cliente, resolutor=resolutor,
+                            avisar=self._avisar,
+                        )
+                    except FALLOS_DE_CAMINO as exc:
+                        # Sin sesion no hay plan nuevo que valga. Lo escrito
+                        # sigue escrito y la ronda siguiente lo retoma desde
+                        # donde quedo, asi que no se pierde el avance.
+                        resultado.interrumpido = str(exc)
+                        break
                     for trabajo, plan in zip(trabajos, planes):
                         self.estado.setdefault("planes", {})[
                             str(trabajo.carpeta)
