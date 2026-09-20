@@ -211,9 +211,19 @@ Cada exportación conserva en `logs/` su plantilla y las opciones aplicadas. Con
 
 ## Discrepancias a detectar
 
-En **Herramientas -> Discrepancias a detectar**, active las firmas y licencias que desea comprobar. La selección se guarda en la plantilla y se aplica al siguiente procesamiento. No cambia los campos que se leen para identificar el documento. No hay un editor separado de tipos de discrepancia.
+En **Herramientas -> Discrepancias a detectar**, active los tipos de discrepancia que desea reclamar. Hay tres. Cada uno es una casilla que se marca al pulsarla, y la flecha de su derecha abre las casillas que ese tipo exige:
 
-La lista también se puede editar en el JSON de la plantilla: `discrepancy_fields: null` activa todas; una lista de identificadores activa solo esas; `[]` desactiva la detección. Las lecturas inciertas se distinguen de las ausencias confirmadas. Una licencia tenue no se considera ausente solamente porque desaparezca al compararla con el fondo del libro.
+- **De vuelo:** firma de piloto, firma de capitán y licencia de capitán.
+- **De mantenimiento:** firma de piloto (el bloque superior, que en la hoja firma el técnico), firma de técnico y licencia de técnico.
+- **Del bloque de correcciones (mantenimiento):** las mismas tres casillas, pero reclamadas porque hay trabajo escrito en «CORRECTION OR DEFERRAL» aunque la licencia del técnico haya quedado en blanco. Apagarlo deja de reclamar firmas por trabajo descrito, sin tocar el resto del mantenimiento.
+
+Cada tipo lleva su propia selección: apagar la firma de piloto en vuelo no la apaga en mantenimiento. Quitar el tipo entero apaga sus tres casillas; volver a marcarlo las devuelve todas.
+
+La selección se guarda en la plantilla y se aplica al siguiente procesamiento. No cambia los campos que se leen para identificar el documento, ni cambia qué cuenta como discrepancia: solo decide cuáles se reportan.
+
+También se puede editar en el JSON de la plantilla: `discrepancy_types: null` reclama todo; si no, cada clave (`vuelo`, `mantenimiento`, `correccion`) lleva la lista de campos activos, y una lista vacía apaga ese tipo.
+
+Las páginas donde no se pudo determinar el tipo quedan fuera de este menú y se comportan igual que siempre. Las lecturas inciertas se distinguen de las ausencias confirmadas. Una licencia tenue no se considera ausente solamente porque desaparezca al compararla con el fondo del libro.
 
 ## Editor de plantilla
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -305,9 +305,12 @@ class Template(BaseModel):
     )
     source_path: Optional[Path] = Field(default=None, exclude=True, repr=False)
     fields: List[FieldTemplate] = Field(default_factory=list)
-    discrepancy_fields: Optional[List[str]] = Field(
+    discrepancy_types: Optional[Dict[str, List[str]]] = Field(
         default=None,
-        description="Discrepancias activas: null detecta todas; [] no detecta ninguna",
+        description="Discrepancias activas por tipo de entrada: null reclama "
+                    "todo. Cada clave (vuelo, mantenimiento, correccion) lleva "
+                    "los campos que se reclaman en ese tipo; lista vacia apaga "
+                    "el tipo entero",
     )
 
     @field_validator("fields")

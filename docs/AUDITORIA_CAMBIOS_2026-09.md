@@ -30,7 +30,7 @@ Reproducción desde la raíz, con los PDF locales de la muestra:
 | Recuperar velocidad | `app/ocr/engine.py`, `app/vision/void_mark.py` | Comparación real de 12 páginas y pruebas de retorno al mismo modelo si oneDNN falla |
 | Texto de subida y nombre de editor | Ventanas principal, editor y AirVault | Subida secuencial; «Editor de plantilla» |
 | Campos importantes en visor CSV | `CsvViewerWindow.refresh_important_columns` | Actualización del visor abierto al cambiar la selección principal |
-| Elegir discrepancias, sin editor de tipos | `Template.discrepancy_fields`, menú «Discrepancias a detectar» | Lista vacía, selección parcial y comportamiento anterior con null |
+| Elegir discrepancias por tipo | `Template.discrepancy_types`, menú «Discrepancias a detectar» con submenú por tipo | Tipo apagado, selección parcial dentro de un tipo sin afectar a los otros, y comportamiento anterior con null |
 | Azul hasta completar | `_pintar_lotes` | INDEXADO e INCOMPLETO azules; COMPLETADO y AUTOCOMPLETADO verdes; cambio de tema |
 | Licencias acusadas incorrectamente | `review_with_background(..., allow_absent=False)` en licencias | 265 recortes etiquetados con licencia escrita: ninguna falsa ausencia del detector base. Caso `rev1_p0157_technician_license`: la segunda opinión antes lo convertía en ausente; ahora conserva la duda |
 | ECN Reason | `app/airvault/ecn.py` | Bloque superior: TECHNICIAN SIGNATURE; firma/licencia del capitán: razón de PILOT. Identificadores de campos y columnas conservados |

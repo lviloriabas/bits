@@ -3,6 +3,11 @@
 El editor solo edita geometría, tipo y reglas básicas. Antes reconstruía
 cada campo desde cero, así que un guardado de coordenadas borraba en
 silencio ``min_length``/``max_length`` y el ``ocr_mode`` de la plantilla.
+
+Lo mismo pasaba un nivel más arriba: la plantilla entera se rehacía con
+``name``, ``page_size`` y ``fields``, de modo que guardar la geometría
+borraba la retícula, las discrepancias activas, la versión y el DPI de
+referencia.
 """
 
 from __future__ import annotations
@@ -72,6 +77,28 @@ class TestRecoleccionDelEditor(unittest.TestCase):
         field = FieldTemplate(id="nuevo", x=0.1, y=0.1, w=0.1, h=0.1)
         self.assertIs(field.ocr_mode, OcrMode.DETECT)
         self.assertIsNone(field.min_length)
+
+
+class TestNivelSuperiorDelEditor(unittest.TestCase):
+    """``_collect_template`` copia la plantilla base, no solo sus campos."""
+
+    def test_guardar_geometria_conserva_lo_que_el_editor_no_muestra(self):
+        base = TemplateManager().load(TEMPLATE).model_copy(update={
+            "discrepancy_types": {"vuelo": ["captain_license"]},
+        })
+        # Lo único que el editor rehace al guardar.
+        guardada = base.model_copy(update={
+            "name": "Aircraft Log",
+            "page_size": [1000, 700],
+            "fields": base.fields,
+        })
+
+        self.assertEqual(guardada.page_size, [1000, 700])
+        self.assertEqual(guardada.discrepancy_types,
+                         {"vuelo": ["captain_license"]})
+        self.assertIsNotNone(guardada.reticula)
+        self.assertEqual(guardada.version, base.version)
+        self.assertEqual(guardada.reference_dpi, base.reference_dpi)
 
 
 class TestSerializacion(unittest.TestCase):

@@ -340,6 +340,10 @@ class EditorWindow(QMainWindow):
         # Campos tal como venían en la plantilla, para no perder al guardar
         # las propiedades que el editor no expone.
         self._base_fields: Dict[str, FieldTemplate] = {}
+        # Y la plantilla entera por el mismo motivo: el editor solo toca
+        # geometría, así que todo lo demás (retícula, discrepancias activas,
+        # versión, DPI de referencia) tiene que sobrevivir al guardado.
+        self._base_template: Optional[Template] = None
         self._presets: Dict[str, dict] = self._load_presets()
 
         self._build_ui()
@@ -358,6 +362,7 @@ class EditorWindow(QMainWindow):
             logger.warning(f"No se pudieron cargar los campos de {path}: "
                            f"{exc}; usando valores de respaldo")
             return dict(_FALLBACK_PRESETS)
+        self._base_template = template
         presets: Dict[str, dict] = {}
         for field in template.fields:
             # Se conserva el campo completo: al guardar se copia y solo se
@@ -855,8 +860,11 @@ class EditorWindow(QMainWindow):
                 base.model_copy(update=edited) if base is not None
                 else FieldTemplate(**edited)
             )
-        return Template(name="Aircraft Log", page_size=list(self._image_size),
-                        fields=fields)
+        cambios = {"name": "Aircraft Log", "page_size": list(self._image_size),
+                   "fields": fields}
+        if self._base_template is not None:
+            return self._base_template.model_copy(update=cambios)
+        return Template(**cambios)
 
     def _save_template(self) -> None:
         if not self._image_size or not self._items:
@@ -918,6 +926,7 @@ class EditorWindow(QMainWindow):
 
         # La plantilla abierta manda: sus campos son la base que se copia al
         # guardar, para no reemplazar sus reglas por las del preset.
+        self._base_template = template
         for field in template.fields:
             self._base_fields[field.id] = field
 

@@ -39,11 +39,26 @@ TEMPLATE = TemplateManager().load(
 def test_seleccion_de_discrepancias_filtra_solo_lo_solicitado():
     from app.validation.discrepancias import _clasificar_pagina
     page = _vuelo_ok(captain_signature=("false", AUSENTE), captain_license=("false", AUSENTE))
-    activa = TEMPLATE.model_copy(update={"discrepancy_fields": ["captain_license"]})
+    activa = TEMPLATE.model_copy(
+        update={"discrepancy_types": {"vuelo": ["captain_license"]}}
+    )
     resultado = _clasificar_pagina(page, activa)
     assert resultado is not None
     assert [c.field_id for c in resultado[2]] == ["captain_license"]
-    assert _clasificar_pagina(page, TEMPLATE.model_copy(update={"discrepancy_fields": []})) is None
+    apagado = TEMPLATE.model_copy(update={"discrepancy_types": {"vuelo": []}})
+    assert _clasificar_pagina(page, apagado) is None
+
+
+def test_apagar_un_tipo_no_apaga_los_otros():
+    """Cada tipo lleva su propio juego: el de vuelo no toca al de mantenimiento."""
+    from app.validation.discrepancias import _clasificar_pagina
+    sin_vuelo = TEMPLATE.model_copy(update={"discrepancy_types": {"vuelo": []}})
+    page = _vuelo_ok(captain_signature=("false", AUSENTE))
+    assert _clasificar_pagina(page, sin_vuelo) is None
+    mantenimiento = _mant_ok(technician_signature=("false", AUSENTE))
+    resultado = _clasificar_pagina(mantenimiento, sin_vuelo)
+    assert resultado is not None
+    assert [c.field_id for c in resultado[2]] == ["technician_signature"]
 
 # Umbrales por defecto de la plantilla
 PRESENTE = 0.9  # >= sig_present_conf (0.45)

@@ -1250,7 +1250,10 @@ class MainWindow(QMainWindow):
         self.btn_editor.setToolTip("Abrir el editor visual de plantillas")
         self.btn_editor.triggered.connect(self._open_template_editor)
 
-        self.discrepancias_menu = template_menu.addMenu("Discrepancias a detectar")
+        self.discrepancias_menu = MultiSelectMenu(template_menu)
+        self.discrepancias_menu.setTitle("Discrepancias a detectar")
+        self.discrepancias_menu.setToolTipsVisible(True)
+        template_menu.addMenu(self.discrepancias_menu)
         self.discrepancias_menu.aboutToShow.connect(self._llenar_menu_discrepancias)
 
         self.btn_csv_viewer = template_menu.addAction("Visor de CSV…")
@@ -3022,52 +3025,115 @@ class MainWindow(QMainWindow):
         selected = self._current_important_columns(columns)
         return [column for column in columns if column in selected]
 
+    def _seleccion_discrepancias(self, template: Template) -> dict[str, list[str]]:
+        """Qué casillas reclama hoy cada tipo, con la plantilla sin ajuste."""
+        from app.validation.discrepancias import CAMPOS_POR_TIPO
+
+        guardado = template.discrepancy_types
+        return {
+            tipo: list(campos if guardado is None else guardado.get(tipo, campos))
+            for tipo, campos in CAMPOS_POR_TIPO.items()
+        }
+
     def _llenar_menu_discrepancias(self) -> None:
         """La seleccion queda en la plantilla, portable y editable como texto."""
+        from app.validation.discrepancias import (
+            CAMPOS_POR_TIPO,
+            NOMBRE_CAMPO,
+            NOMBRE_TIPO,
+        )
+
         menu = self.discrepancias_menu
         menu.clear()
         template = self._load_template()
         if template is None:
             return
-        nombres = {
-            "pilot_signature": "Firma del bloque superior",
-            "captain_signature": "Firma del capitán (vuelo)",
-            "captain_license": "Licencia del capitán (vuelo)",
-            "technician_signature": "Firma del técnico (mantenimiento)",
-            "technician_license": "Licencia del técnico (mantenimiento)",
-        }
-        activas = set(template.discrepancy_fields if template.discrepancy_fields
-                      is not None else nombres)
-        for campo, nombre in nombres.items():
-            if template.field(campo) is None:
+        activas = self._seleccion_discrepancias(template)
+        habilitado = not (self._worker and self._worker.isRunning())
+        # La fila del tipo es a la vez la casilla y la que abre el submenu:
+        # se marca al pulsarla y despliega sus campos al pasar por encima.
+        self._acciones_tipo = {}
+        self._acciones_campo = {}
+        for tipo, campos in CAMPOS_POR_TIPO.items():
+            disponibles = [c for c in campos if template.field(c) is not None]
+            if not disponibles:
                 continue
-            accion = menu.addAction(nombre)
-            accion.setCheckable(True)
-            accion.setChecked(campo in activas)
-            accion.setEnabled(not (self._worker and self._worker.isRunning()))
-            accion.toggled.connect(
-                lambda marcada, c=campo: self._cambiar_discrepancia(c, marcada)
+            submenu = MultiSelectMenu(menu)
+            submenu.setToolTipsVisible(True)
+            submenu.setTitle(NOMBRE_TIPO[tipo])
+            for campo in disponibles:
+                accion = submenu.addAction(NOMBRE_CAMPO[campo])
+                accion.setCheckable(True)
+                accion.setChecked(campo in activas[tipo])
+                accion.setEnabled(habilitado)
+                accion.toggled.connect(
+                    lambda marcada, t=tipo, c=campo:
+                    self._cambiar_discrepancia(t, c, marcada)
+                )
+                self._acciones_campo[(tipo, campo)] = accion
+            accion_tipo = menu.addMenu(submenu)
+            accion_tipo.setCheckable(True)
+            accion_tipo.setChecked(any(c in activas[tipo] for c in disponibles))
+            accion_tipo.setEnabled(habilitado)
+            accion_tipo.toggled.connect(
+                lambda marcada, t=tipo: self._cambiar_tipo_discrepancia(t, marcada)
             )
+            self._acciones_tipo[tipo] = accion_tipo
 
-    def _cambiar_discrepancia(self, campo: str, marcada: bool) -> None:
+    def _cambiar_tipo_discrepancia(self, tipo: str, marcada: bool) -> None:
+        """Apaga el tipo entero o lo devuelve con todas sus casillas."""
+        from app.validation.discrepancias import CAMPOS_POR_TIPO
+
         template = self._load_template()
-        if template is None or template.source_path is None:
+        if template is None:
             return
-        from app.validation.discrepancias import _NOMBRE_CORTO
-        activas = set(template.discrepancy_fields if template.discrepancy_fields
-                      is not None else _NOMBRE_CORTO)
+        activas = self._seleccion_discrepancias(template)
+        activas[tipo] = list(CAMPOS_POR_TIPO[tipo]) if marcada else []
+        self._guardar_discrepancias(template, activas)
+
+    def _cambiar_discrepancia(self, tipo: str, campo: str, marcada: bool) -> None:
+        """Enciende o apaga una casilla dentro de un solo tipo."""
+        from app.validation.discrepancias import CAMPOS_POR_TIPO
+
+        template = self._load_template()
+        if template is None:
+            return
+        activas = self._seleccion_discrepancias(template)
+        seleccion = set(activas[tipo])
         if marcada:
-            activas.add(campo)
+            seleccion.add(campo)
         else:
-            activas.discard(campo)
-        actualizada = template.model_copy(update={"discrepancy_fields": sorted(activas)})
+            seleccion.discard(campo)
+        activas[tipo] = [c for c in CAMPOS_POR_TIPO[tipo] if c in seleccion]
+        self._guardar_discrepancias(template, activas)
+
+    def _guardar_discrepancias(
+        self, template: Template, activas: dict[str, list[str]]
+    ) -> None:
+        if template.source_path is None:
+            return
+        actualizada = template.model_copy(
+            update={"discrepancy_types": activas}
+        )
         try:
             TemplateManager().save(actualizada, template.source_path)
         except OSError as exc:
             QMessageBox.warning(self, "Discrepancias a detectar", str(exc))
             return
         self._template_cache = None
+        self._sincronizar_menu_discrepancias(activas)
         self.statusBar().showMessage("Discrepancias guardadas para el próximo procesamiento")
+
+    def _sincronizar_menu_discrepancias(
+        self, activas: dict[str, list[str]]
+    ) -> None:
+        """Deja la fila del tipo y sus campos de acuerdo, sin cerrar el menú."""
+        for tipo, accion in getattr(self, "_acciones_tipo", {}).items():
+            with QSignalBlocker(accion):
+                accion.setChecked(bool(activas.get(tipo)))
+        for (tipo, campo), accion in getattr(self, "_acciones_campo", {}).items():
+            with QSignalBlocker(accion):
+                accion.setChecked(campo in activas.get(tipo, []))
 
     def _load_template(self) -> Template | None:
         selected = self.template_combo.currentData()

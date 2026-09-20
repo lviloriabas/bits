@@ -78,7 +78,7 @@ def registrar_exportacion(run_dir: Path, options: OutputOptions, evento: str = "
     registro = {
         "fecha": datetime.now().astimezone().isoformat(),
         "evento": evento, "plantilla_sha256": huella,
-        "plantilla": plantilla.name, "discrepancias_a_detectar": options.template.discrepancy_fields,
+        "plantilla": plantilla.name, "discrepancias_a_detectar": options.template.discrepancy_types,
         "columnas_importantes": list(options.important_csv_columns), "dpi": options.dpi,
         "modo_fecha": options.csv_date_mode, "leer_dia": options.read_day,
         "sin_pdf": options.skip_pdfs,

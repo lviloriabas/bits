@@ -70,6 +70,15 @@ umbrales del campo (``sig_present_conf`` / ``sig_absent_conf``): una
 lectura de baja confianza nunca se acusa como falta (evita discrepancias
 falsas) y se marca como *incierta* (categoría UNCERTAIN, revisión manual).
 
+El menú «Discrepancias a detectar» no toca nada de lo anterior. Solo filtra
+lo ya clasificado, con tres interruptores que corresponden a los tres casos
+en que esta clasificación reclama firmas: vuelo, mantenimiento y
+mantenimiento nacido del bloque de corrección (``por_correccion``). Cada uno
+lleva la lista de casillas que se reclaman en él (``Template
+.discrepancy_types``), así que apagar la firma de piloto en vuelo no la apaga
+en mantenimiento. Las páginas de tipo incierto no responden a ningún
+interruptor (``tipo_de_menu`` devuelve None) y se reportan como siempre.
+
 Las discrepancias se ordenan globalmente por número de bitácora
 (``log_number``) ascendente, sin subdividirlas por matrícula o mes.
 
@@ -106,6 +115,40 @@ _NOMBRE_ILEGIBLE = {
     FIELD_TECH_LICENSE: "Licencia de técnico",
     FIELD_CAPTAIN: "Firma de capitán",
     FIELD_CAPTAIN_LICENSE: "Licencia del capitán",
+}
+
+# Los tres tipos que el menú deja encender y apagar. No son una regla nueva:
+# salen de lo que `_clasificar_sin_filtro` ya decidió, y solo sirven para
+# saber a qué interruptor responde la página.
+TIPO_VUELO = "vuelo"
+TIPO_MANTENIMIENTO = "mantenimiento"
+TIPO_CORRECCION = "correccion"
+
+# Qué casillas reclama cada tipo. Es el mismo juego que arman las listas de
+# `requisitos` dentro de `_clasificar_sin_filtro`: aquí solo se repite para
+# poder dibujar el menú sin clasificar una página. Si allá cambian los
+# requisitos, esta tabla tiene que seguirlos.
+CAMPOS_POR_TIPO = {
+    TIPO_VUELO: (FIELD_PILOT, FIELD_CAPTAIN, FIELD_CAPTAIN_LICENSE),
+    TIPO_MANTENIMIENTO: (FIELD_PILOT, FIELD_TECH, FIELD_TECH_LICENSE),
+    TIPO_CORRECCION: (FIELD_PILOT, FIELD_TECH, FIELD_TECH_LICENSE),
+}
+
+# Cómo se nombra cada tipo en el menú.
+NOMBRE_TIPO = {
+    TIPO_VUELO: "De vuelo",
+    TIPO_MANTENIMIENTO: "De mantenimiento",
+    TIPO_CORRECCION: "Del bloque de correcciones (mantenimiento)",
+}
+
+# Cómo se nombra cada casilla en el menú. Repite la redacción de las razones
+# para que lo que se apaga aquí se reconozca en el reporte.
+NOMBRE_CAMPO = {
+    FIELD_PILOT: "Firma de piloto",
+    FIELD_CAPTAIN: "Firma de capitán",
+    FIELD_CAPTAIN_LICENSE: "Licencia de capitán",
+    FIELD_TECH: "Firma de técnico",
+    FIELD_TECH_LICENSE: "Licencia de técnico",
 }
 
 # Cómo se nombra cada casilla dentro del resumen de una línea. Van en
@@ -377,13 +420,31 @@ def _clasificar_sin_filtro(page: PageResult, template: Template
     return tipo, categoria, afectados, por_correccion
 
 
+def tipo_de_menu(tipo: TipoEntrada, por_correccion: bool) -> Optional[str]:
+    """A qué interruptor del menú responde una página ya clasificada.
+
+    No decide nada: traduce lo que `_clasificar_sin_filtro` devolvió. Las
+    páginas de tipo incierto no responden a ningún interruptor y por eso
+    devuelven None: el menú no las gobierna y se reportan como siempre.
+    """
+    if tipo is TipoEntrada.VUELO:
+        return TIPO_VUELO
+    if tipo is TipoEntrada.MANTENIMIENTO:
+        return TIPO_CORRECCION if por_correccion else TIPO_MANTENIMIENTO
+    return None
+
+
 def _clasificar_pagina(page: PageResult, template: Template):
     """Aplica la seleccion sin perder la evidencia para distinguir el tipo."""
     resultado = _clasificar_sin_filtro(page, template)
-    if resultado is None or template.discrepancy_fields is None:
+    if resultado is None or template.discrepancy_types is None:
         return resultado
     tipo, categoria, campos, por_correccion = resultado
-    campos = [c for c in campos if c.field_id in template.discrepancy_fields]
+    clave = tipo_de_menu(tipo, por_correccion)
+    if clave is None:
+        return resultado
+    activos = template.discrepancy_types.get(clave, CAMPOS_POR_TIPO[clave])
+    campos = [c for c in campos if c.field_id in activos]
     if not campos:
         return None
     categoria = (Categoria.MISSING if any(c.categoria is Categoria.MISSING
