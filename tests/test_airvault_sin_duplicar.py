@@ -51,7 +51,7 @@ def _trabajo(tmp_path, entrega="hoy", carpeta="job-1", nombre="DP | BIT"):
     """
     csv = corrida(tmp_path / entrega, nombre=f"BITS {entrega}")
     trabajo = Trabajo.preparar(
-        AirVaultConfig(),
+        AirVaultConfig(detener_por_duplicados=True),
         tmp_path / "output" / "airvault" / carpeta,
         csv,
         nombre,
@@ -247,6 +247,37 @@ def test_sin_poder_consultar_no_se_inventa_un_motivo(tmp_path):
             raise RuntimeError("sin red")
 
     assert revisar_duplicado(trabajo, BuscadorMudo()) == ""
+
+
+def test_desmarcada_advierte_y_sube_aunque_web_search_detecte_duplicados(tmp_path, monkeypatch):
+    trabajo = _trabajo(tmp_path)
+    trabajo.config = trabajo.config.with_overrides(detener_por_duplicados=False)
+    numeros = [r.log_number for r in trabajo.manifiesto.registros if r.log_number]
+    subidas, avisos = [], []
+    monkeypatch.setattr(Trabajo, "subir", lambda self, *a, **k: subidas.append(self))
+    monkeypatch.setattr(Trabajo, "descubrir", lambda self, *a, **k: setattr(self.manifiesto, "batch_id", "NUEVO"))
+    fallos = subir_partes([trabajo], SesionFalsa(), cliente=ClienteFalso(),
+                         buscador=BuscadorFalso(numeros), avisar=lambda texto, *_: avisos.append(texto))
+    assert subidas == [trabajo]
+    assert not fallos
+    assert es_posible_duplicado(trabajo)
+    assert any("duplicado" in aviso and "continúa" in aviso for aviso in avisos)
+    assert "sin detener" in str(estado_local(trabajo))
+
+
+def test_desmarcada_no_impide_completar_y_conserva_la_alerta(tmp_path, monkeypatch):
+    from app.airvault.flujo import ResultadoCompletar
+    trabajo = _trabajo(tmp_path)
+    trabajo.config = trabajo.config.with_overrides(detener_por_duplicados=False)
+    trabajo.manifiesto.posible_duplicado = "ya hay bitácoras publicadas"
+    llamadas = []
+    def completar(cliente, automatico=False):
+        llamadas.append(automatico)
+        return ResultadoCompletar(True, [], 2, "ok")
+    monkeypatch.setattr(trabajo, "completar", completar)
+    assert completar_partes([trabajo], ClienteFalso())[0][1].completado
+    assert llamadas
+    assert es_posible_duplicado(trabajo)
 
 
 # ── preguntarle a Web Search es opcional ───────────────────────────

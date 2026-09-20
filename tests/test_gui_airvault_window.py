@@ -63,6 +63,31 @@ def test_el_resumen_de_la_ejecucion_se_llama_resultado(ventana):
     assert isinstance(ventana.reparto_total.parentWidget(), QGroupBox)
 
 
+def test_casilla_duplicados_recuerda_ambos_estados(app, tmp_path):
+    for marcada in (True, False):
+        ventana = AirVaultWindow(tmp_path, OpcionesAutomatizacion(tmp_path))
+        ventana.detener_duplicados_check.setChecked(marcada)
+        ventana.close()
+        nueva = AirVaultWindow(tmp_path, OpcionesAutomatizacion(tmp_path))
+        assert nueva.detener_duplicados_check.isChecked() is marcada
+        assert nueva._config.detener_por_duplicados is marcada
+        nueva.close()
+
+
+def test_completar_activo_mantiene_vigilancia_hasta_confirmar_cierre(ventana):
+    from app.airvault.flujo import INDEXADO, COMPLETADO
+    ventana._estados = [parte(INDEXADO)]
+    ventana.completar_check.setChecked(False)
+    assert not ventana._falta_esperar()
+    ventana.completar_check.setChecked(True)
+    assert ventana._falta_esperar()
+    ventana._ajustar_vigilancia()
+    assert ventana._vigilante.isActive()
+    ventana._estados = [parte(COMPLETADO)]
+    ventana._ajustar_vigilancia()
+    assert not ventana._vigilante.isActive()
+
+
 def corrida(
     raiz, nombre="BITS 18 AUG 2026 05 42", exportada=True, paginas=19,
 ):
@@ -876,12 +901,12 @@ def test_gris_solo_significa_sin_subir_y_subido_queda_blanco(ventana):
     assert ventana.lotes.item(1, 0).foreground().style() is Qt.BrushStyle.NoBrush
 
 
-def test_azul_solo_durante_indexacion_y_verde_al_terminar(ventana):
-    from app.airvault.flujo import INDEXADO, LISTO
+def test_azul_hasta_completar_y_verde_al_terminar(ventana):
+    from app.airvault.flujo import COMPLETADO, INDEXADO, INCOMPLETO, LISTO
     from app.gui.airvault_window import color_indexando
 
     activo = parte(LISTO)
-    terminado = parte(INDEXADO, carpeta="terminado")
+    terminado = parte(COMPLETADO, carpeta="terminado")
     ventana._estados = [activo, terminado]
     ventana._al_batch_indexando(activo.trabajo, True)
     for columna in range(ventana.lotes.columnCount()):
@@ -889,13 +914,14 @@ def test_azul_solo_durante_indexacion_y_verde_al_terminar(ventana):
         assert ventana.lotes.item(1, columna).foreground().color() == QColor(color_indexado())
     ventana._al_batch_indexando(activo.trabajo, False)
     assert ventana.lotes.item(0, 0).foreground().style() is Qt.BrushStyle.NoBrush
-    ventana._estados = [parte(INDEXADO)]
-    ventana._pintar_lotes()
-    assert ventana.lotes.item(0, 0).foreground().color() == QColor(color_indexado())
+    for estado in (INDEXADO, INCOMPLETO):
+        ventana._estados = [parte(estado)]
+        ventana._pintar_lotes()
+        assert ventana.lotes.item(0, 0).foreground().color() == QColor(color_indexando())
 
 
 def test_cambiar_tema_repinta_estados_sin_perder_las_filas(ventana, app, monkeypatch):
-    from app.airvault.flujo import INDEXADO, LISTO, SIN_SUBIR
+    from app.airvault.flujo import COMPLETADO, LISTO, SIN_SUBIR
     from app.gui.airvault_window import color_indexando
     from app.gui.theme import aplicar_tema, install_application_theme
     from app.gui.tokens import TEMA_CLARO, TEMA_OSCURO, paleta
@@ -904,7 +930,7 @@ def test_cambiar_tema_repinta_estados_sin_perder_las_filas(ventana, app, monkeyp
     monkeypatch.setattr("app.gui.theme.guardar_tema", lambda nombre: True)
     install_application_theme(app)
     activo = parte(LISTO, "Activo", carpeta="activo")
-    ventana._estados = [activo, parte(INDEXADO), parte(SIN_SUBIR, carpeta="falta")]
+    ventana._estados = [activo, parte(COMPLETADO), parte(SIN_SUBIR, carpeta="falta")]
     ventana._al_batch_indexando(activo.trabajo, True)
     ventana.lotes.selectRow(1)
     celdas = [ventana.lotes.item(fila, 0) for fila in range(3)]
@@ -1055,11 +1081,11 @@ def test_un_indexado_sin_confirmar_se_vuelve_a_comprobar_solo(ventana):
     ventana._al_comprobar({
         "estados": [parte(INCOMPLETO)], "planes": {}, "partes": [],
     })
-    assert not ventana._vigilante.isActive()
+    assert ventana._vigilante.isActive()
 
-    # Volver a quedar incompleto no devuelve las comprobaciones gastadas.
+    # Sigue consultando aunque se agoten los reintentos de escritura.
     ventana._al_indexar(dict(incompleto))
-    assert not ventana._vigilante.isActive()
+    assert ventana._vigilante.isActive()
     ventana.close()
 
 

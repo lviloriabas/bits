@@ -448,5 +448,12 @@ class TestRevisionEnElPipeline(unittest.TestCase):
         render.assert_not_called()
 
 
+def test_licencia_tenue_no_se_declara_ausente_por_restar_el_fondo():
+    from app.vision.signature import review_with_background
+    assert review_with_background(0.0, (0.01, 0.05), allow_absent=False) is None
+    assert review_with_background(0.06, (0.01, 0.05), allow_absent=False)[0] == "true"
+    assert review_with_background(0.0, (0.01, 0.05))[0] == "false"
+
+
 if __name__ == "__main__":
     unittest.main()

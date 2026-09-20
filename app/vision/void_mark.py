@@ -3,17 +3,11 @@
 La geometria solo propone regiones. Para anular requisitos de firmas se
 exigen dos lecturas de cuatro letras compatibles en la misma zona.
 
-Es la etapa mas cara de la ejecucion: cada hoja con una posible discrepancia
-manda decenas de recortes a un reconocedor mediano. Medido en este equipo
-(12 nucleos): 0,28 s por recorte, seis recortes por zona y hasta seis zonas,
-o sea unos 10 s por hoja, mas unos 7 s de carga del modelo la primera
-vez en cada proceso. Por eso el modelo se carga una sola vez por proceso y,
-cuando el pool de OCR esta libre, las hojas se reparten entre sus procesos:
-medido, 4,6 s por hoja repartiendo frente a 10,6 s haciendolas de una en una.
-
-Pedirle menos hilos al reconocedor no sirve de nada: mide igual con uno que
-con doce (usa unos seis nucleos pase lo que pase), asi que el reparto solo
-puede ser por hojas. Nada de esto cambia que marca se confirma.
+El reconocedor usa oneDNN explicito y un hilo de CPU. Configurar solamente
+cpu_threads en PaddleOCR no limitaba el motor de inferencia. En 12 hojas
+reales esta etapa pasa de 124 a 32 segundos, conservando las 12 decisiones.
+La carga del modelo se amortiza por proceso; se mantienen los mismos
+recortes, modelo y umbrales. Si oneDNN falla, se repite con el motor anterior.
 """
 
 from concurrent.futures import FIRST_COMPLETED, wait
@@ -38,8 +32,8 @@ _RECORTES_POR_ZONA = 6
 # en la muestra etiquetada las marcas que el reconocedor alcanza a leer salen
 # siempre entre las cinco primeras, asi que las de mas solo gastaban tiempo.
 _ZONAS_POR_HOJA = 6
-# Hilos que se le piden al reconocedor. Los ignora, pero es lo declarado.
-_HILOS_RECONOCEDOR = 4
+# Hilo aplicado al motor de inferencia del reconocedor con engine_config.
+_HILOS_RECONOCEDOR = 1
 # Lo que suma cada proceso del pool al cargar el modelo de VOID. Repartir la
 # etapa solo se hace si cabe en la memoria libre para todos a la vez.
 MEMORIA_MODELO_MB = 450
@@ -130,7 +124,8 @@ def motor_void():
     with _MOTOR_CERROJO:
         if _MOTOR is None:
             _MOTOR = PaddleOcrEngine(
-                cpu_threads=_HILOS_RECONOCEDOR, rec_model=MODELO_VOID
+                cpu_threads=_HILOS_RECONOCEDOR, rec_model=MODELO_VOID,
+                rec_mkldnn=True,
             )
     return _MOTOR
 

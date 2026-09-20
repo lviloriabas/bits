@@ -188,6 +188,7 @@ class _ManifiestoFalso:
         self.nombre_batch = nombre
         self.registros = registros
         self.batch_id = ""
+        self.posible_duplicado = False
 
 
 class _TrabajoFalso:

@@ -23,6 +23,32 @@ from app.validation.depuracion import depurar_claves
 RAIZ = Path(__file__).resolve().parents[1]
 
 
+def test_previews_cargan_las_paginas_y_no_cambian_la_seleccion(app, tmp_path):
+    import pymupdf
+    ruta = tmp_path / "original.pdf"
+    with pymupdf.open() as pdf:
+        for texto in ("Copia uno", "Copia dos", ""):
+            page = pdf.new_page()
+            page.insert_text((40, 40), texto)
+        pdf.save(ruta)
+    report = ValidationReport(pdf_path=str(ruta), template_name="fixture", pages=[
+        pagina(1, "2147300"), pagina(2, "2147300"), pagina(3, blank=True),
+    ])
+    dialogo = DepurarPaginasDialog([report])
+    try:
+        item = dialogo.arbol_duplicados.topLevelItem(0).child(0)
+        dialogo.arbol_duplicados.setCurrentItem(item)
+        assert not dialogo.previa_elegida.pixmap().isNull()
+        assert not dialogo.previa_comparada.pixmap().isNull()
+        assert not dialogo.boton_eliminar.isEnabled()
+        blanco = dialogo.arbol_blancas.topLevelItem(0)
+        dialogo.arbol_blancas.setCurrentItem(blanco)
+        assert not dialogo.previa_elegida.pixmap().isNull()
+        assert dialogo.previa_comparada.text() == "Sin página para comparar"
+    finally:
+        dialogo.close()
+
+
 def pagina(numero: int, log: str | None = None, blank: bool = False) -> PageResult:
     campos = []
     if log is not None:

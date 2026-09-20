@@ -116,6 +116,8 @@ def evaluate_book(
         by_field[sample.field_id].append(sample)
 
     for field_id, field_samples in sorted(by_field.items()):
+        from tools.signature_labeling.evaluate import _template_fields
+        field = _template_fields()[field_id]
         field_samples = sorted(field_samples, key=lambda item: item.page)
         classic = {
             sample.id: verdict_for_sample(dataset, sample)
@@ -154,8 +156,11 @@ def evaluate_book(
             verdict = classic[sample.id]
             classic_tally.add(verdict, label)
             reviewed = verdict
-            if verdict == UNCLEAR and band is not None:
-                opinion = review_with_background(peaks[sample.id], band)
+            if verdict == UNCLEAR and band is not None and field.book_background:
+                opinion = review_with_background(
+                    peaks[sample.id], band,
+                    allow_absent=field_id not in ("captain_license", "technician_license"),
+                )
                 if opinion is not None:
                     reviewed = opinion[0]
                     mark = ("resuelta" if reviewed == EXPECTED_VALUE[label]

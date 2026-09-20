@@ -1246,9 +1246,12 @@ class MainWindow(QMainWindow):
 
         template_menu = QMenu(group)
         template_menu.setToolTipsVisible(True)
-        self.btn_editor = template_menu.addAction("Editor de plantillas…")
+        self.btn_editor = template_menu.addAction("Editor de plantilla…")
         self.btn_editor.setToolTip("Abrir el editor visual de plantillas")
         self.btn_editor.triggered.connect(self._open_template_editor)
+
+        self.discrepancias_menu = template_menu.addMenu("Discrepancias a detectar")
+        self.discrepancias_menu.aboutToShow.connect(self._llenar_menu_discrepancias)
 
         self.btn_csv_viewer = template_menu.addAction("Visor de CSV…")
         self.btn_csv_viewer.setToolTip(
@@ -2456,6 +2459,9 @@ class MainWindow(QMainWindow):
         )
         self._apply_csv_table_view()
         self._apply_preview_overlay()
+        viewer = self._csv_viewer
+        if viewer is not None:
+            viewer.refresh_important_columns()
 
     def _template_key(self) -> str | None:
         """Nombre de la plantilla bajo el que se recuerda la selección."""
@@ -3015,6 +3021,53 @@ class MainWindow(QMainWindow):
         )
         selected = self._current_important_columns(columns)
         return [column for column in columns if column in selected]
+
+    def _llenar_menu_discrepancias(self) -> None:
+        """La seleccion queda en la plantilla, portable y editable como texto."""
+        menu = self.discrepancias_menu
+        menu.clear()
+        template = self._load_template()
+        if template is None:
+            return
+        nombres = {
+            "pilot_signature": "Firma del bloque superior",
+            "captain_signature": "Firma del capitán (vuelo)",
+            "captain_license": "Licencia del capitán (vuelo)",
+            "technician_signature": "Firma del técnico (mantenimiento)",
+            "technician_license": "Licencia del técnico (mantenimiento)",
+        }
+        activas = set(template.discrepancy_fields if template.discrepancy_fields
+                      is not None else nombres)
+        for campo, nombre in nombres.items():
+            if template.field(campo) is None:
+                continue
+            accion = menu.addAction(nombre)
+            accion.setCheckable(True)
+            accion.setChecked(campo in activas)
+            accion.setEnabled(not (self._worker and self._worker.isRunning()))
+            accion.toggled.connect(
+                lambda marcada, c=campo: self._cambiar_discrepancia(c, marcada)
+            )
+
+    def _cambiar_discrepancia(self, campo: str, marcada: bool) -> None:
+        template = self._load_template()
+        if template is None or template.source_path is None:
+            return
+        from app.validation.discrepancias import _NOMBRE_CORTO
+        activas = set(template.discrepancy_fields if template.discrepancy_fields
+                      is not None else _NOMBRE_CORTO)
+        if marcada:
+            activas.add(campo)
+        else:
+            activas.discard(campo)
+        actualizada = template.model_copy(update={"discrepancy_fields": sorted(activas)})
+        try:
+            TemplateManager().save(actualizada, template.source_path)
+        except OSError as exc:
+            QMessageBox.warning(self, "Discrepancias a detectar", str(exc))
+            return
+        self._template_cache = None
+        self.statusBar().showMessage("Discrepancias guardadas para el próximo procesamiento")
 
     def _load_template(self) -> Template | None:
         selected = self.template_combo.currentData()

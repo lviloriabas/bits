@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+from threading import Event
 from typing import Optional
 
 from PySide6.QtCore import QDate, Qt, QThread, QTimer, Signal
@@ -11,6 +12,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
+    QCheckBox,
     QDateEdit,
     QDialog,
     QGridLayout,
@@ -217,6 +219,8 @@ class WebReportsWorker(_TrabajoEnEdge):
 class CorreccionWorker(_TrabajoEnEdge):
     """Aplica el plan en AirVault fuera del hilo de la interfaz."""
 
+    previa = Signal(object, object, object)
+
     def __init__(
         self,
         config: AirVaultConfig,
@@ -225,12 +229,35 @@ class CorreccionWorker(_TrabajoEnEdge):
     ) -> None:
         super().__init__(config, parent)
         self._plan = list(plan)
+        self.mostrar_previas = False
+        self.cache_previa = {}
+        self._respuesta_previa = Event()
+        self._seleccion_previa = None
+
+    def responder_previa(self, seleccion):
+        self._seleccion_previa = seleccion
+        self._respuesta_previa.set()
+
+    def _revisar(self, correccion, vistas, elegidas):
+        self._respuesta_previa.clear()
+        self._seleccion_previa = None
+        self.previa.emit(correccion, vistas, elegidas)
+        while not self._respuesta_previa.wait(.2):
+            if self._cancelado():
+                raise ConsultaCancelada()
+        if self._cancelado():
+            raise ConsultaCancelada()
+        return self._seleccion_previa
 
     def _trabajar(self):
         # Sin ensayo porque a este hilo solo se llega después de que alguien
         # haya leído el plan y lo haya autorizado. Cada caso se sigue
         # comprobando contra la pantalla antes de escribir nada.
-        return CorrectorLogPageAudit(self._config).aplicar(
+        corrector = CorrectorLogPageAudit(self._config)
+        if self.mostrar_previas:
+            corrector.revisar = self._revisar
+            corrector.cache_previa = self.cache_previa
+        return corrector.aplicar(
             self._plan,
             avisar=self.avance.emit,
             cancelar=self._cancelado,
@@ -479,6 +506,11 @@ class WebReportsWindow(QDialog):
         )
         cuerpo.addWidget(self.resumen)
 
+        self.mostrar_previas = QCheckBox("Revisar imágenes antes de eliminar copias")
+        self.mostrar_previas.setChecked(True)
+        self.mostrar_previas.setToolTip("Carga las imágenes para comparar y ajustar qué copias se eliminan en cada bitácora.")
+        self._cache_previa = {}
+        cuerpo.addWidget(self.mostrar_previas)
         cuerpo.addLayout(self._fila_botones())
         # Después de los botones: lo que hace al cambiar la selección es
         # encenderlos o apagarlos, y hasta aquí no existen.
@@ -604,6 +636,9 @@ class WebReportsWindow(QDialog):
             return
         self._config = AirVaultConfig.load(self._raiz / AIRVAULT_FILENAME)
         worker = CorreccionWorker(self._config, plan, self)
+        worker.mostrar_previas = self.mostrar_previas.isChecked()
+        worker.cache_previa = self._cache_previa
+        worker.previa.connect(self._revisar_copias)
         worker.avance.connect(self._al_avanzar)
         worker.resultado.connect(self._al_corregir)
         worker.fallo.connect(self._al_fallar_correccion)
@@ -621,6 +656,16 @@ class WebReportsWindow(QDialog):
             TAREA_CORRECCION, len(self._aplicables(plan))
         )
         worker.start()
+
+    def _revisar_copias(self, correccion, vistas, elegidas):
+        from app.gui.revision_copias_dialog import RevisionCopiasDialog
+        worker = self.sender()
+        if worker is not self._worker or worker._cancelado():
+            worker.responder_previa(None)
+            return
+        dialogo = RevisionCopiasDialog(correccion, vistas, elegidas, self)
+        aceptado = dialogo.exec() == QDialog.DialogCode.Accepted
+        worker.responder_previa(dialogo.seleccionadas() if aceptado else None)
 
     def _autorizado(self, plan: list[Correccion]) -> bool:
         """Lo que va a pasar, por escrito, antes de tocar nada.

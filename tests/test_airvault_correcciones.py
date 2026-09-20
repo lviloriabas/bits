@@ -196,7 +196,18 @@ def _fila_de_rejilla(
         "log": log,
         "matricula": matricula,
         "cuando": cuando,
+        "imagenes": "1",
+        "tipo": "LOG PAGE",
     }
+
+
+@pytest.fixture(autouse=True)
+def auditoria_temporal(monkeypatch, tmp_path):
+    inicializar = CorrectorLogPageAudit.__init__
+    def iniciar(self, *args, **kwargs):
+        inicializar(self, *args, **kwargs)
+        self.auditoria = tmp_path / "auditoria.jsonl"
+    monkeypatch.setattr(CorrectorLogPageAudit, "__init__", iniciar)
 
 
 _REJILLA = [
@@ -268,6 +279,54 @@ def test_una_sola_copia_no_deja_nada_por_borrar() -> None:
     assert sobran == []
 
 
+@pytest.mark.parametrize("campo,valor", [("imagenes", "2"), ("imagenes", None), ("imagenes", "1 of 2"), ("tipo", "FLEET"), ("tipo", "")])
+def test_documentos_de_varias_imagenes_o_de_otra_area_no_se_eliminan(campo, valor):
+    filas = [dict(f) for f in _REJILLA]
+    filas[0][campo] = valor
+    correccion = planificar(_excepciones(("HP-9913CMP", "DUPLICATED 2008159(2x)")))[0]
+    pagina = _PaginaFalsa(filas)
+    corrector = CorrectorLogPageAudit(AirVaultConfig(), ResolutorFlota())
+    resultado = corrector._borrar(pagina, correccion, copias_en(filas, "2008159"), False)
+    assert not resultado.hecho
+    assert "otra área" in resultado.detalle
+    assert not any("onDeletePage" in orden for orden in pagina.ordenes)
+
+
+def test_si_se_agrega_una_imagen_despues_del_preview_no_se_borra():
+    filas = [dict(f) for f in _REJILLA]
+    filas[0]["imagenes"] = "2"
+    pagina = _PaginaFalsa(filas)
+    corrector = CorrectorLogPageAudit(AirVaultConfig(), ResolutorFlota())
+    correccion = planificar(_excepciones(("HP-9913CMP", "DUPLICATED 2008159(2x)")))[0]
+    with pytest.raises(ControlNoEncontrado, match="cambió"):
+        corrector._borrar(pagina, correccion, copias_en(_REJILLA, "2008159"), False)
+    assert not any("onDeletePage" in orden for orden in pagina.ordenes)
+
+
+def test_preview_permite_conservar_la_copia_nueva(monkeypatch, tmp_path):
+    pagina = _PaginaFalsa(_REJILLA, [_REJILLA[0]])
+    corrector = CorrectorLogPageAudit(AirVaultConfig(), ResolutorFlota())
+    corrector.auditoria = tmp_path / "auditoria.jsonl"
+    monkeypatch.setattr(corrector, "_imagen_previa", lambda *_: b"png")
+    corrector.revisar = lambda c, vistas, elegidas: {vistas[1][0].clave}
+    correccion = planificar(_excepciones(("HP-9913CMP", "DUPLICATED 2008159(2x)")))[0]
+    resultado = corrector._borrar(pagina, correccion, copias_en(_REJILLA, "2008159"), False)
+    assert resultado.hecho
+    pedidas = [orden for orden in pagina.ordenes if "onDeletePage" in orden]
+    assert len(pedidas) == 1 and ')("1_3209_231_1_1_0"' in pedidas[0]
+    assert 'borrado_verificado' in corrector.auditoria.read_text(encoding="utf-8")
+
+
+def test_omitir_preview_no_abre_borrado(monkeypatch):
+    pagina = _PaginaFalsa(_REJILLA)
+    corrector = CorrectorLogPageAudit(AirVaultConfig(), ResolutorFlota())
+    monkeypatch.setattr(corrector, "_imagen_previa", lambda *_: b"png")
+    corrector.revisar = lambda *args: None
+    correccion = planificar(_excepciones(("HP-9913CMP", "DUPLICATED 2008159(2x)")))[0]
+    assert not corrector._borrar(pagina, correccion, copias_en(_REJILLA, "2008159"), False).hecho
+    assert not any("onDeletePage" in orden for orden in pagina.ordenes)
+
+
 def test_cada_copia_se_queda_con_la_clave_de_su_documento() -> None:
     """Borrar por posición cae en otro documento en cuanto falta una fila.
 
@@ -296,7 +355,7 @@ def test_el_borrado_llega_hasta_airvault_y_se_comprueba_despues() -> None:
         _excepciones(("HP-9913CMP", "DUPLICATED 2008159(2x)"))
     )[0]
     queda = [_REJILLA[1], _REJILLA[2]]
-    pagina = _PaginaFalsa(_REJILLA, queda)
+    pagina = _PaginaFalsa(_REJILLA, _REJILLA, queda)
     corrector = CorrectorLogPageAudit(AirVaultConfig(), ResolutorFlota())
 
     resultado = corrector._borrar(

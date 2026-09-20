@@ -2201,6 +2201,8 @@ class Pipeline:
         ]
         if not pending:
             return pages
+        campos_pendientes = {result.field_id for _, result in pending}
+        fields = [field for field in fields if field.id in campos_pendientes]
         try:
             return self._review_signatures_impl(
                 pdf_path, pages, pending, fields, reference, anchors, own,
@@ -2335,7 +2337,14 @@ class Pipeline:
                 if crop is None:
                     continue
                 peak = background_peak(crop, background)
-                opinion = review_with_background(peak, band)
+                # Restar un fondo aprendido puede quitar numeros tenues.
+                # Una licencia que ya tenia tinta incierta no se acusa como
+                # ausente solamente porque desaparezca contra ese fondo.
+                opinion = review_with_background(
+                    peak, band, allow_absent=field.id not in (
+                        "captain_license", "technician_license",
+                    ),
+                )
                 if opinion is None:
                     logger.info(
                         f"[Pipeline] Firma incierta en página "

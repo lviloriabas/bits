@@ -2846,6 +2846,7 @@ class CsvViewerWindow(QMainWindow):
         self.search_next.setEnabled(multiple)
 
     def _open_field_selector(self) -> None:
+        self.refresh_important_columns()
         dialog = ImportantFieldsDialog(
             self._columns, self._selected_important_columns, self
         )
@@ -2857,6 +2858,15 @@ class CsvViewerWindow(QMainWindow):
             self._template_name, columns, self._columns
         )
         self._apply_column_mode()
+
+    def refresh_important_columns(self) -> None:
+        """Recoge cambios hechos en la ventana principal sin reabrir el CSV."""
+        if not self._columns:
+            return
+        stored = self._important_fields_store.load(self._template_name)
+        if stored is not None:
+            self._selected_important_columns = set(stored)
+            self._apply_column_mode()
 
     def _apply_pdf_overlay(self, _checked: bool | None = None) -> None:
         """Sincroniza los recuadros con el modo y la seleccion de columnas."""

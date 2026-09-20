@@ -363,7 +363,7 @@ def background_peak(region: np.ndarray, background: np.ndarray) -> float:
 
 
 def review_with_background(
-    peak: float, band: tuple
+    peak: float, band: tuple, *, allow_absent: bool = True,
 ) -> Optional[tuple[str, float, str]]:
     """Segunda opinión sobre una firma incierta, con la evidencia del libro.
 
@@ -383,7 +383,7 @@ def review_with_background(
                 f"Firma detectada al comparar con el resto de la bitácora: "
                 f"densidad={peak:.4f}, tanta como en sus páginas firmadas "
                 f"(desde {signed_floor:.4f})")
-    if peak <= empty_ceiling:
+    if allow_absent and peak <= empty_ceiling:
         distance = (empty_ceiling - peak) / max(empty_ceiling, 1e-6)
         return ("false", min(0.90, 0.72 + 0.18 * min(1.0, distance)),
                 f"Firma ausente al comparar con el resto de la bitácora: "

@@ -35,6 +35,16 @@ TEMPLATE = TemplateManager().load(
     ROOT / "template/aircraft_log.json"
 )
 
+
+def test_seleccion_de_discrepancias_filtra_solo_lo_solicitado():
+    from app.validation.discrepancias import _clasificar_pagina
+    page = _vuelo_ok(captain_signature=("false", AUSENTE), captain_license=("false", AUSENTE))
+    activa = TEMPLATE.model_copy(update={"discrepancy_fields": ["captain_license"]})
+    resultado = _clasificar_pagina(page, activa)
+    assert resultado is not None
+    assert [c.field_id for c in resultado[2]] == ["captain_license"]
+    assert _clasificar_pagina(page, TEMPLATE.model_copy(update={"discrepancy_fields": []})) is None
+
 # Umbrales por defecto de la plantilla
 PRESENTE = 0.9  # >= sig_present_conf (0.45)
 AUSENTE = 0.85  # >= sig_absent_conf (0.55)

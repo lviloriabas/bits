@@ -80,11 +80,13 @@ class PaddleOcrEngine:
 
     def __init__(self, lang: str = "en", cpu_threads: Optional[int] = None,
                  det_model: Optional[str] = None,
-                 rec_model: Optional[str] = None, **kwargs) -> None:
+                 rec_model: Optional[str] = None, rec_mkldnn: bool = False,
+                 **kwargs) -> None:
         self.lang = lang
         self._cpu_threads = cpu_threads
         self._det_model = det_model or self._auto_det_model()
         self._rec_model = rec_model or self._auto_rec_model()
+        self._rec_mkldnn = rec_mkldnn
         self._extra_kwargs = kwargs
         self._engine = None
         self._recognizer = None
@@ -184,11 +186,20 @@ class PaddleOcrEngine:
         kwargs = {"batch_size": self._REC_BATCH_SIZE, "device": "cpu"}
         if self._cpu_threads is not None:
             kwargs["cpu_threads"] = self._cpu_threads
+        if self._rec_mkldnn:
+            # Solo el reconocedor validado para VOID. El detector mantiene
+            # su configuracion porque su ruta oneDNN falla en Windows.
+            kwargs["engine_config"] = {
+                "run_mode": "mkldnn", "cpu_threads": self._cpu_threads or 1,
+            }
         try:
             self._recognizer = create_predictor(
                 model_name=self._rec_model, **kwargs
             )
         except Exception:  # noqa: BLE001 - se degrada al detector completo
+            if self._rec_mkldnn:
+                self._rec_mkldnn = False
+                return self._ensure_recognizer()
             logger.warning(
                 "No se pudo cargar el reconocedor sin detector; "
                 "los campos de una sola línea usan el pipeline completo",
@@ -219,6 +230,12 @@ class PaddleOcrEngine:
         try:
             raw = list(recognizer.predict(prepared))
         except Exception:  # noqa: BLE001 - fallback robusto
+            if self._rec_mkldnn:
+                # Una CPU o version incompatible vuelve al mismo modelo sin
+                # aceleracion. No se omite la lectura ni se cambia de modelo.
+                self._rec_mkldnn = False
+                self._recognizer = None
+                return self.recognize_lines(images)
             logger.debug(
                 "Reconocimiento sin detector falló; se usa el pipeline "
                 "completo", exc_info=True,

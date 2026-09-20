@@ -41,6 +41,7 @@ caso que no se entiende no se toque.
 
 from __future__ import annotations
 
+import base64
 import json
 import time
 from contextlib import contextmanager
@@ -380,7 +381,9 @@ _LEER_REJILLA = r"""(function(){
       documento: String(datos.DocID || ''),
       log: String(datos.LogNo || '').trim(),
       matricula: String(datos.ACREG || '').trim(),
-      cuando: String(datos.LastFileDate || '').trim()
+      cuando: String(datos.LastFileDate || '').trim(),
+      imagenes: datos.ImageCount ?? null,
+      tipo: String(datos.DocType || '').trim()
     });
   });
   return salida;
@@ -402,6 +405,12 @@ _ABRIR_CUADRO = r"""(function(clave, operacion){
     if (String(datos.DocKey || '') === clave) fila = otra;
   });
   if (!fila) return 'ese documento ya no está en la búsqueda';
+  if (operacion === 'onDeletePage') {
+    var comprobada = jQuery.getResultRowData(fila.id) || {};
+    if (String(comprobada.ImageCount) !== '1' || String(comprobada.DocType || '').trim().toUpperCase() !== 'LOG PAGE') {
+      return 'documento protegido: no es una bitácora de una sola imagen';
+    }
+  }
   var accion = window[operacion];
   if (typeof accion !== 'function') {
     return 'este AirVault no ofrece ' + operacion;
@@ -569,6 +578,14 @@ class Copia:
     fila: str
     cuando: datetime | None
     matricula: str
+    imagenes: int | None = None
+    tipo: str = ""
+
+
+def _cantidad_imagenes(valor: object) -> int | None:
+    """Un recuento ausente o ambiguo nunca autoriza eliminar un documento."""
+    texto = str(valor).strip()
+    return int(texto) if texto.isascii() and texto.isdigit() else None
 
 
 def copias_en(
@@ -589,6 +606,8 @@ def copias_en(
                 fila=str(fila.get("fila", "") or ""),
                 cuando=_fecha_de(str(fila.get("cuando", "") or "")),
                 matricula=str(fila.get("matricula", "") or "").strip(),
+                imagenes=_cantidad_imagenes(fila.get("imagenes")),
+                tipo=str(fila.get("tipo", "") or "").strip(),
             )
         )
     return copias
@@ -620,6 +639,9 @@ class CorrectorLogPageAudit:
         flota: ResolutorFlota | None = None,
     ) -> None:
         self.config = config
+        self.revisar = None
+        self.cache_previa: dict[tuple, bytes] = {}
+        self.auditoria = app_root() / "output" / "airvault" / "correcciones_auditoria.jsonl"
         # La misma tabla de matricula a flota con la que se indexa. Mover una
         # pagina de un avion a otro puede cambiarle la flota (las HP-99 son
         # MAX y las HP-15 NG), y dejar la de antes seria cambiar un dato malo
@@ -788,6 +810,14 @@ class CorrectorLogPageAudit:
                 correccion,
                 detalle="No se pudo identificar la copia más antigua.",
             )
+        if any(copia.imagenes != 1 or copia.tipo.upper() != "LOG PAGE" for copia in copias):
+            return Resultado(
+                correccion,
+                detalle=(
+                    "No se elimina: hay varias imágenes o no se pudo confirmar "
+                    "que cada documento tenga una sola. Puede pertenecer a otra área."
+                ),
+            )
         if ensayo:
             se_van = (
                 "se borraría una copia"
@@ -806,7 +836,27 @@ class CorrectorLogPageAudit:
                 correccion,
                 detalle="Web Search no dio la clave de todas las copias.",
             )
+        if len({c.clave for c in copias}) != len(copias):
+            return Resultado(correccion, detalle="La búsqueda repite una misma clave; no se elimina.")
+        if self.revisar is not None:
+            vistas = [(c, self._imagen_previa(pagina, c)) for c in copias]
+            elegidas = self.revisar(correccion, vistas, {c.clave for c in sobran})
+            if not elegidas:
+                return Resultado(correccion, detalle="Omitida en la revisión de imágenes.")
+            if not set(elegidas) < {c.clave for c in copias}:
+                return Resultado(correccion, detalle="Debe conservar al menos una copia.")
+            sobran = [c for c in copias if c.clave in elegidas]
+            se_queda = next(c for c in copias if c.clave not in elegidas)
         for copia in sobran:
+            actuales = self._releer(pagina, correccion.log_number)
+            conocidas = {c.clave: c for c in copias}
+            if any(c.clave not in conocidas or not self._misma_copia(c, conocidas[c.clave]) for c in actuales):
+                raise ControlNoEncontrado("La búsqueda cambió desde la revisión; se detiene el borrado.")
+            if not any(c.clave == se_queda.clave for c in actuales):
+                raise ControlNoEncontrado("La copia que debía conservarse ya no aparece.")
+            if not any(c.clave == copia.clave for c in actuales):
+                raise ControlNoEncontrado("La copia elegida ya no aparece; vuelva a consultar.")
+            self._registrar("borrado_solicitado", correccion, copia)
             self._borrar_copia(pagina, copia)
         # Se vuelve a mirar la pantalla en vez de dar por hecho que la orden
         # surtio efecto. Un control que se pulsa pero no borra (permisos,
@@ -815,13 +865,19 @@ class CorrectorLogPageAudit:
         quedan = self._releer(pagina, correccion.log_number)
         una = len(sobran) == 1
         cuantas = "1 copia" if una else f"{len(sobran)} copias"
-        if len(quedan) != 1:
+        if len(quedan) != len(copias) - len(sobran) or not any(c.clave == se_queda.clave for c in quedan):
             return Resultado(
                 correccion,
                 detalle=(
                     f"Se intentó borrar {cuantas}; todavía aparecen "
                     f"{len(quedan)}."
                 ),
+            )
+        self._registrar("borrado_verificado", correccion, se_queda)
+        if len(quedan) > 1:
+            return Resultado(
+                correccion,
+                detalle=f"Borradas {cuantas}; quedan {len(quedan)} copias para revisar.",
             )
         return Resultado(
             correccion,
@@ -831,6 +887,59 @@ class CorrectorLogPageAudit:
                 f"del {se_queda.cuando:%d/%m/%Y}."
             ),
         )
+
+    @staticmethod
+    def _misma_copia(actual: Copia, anterior: Copia) -> bool:
+        return (actual.clave, actual.documento, actual.cuando, actual.matricula, actual.imagenes, actual.tipo) == (
+            anterior.clave, anterior.documento, anterior.cuando, anterior.matricula, anterior.imagenes, anterior.tipo
+        )
+
+    def _registrar(self, evento: str, correccion: Correccion, copia: Copia) -> None:
+        """Registra identidad y evidencia sin cookies ni credenciales."""
+        self.auditoria.parent.mkdir(parents=True, exist_ok=True)
+        registro = {"fecha": datetime.now().astimezone().isoformat(), "evento": evento,
+                    "bitacora": correccion.log_number, "clave": copia.clave,
+                    "documento": copia.documento, "imagenes": copia.imagenes,
+                    "tipo": copia.tipo, "matricula": copia.matricula,
+                    "fecha_documento": copia.cuando.isoformat() if copia.cuando else None}
+        with self.auditoria.open("a", encoding="utf-8") as salida:
+            salida.write(json.dumps(registro, ensure_ascii=False) + "\n")
+
+    def _imagen_previa(self, pagina: _Pagina, copia: Copia) -> bytes:
+        """Miniatura de la misma imagen PNG que abre el visor de AirVault."""
+        clave = (copia.clave, copia.cuando, copia.imagenes)
+        if clave in self.cache_previa:
+            return self.cache_previa[clave]
+        codificada = base64.b64encode(copia.clave.encode("utf-8")).decode("ascii")
+        url = ("/zfp/Document/GetHiglightedPage/?docKey=" + codificada
+               + "&searchId=0&pageNum=1&encodedHighlightSearchInputs=&encodedFullTextKeyWord="
+               + "&preferredFileFormat=png&realizeAnnotations=true")
+        dato = pagina.evaluar("""(url => new Promise(resolve => {
+          const img = new Image();
+          const timer = setTimeout(() => resolve(''), 45000);
+          img.onerror = () => { clearTimeout(timer); resolve(''); };
+          img.onload = () => {
+            clearTimeout(timer);
+            try {
+              const scale = Math.min(1, 1000 / Math.max(img.naturalWidth, img.naturalHeight));
+              const canvas = document.createElement('canvas');
+              canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+              canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+              canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+              resolve(canvas.toDataURL('image/png').split(',')[1]);
+            } catch (_) { resolve(''); }
+          };
+          img.src = url;
+        }))(%s)""" % json.dumps(url))
+        if not dato or not isinstance(dato, str):
+            raise ControlNoEncontrado("No se pudo cargar la imagen; no se elimina esta bitácora.")
+        imagen = base64.b64decode(dato, validate=True)
+        if not imagen.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise ControlNoEncontrado("La vista previa no es una imagen válida.")
+        if len(self.cache_previa) >= 64:
+            self.cache_previa.pop(next(iter(self.cache_previa)))
+        self.cache_previa[clave] = imagen
+        return imagen
 
     def _reindexar(
         self,
@@ -991,7 +1100,9 @@ class CorrectorLogPageAudit:
 
     @classmethod
     def _borrar_copia(cls, pagina: _Pagina, copia: Copia) -> None:
-        """Borra ese documento entero: todas sus páginas."""
+        """Elimina únicamente documentos de bitácora con una sola imagen."""
+        if copia.imagenes != 1 or copia.tipo.upper() != "LOG PAGE":
+            raise ControlNoEncontrado("Documento protegido: debe ser una bitácora de una sola imagen.")
         cls._abrir_cuadro(
             pagina,
             copia,

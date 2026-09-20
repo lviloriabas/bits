@@ -22,7 +22,7 @@ Para reconstruir ese entorno desde el código, ejecute `setup.cmd` (o `setup.ps1
 | `run_gui.py`      | Ventana principal. Es lo que abre `BITS.exe`. |
 | `run_cli.py`      | Procesado por consola, con rangos de páginas. |
 | `run_airvault.py` | Carga e indexado en AirVault sin la interfaz. |
-| `run_editor.py`   | Editor de plantillas.                         |
+| `run_editor.py`   | Editor de plantilla.                          |
 
 Pruebas: `python -m pytest`.
 

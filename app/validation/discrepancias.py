@@ -239,7 +239,7 @@ def _matricula(page: PageResult) -> Optional[str]:
     return value if _MATRICULA_RE.fullmatch(value) else None
 
 
-def _clasificar_pagina(page: PageResult, template: Template
+def _clasificar_sin_filtro(page: PageResult, template: Template
                        ) -> Optional[Tuple[TipoEntrada, Categoria,
                                            List[CampoAfectado], bool]]:
     """Clasifica una página y devuelve sus campos de firma afectados.
@@ -375,6 +375,20 @@ def _clasificar_pagina(page: PageResult, template: Template
         else Categoria.UNCERTAIN
     )
     return tipo, categoria, afectados, por_correccion
+
+
+def _clasificar_pagina(page: PageResult, template: Template):
+    """Aplica la seleccion sin perder la evidencia para distinguir el tipo."""
+    resultado = _clasificar_sin_filtro(page, template)
+    if resultado is None or template.discrepancy_fields is None:
+        return resultado
+    tipo, categoria, campos, por_correccion = resultado
+    campos = [c for c in campos if c.field_id in template.discrepancy_fields]
+    if not campos:
+        return None
+    categoria = (Categoria.MISSING if any(c.categoria is Categoria.MISSING
+                                         for c in campos) else Categoria.UNCERTAIN)
+    return tipo, categoria, campos, por_correccion
 
 
 def clasificar_lote(reports: List[ValidationReport], template: Template

@@ -127,6 +127,8 @@ class AirVaultConfig:
     # la persona marca o desmarca «Completar batch», se conserva exactamente
     # ese último estado en la carpeta portable.
     completar_batch: bool | None = None
+    # La comprobacion sigue avisando; solo esta preferencia decide si bloquea.
+    detener_por_duplicados: bool = False
     # Como se representa la fecha en el CSV: «month_end» o «specific_day».
     # Tampoco tiene valor impuesto por el programa. Es una decision de quien
     # entrega, no del archivo que se abre, asi que la instalacion conserva

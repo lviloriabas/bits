@@ -104,6 +104,7 @@ def test_el_modelo_se_carga_una_vez_por_proceso(monkeypatch):
     assert void_mark.motor_void() is void_mark.motor_void()
     assert creados == [{
         "cpu_threads": void_mark._HILOS_RECONOCEDOR,
+        "rec_mkldnn": True,
         "rec_model": void_mark.MODELO_VOID,
     }]
 

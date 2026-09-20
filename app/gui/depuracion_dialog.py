@@ -18,12 +18,17 @@ donde tiene que estar todo lo que hace falta para elegir.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QImage, QPixmap, QShortcut, QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QDialogButtonBox,
     QLabel,
+    QGroupBox,
+    QHBoxLayout,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -119,6 +124,7 @@ class DepurarPaginasDialog(QDialog):
     def __init__(self, reports, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._reports = list(reports)
+        self._preview_cache = {}
         # El conteo por criterio no cambia mientras el cuadro está abierto:
         # se mide una vez sobre los reportes y las casillas solo eligen
         # cuáles de esas páginas entran en el total.
@@ -128,7 +134,7 @@ class DepurarPaginasDialog(QDialog):
         self.setWindowTitle("Depurar páginas")
         # Como el resto de los cuadros: la pantalla decide el tamaño, que en
         # un portátil bajo el alto pedido deja los botones fuera del borde.
-        self._density = fit_to_screen(self, 560, 560)
+        self._density = fit_to_screen(self, 760, 700)
         self._aplicar_hoja()
         self._build_ui()
         # La hoja lleva el fragmento de la densidad, así que la rehace el
@@ -193,6 +199,17 @@ class DepurarPaginasDialog(QDialog):
         self._llenar_blancas()
         layout.addWidget(self.arbol_blancas, 1)
 
+        previews = QHBoxLayout()
+        self.previa_elegida = self._miniatura("Página seleccionada", previews)
+        self.previa_comparada = self._miniatura("Otra copia de la bitácora", previews)
+        layout.addLayout(previews)
+        for arbol in (self.arbol_duplicados, self.arbol_blancas):
+            arbol.currentItemChanged.connect(self._mostrar_previa)
+            for tecla in ("Return", "Enter"):
+                atajo = QShortcut(QKeySequence(tecla), arbol)
+                atajo.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+                atajo.activated.connect(lambda a=arbol: self._alternar_elegida(a))
+
         self.total_label = QLabel()
         pintar_del_tema(
             self.total_label, lambda: f"color: {paleta().TEXT_SECONDARY};"
@@ -208,6 +225,7 @@ class DepurarPaginasDialog(QDialog):
             QDialogButtonBox.StandardButton.Ok
         )
         self.boton_eliminar.setText("Eliminar")
+        self.boton_eliminar.setAutoDefault(False)
         self.buttons.button(
             QDialogButtonBox.StandardButton.Cancel
         ).setText("Cancelar")
@@ -218,6 +236,59 @@ class DepurarPaginasDialog(QDialog):
         # Ninguna marcada de entrada: el cuadro se abre sin nada que borrar y
         # es quien lo abre el que elige, no el que descubre lo ya marcado.
         self._refrescar_total()
+
+    def _miniatura(self, titulo, fila):
+        grupo = QGroupBox(titulo)
+        columna = QVBoxLayout(grupo)
+        imagen = QLabel("Seleccione una página")
+        imagen.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        imagen.setMinimumWidth(160)
+        imagen.setFixedHeight(190)
+        columna.addWidget(imagen)
+        fila.addWidget(grupo, 1)
+        return imagen
+
+    def _alternar_elegida(self, arbol):
+        item = arbol.currentItem()
+        if item is not None and item.data(0, _CLAVE) is not None:
+            item.setCheckState(0, Qt.CheckState.Unchecked
+                              if item.checkState(0) == Qt.CheckState.Checked
+                              else Qt.CheckState.Checked)
+
+    def _mostrar_previa(self, item, _anterior=None):
+        clave = item.data(0, _CLAVE) if item is not None else None
+        self._pintar_miniatura(self.previa_elegida, clave)
+        otra = next((p.clave for _, paginas in self._grupos
+                     if any(p.clave == clave for p in paginas)
+                     for p in paginas if p.clave != clave), None)
+        self._pintar_miniatura(self.previa_comparada, otra)
+
+    def _pintar_miniatura(self, etiqueta, clave):
+        etiqueta.clear()
+        if clave is None:
+            etiqueta.setText("Sin página para comparar")
+            return
+        try:
+            pixmap = self._preview_cache.get(clave)
+            if pixmap is None:
+                import pymupdf
+                from app.utils.io import resolve_processed_path
+                ruta = resolve_processed_path(Path(self._reports[clave[0]].pdf_path))
+                with pymupdf.open(ruta) as pdf:
+                    pagina = pdf[clave[1] - 1]
+                    escala = min(500 / pagina.rect.width, 380 / pagina.rect.height)
+                    pixels = pagina.get_pixmap(matrix=pymupdf.Matrix(escala, escala), colorspace=pymupdf.csRGB, alpha=False)
+                    imagen = QImage(pixels.samples, pixels.width, pixels.height,
+                                    pixels.stride, QImage.Format.Format_RGB888).copy()
+                    pixmap = QPixmap.fromImage(imagen)
+                if len(self._preview_cache) >= 16:
+                    self._preview_cache.pop(next(iter(self._preview_cache)))
+                self._preview_cache[clave] = pixmap
+            etiqueta.setPixmap(pixmap.scaled(etiqueta.size(),
+                               Qt.AspectRatioMode.KeepAspectRatio,
+                               Qt.TransformationMode.SmoothTransformation))
+        except (OSError, RuntimeError, ValueError, IndexError):
+            etiqueta.setText("No se pudo abrir la página original")
 
     def _nuevo_arbol(self, ayuda: str) -> QTreeWidget:
         arbol = QTreeWidget()

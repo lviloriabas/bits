@@ -766,7 +766,10 @@ class EstadoParte:
             # manifiesto no basta: puede venir de una subida anterior o de
             # una carga que Quick Upload acepto pero aun no publico.
             titulo = f"Subido confirmado; {titulo}"
-        return f"{titulo}: {self.detalle}" if self.detalle else titulo
+        texto = f"{titulo}: {self.detalle}" if self.detalle else titulo
+        if es_posible_duplicado(self.trabajo) and not duplicado_bloquea(self.trabajo):
+            texto += "; aviso de posibles duplicados (sin detener)"
+        return texto
 
 
 def _comprobar_que_el_csv_cuadra(registros, csv) -> None:
@@ -1170,13 +1173,17 @@ class Trabajo:
             if repetidas:
                 motivo = _motivo_de_repetidas(repetidas)
                 marcar_posible_duplicado(self, motivo)
-        if motivo and not self._duplicado_permitido:
+        if motivo and not self._duplicado_permitido and self.config.detener_por_duplicados:
             raise ErrorDeCorrida(
                 f"No se sube «{self.manifiesto.nombre_batch}»: {motivo}. "
                 "Publicarlas otra vez dejaria el mismo documento dos veces "
                 "en AirVault y eso solo se deshace a mano. Si en AirVault "
                 "no esta, quite la marca de posible duplicado en la cola."
             )
+        if motivo and not self.config.detener_por_duplicados:
+            logger.warning("Posible duplicado; se continua por preferencia: {}", motivo)
+            if avisar:
+                avisar(f"Posible duplicado: {motivo}; se continúa la subida", 0, 0)
         archivo = Path(pdf or self.manifiesto.pdf_origen)
         if not archivo.is_file():
             raise ErrorDeCorrida(f"No esta el archivo de entrega {archivo.name}")
@@ -2602,6 +2609,11 @@ def es_posible_duplicado(trabajo: "Trabajo") -> bool:
     return bool(trabajo.manifiesto.posible_duplicado)
 
 
+def duplicado_bloquea(trabajo: "Trabajo") -> bool:
+    """La alerta se conserva aun cuando la persona permite continuar."""
+    return es_posible_duplicado(trabajo) and trabajo.config.detener_por_duplicados
+
+
 def buscador_de(
     sesion,
     config: AirVaultConfig,
@@ -2908,6 +2920,10 @@ def subir_partes(
             )
         if motivo:
             marcar_posible_duplicado(trabajo, motivo)
+        if motivo and not trabajo.config.detener_por_duplicados:
+            if avisar is not None:
+                avisar(f"{cabeza}Posible duplicado: {motivo}; se continúa", 0, 0)
+        if motivo and trabajo.config.detener_por_duplicados:
             fallos.append((
                 trabajo,
                 f"No se subio porque {motivo}. Si en AirVault no esta, "
@@ -3324,9 +3340,8 @@ def partes_por_subir(estados: Sequence[EstadoParte]) -> List["Trabajo"]:
     return [
         parte.trabajo
         for parte in estados
-        # Un batch marcado como posible duplicado no entra ni por «sin
-        # subir»: mientras la marca este puesta no lo manda nadie solo.
-        if not es_posible_duplicado(parte.trabajo)
+        # La alerta solo impide subir cuando la preferencia lo exige.
+        if not duplicado_bloquea(parte.trabajo)
         and parte.estado == SIN_SUBIR
     ]
 
@@ -3703,7 +3718,7 @@ def estado_local(trabajo: "Trabajo") -> EstadoParte:
         return _cierre_de(trabajo)
     if manifiesto.cancelado:
         return _cancelado_de(trabajo)
-    if manifiesto.posible_duplicado:
+    if duplicado_bloquea(trabajo):
         # Por delante de «sin subir»: es justo lo que hay que ver en la
         # fila de un batch que el programa se nego a mandar.
         return EstadoParte(
@@ -4416,7 +4431,7 @@ def _estado_de(
         return EstadoParte(trabajo, INDEXADO, verificar.detalle)
     if manifiesto.cancelado:
         return _cancelado_de(trabajo)
-    if manifiesto.posible_duplicado and not manifiesto.batch_id:
+    if duplicado_bloquea(trabajo) and not manifiesto.batch_id:
         # Con batch confirmado la fila dice lo que de verdad pasa con ese
         # batch; sin el, lo unico que hay que contar es por que no se
         # subio.
@@ -4809,7 +4824,7 @@ def completar_partes(
     """
     hechos: List[Tuple["Trabajo", ResultadoCompletar]] = []
     for trabajo in trabajos:
-        if es_posible_duplicado(trabajo):
+        if duplicado_bloquea(trabajo):
             motivo = trabajo.manifiesto.posible_duplicado
             if avisar is not None:
                 avisar(

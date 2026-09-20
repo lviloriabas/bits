@@ -318,7 +318,7 @@ class EditorWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(
-            f"{APPLICATION_DISPLAY_NAME} - Editor de plantillas"
+            f"{APPLICATION_DISPLAY_NAME} - Editor de plantilla"
         )
         # El tamaño lo pone la pantalla: 1200x800 no entra en un portátil de
         # 1366x768 y la fila de botones de abajo se quedaba fuera.

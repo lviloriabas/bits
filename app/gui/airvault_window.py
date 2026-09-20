@@ -1183,22 +1183,19 @@ class AirVaultWindow(QDialog):
         # largos.
         cuerpo.addWidget(self._bitacora(), 2)
 
-        self.resumen = QLabel(TEXTO_SIN_SUBIR)
-        self.resumen.setWordWrap(True)
+        self.resumen = ElidedLabel(TEXTO_SIN_SUBIR)
         pintar_del_tema(
             self.resumen, lambda: f"color: {color_ayuda()};"
         )
-        # Sitio para tres líneas: los motivos de fallo son largos, y sin
-        # reservarlo la ventana daba un salto cada vez que aparecía uno.
-        self.resumen.setMinimumHeight(
-            self._densidad.airvault_summary_min_height
-        )
+        self.resumen.setMinimumHeight(self.resumen.fontMetrics().height() + SPACE_S)
         self.resumen.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
         )
         cuerpo.addWidget(self.resumen)
 
-        cuerpo.addLayout(self._fila_botones())
+        botones = self._fila_botones()
+        cuerpo.addWidget(self.detener_duplicados_check)
+        cuerpo.addLayout(botones)
 
     @staticmethod
     def _titulo(texto: str) -> QLabel:
@@ -2578,9 +2575,12 @@ class AirVaultWindow(QDialog):
         if paso != COMPLETAR:
             return
         casilla = getattr(self, "completar_check", None)
-        if casilla is None or casilla.isChecked() == marcado:
+        if casilla is None:
             return
-        casilla.setChecked(marcado)
+        if casilla.isChecked() != marcado:
+            casilla.setChecked(marcado)
+        if hasattr(self, "auto_check"):
+            self._ajustar_vigilancia()
 
     def _fila_avance(self) -> QHBoxLayout:
         """Barra y reloj propios; el detalle vive en la bitácora inferior."""
@@ -2648,6 +2648,10 @@ class AirVaultWindow(QDialog):
             lambda marcado: self._opciones.fijar(COMPLETAR, marcado)
         )
         fila.addWidget(self.completar_check)
+        self.detener_duplicados_check = QCheckBox("Detener subida si se detectan duplicados")
+        self.detener_duplicados_check.setChecked(self._config.detener_por_duplicados)
+        self.detener_duplicados_check.setToolTip("Desmarcada: avisa de posibles duplicados y continúa. La selección se recuerda al cerrar.")
+        self.detener_duplicados_check.toggled.connect(self._guardar_politica_duplicados)
         fila.addStretch()
 
         self.boton_subir = QPushButton("Subir a AirVault")
@@ -3420,7 +3424,8 @@ class AirVaultWindow(QDialog):
     def _pintar_lotes(self) -> None:
         """Vuelca en la tabla en qué va cada batch."""
         from app.airvault.flujo import (AUTOCOMPLETADO, CANCELADO, COMPLETADO,
-                                        INDEXADO, POSIBLE_DUPLICADO, SIN_SUBIR)
+                                        INDEXADO, INCOMPLETO,
+                                        POSIBLE_DUPLICADO, SIN_SUBIR)
 
         tabla = self.lotes
         tabla.setRowCount(0)
@@ -3432,12 +3437,7 @@ class AirVaultWindow(QDialog):
             celdas = (
                 parte.batch_id, nombre, str(esperadas), str(parte),
             )
-            # Verde significa una sola cosa: la verificación remota confirmó
-            # todas las bitácoras. Una escritura parcial o fallida conserva el
-            # color normal y dice «Indexado incompleto» en Estado.
-            ya_indexado = parte.estado in (
-                INDEXADO, COMPLETADO, AUTOCOMPLETADO,
-            )
+            completado = parte.estado in (COMPLETADO, AUTOCOMPLETADO)
             for columna, texto in enumerate(celdas):
                 item = QTableWidgetItem(texto)
                 if columna == 1:
@@ -3447,10 +3447,11 @@ class AirVaultWindow(QDialog):
                         Qt.AlignmentFlag.AlignRight
                         | Qt.AlignmentFlag.AlignVCenter
                     )
-                if str(parte.trabajo.carpeta) in self._indexando:
-                    pintar_celda_del_tema(item, "acento")
-                elif ya_indexado:
+                if completado:
                     pintar_celda_del_tema(item, "STATUS_OK")
+                elif (str(parte.trabajo.carpeta) in self._indexando
+                      or parte.estado in (INDEXADO, INCOMPLETO)):
+                    pintar_celda_del_tema(item, "acento")
                 elif parte.estado in (
                     SIN_SUBIR, CANCELADO, POSIBLE_DUPLICADO
                 ):
@@ -3510,22 +3511,23 @@ class AirVaultWindow(QDialog):
         preguntar no escribe nada, y es lo que hace que la carga aparezca
         sola y se indexe sola cuando por fin sale de la cola.
 
-        La única que no cuenta es la marcada como posible duplicado:
-        mientras la marca esté puesta nadie la sube ni la completa, así que
-        no hay nada que preguntar por ella hasta que alguien mire AirVault
-        y la quite.
+        Una alerta de duplicados solo bloquea cuando está activada la
+        preferencia de detener la subida.
 
-        Un batch que acabó el indexado sin confirmar también cuenta mientras
-        le queden comprobaciones: la verificación pudo leer de AirVault algo
-        que aún no reflejaba, y releerlo más tarde es lo que lo completa.
+        Un indexado incompleto sigue bajo vigilancia aunque agote las
+        relecturas inmediatas. Un indexado confirmado también sigue si
+        falta completar el batch y esa opción está activada.
         """
-        from app.airvault.flujo import POSIBLE_DUPLICADO
+        from app.airvault.flujo import INDEXADO, INCOMPLETO, POSIBLE_DUPLICADO
 
         return any(
-            not parte.se_acabo
+            (not parte.se_acabo
+             or (parte.estado == INDEXADO and self.completar_check.isChecked()
+                 and not parte.trabajo.manifiesto.solo_subir))
             and parte.estado != POSIBLE_DUPLICADO
             and (
                 not parte.se_puede_indexar
+                or parte.estado == INCOMPLETO
                 or self._reconfirmaciones.get(str(parte.trabajo.carpeta), 0) > 0
             )
             for parte in self._partes_en_cola()
@@ -3740,6 +3742,23 @@ class AirVaultWindow(QDialog):
 
     def _config_actual(self):
         return self._config
+
+    def _guardar_politica_duplicados(self, marcada: bool) -> None:
+        from app.airvault.config import guardar_preferencias
+        from app.airvault.flujo import POSIBLE_DUPLICADO, estado_local
+        if not guardar_preferencias(self._raiz / AIRVAULT_FILENAME, detener_por_duplicados=marcada):
+            with QSignalBlocker(self.detener_duplicados_check):
+                self.detener_duplicados_check.setChecked(self._config.detener_por_duplicados)
+            self.resumen.setText("No se pudo guardar la opción de duplicados.")
+            return
+        self._config = self._config.with_overrides(detener_por_duplicados=marcada)
+        self._estado["config"] = self._config
+        trabajos = list(self._trabajos) + [p.trabajo for p in self._estados]
+        for trabajo in trabajos:
+            trabajo.config = trabajo.config.with_overrides(detener_por_duplicados=marcada)
+        self._estados = [estado_local(p.trabajo) if p.estado == POSIBLE_DUPLICADO else p for p in self._estados]
+        self._pintar_lotes()
+        self._ajustar_vigilancia()
 
     def _guardar_limite_batch(self, cantidad: int) -> None:
         """Recuerda el valor en la propia carpeta portable."""
@@ -3969,6 +3988,8 @@ class AirVaultWindow(QDialog):
         self._publicar_avance()
 
     def _habilitar(self, activo: bool) -> None:
+        self.detener_duplicados_check.setEnabled(activo)
+        self.completar_check.setEnabled(activo)
         self.solo_ejecucion_check.setEnabled(activo)
         # La ejecución de esta ventana no cambia mientras trabaja, pero el
         # historial sigue disponible: elegir otra emite una solicitud para
@@ -4148,8 +4169,7 @@ class AirVaultWindow(QDialog):
         self.resumen.setText(
             f"El batch {trabajo.manifiesto.nombre_batch} ya se indexó "
             f"({datos['validas']} de {datos['total']} páginas revisadas). "
-            "La búsqueda de los demás continúa en paralelo; todas las "
-            "subidas ya terminaron."
+            "La cola continúa con los demás batches."
         )
 
     def _al_comprobar(self, datos: dict) -> None:
@@ -4487,7 +4507,7 @@ class AirVaultWindow(QDialog):
         cortado cuando no queda quién lo haga avanzar.
         """
         from app.airvault.flujo import (AUTOCOMPLETADO, COMPLETADO, INDEXADO,
-                                        SIN_SUBIR)
+                                        SIN_SUBIR, POSIBLE_DUPLICADO)
         from app.gui.automatizacion import (COMPLETAR, CORTADO, EN_CURSO,
                                             ESPERAR, HECHO, INDEXAR, PENDIENTE,
                                             SUBIR)
@@ -4515,7 +4535,7 @@ class AirVaultWindow(QDialog):
             self._vigilante is not None and self._vigilante.isActive()
         ) or bool(self._cola_de_acciones)
         subido = not any(
-            parte.estado == SIN_SUBIR for parte in self._estados
+            parte.estado in (SIN_SUBIR, POSIBLE_DUPLICADO) for parte in self._estados
         )
         self.avance_automatico.emit(SUBIR, como(subido, avanza))
         self.avance_automatico.emit(

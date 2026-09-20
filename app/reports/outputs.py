@@ -6,6 +6,8 @@ hilo de fondo sin leer ni modificar widgets de la interfaz.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import shutil
 from dataclasses import dataclass
 from datetime import datetime
@@ -61,6 +63,28 @@ def complete_csv_path(csv_path: Path) -> Path:
     """Nombre estable del CSV referencial con todas las columnas."""
     csv_path = Path(csv_path)
     return csv_path.with_name(f"{csv_path.stem}_completo{csv_path.suffix}")
+
+
+def registrar_exportacion(run_dir: Path, options: OutputOptions, evento: str = "exportacion_iniciada") -> None:
+    """Conserva la plantilla exacta y opciones de cada exportación."""
+    contenido = json.dumps(options.template.model_dump(mode="json"), ensure_ascii=False,
+                           sort_keys=True, indent=2).encode("utf-8")
+    huella = hashlib.sha256(contenido).hexdigest()
+    carpeta = Path(run_dir) / "logs"
+    carpeta.mkdir(parents=True, exist_ok=True)
+    plantilla = carpeta / f"plantilla-{huella}.json"
+    if not plantilla.exists():
+        plantilla.write_bytes(contenido)
+    registro = {
+        "fecha": datetime.now().astimezone().isoformat(),
+        "evento": evento, "plantilla_sha256": huella,
+        "plantilla": plantilla.name, "discrepancias_a_detectar": options.template.discrepancy_fields,
+        "columnas_importantes": list(options.important_csv_columns), "dpi": options.dpi,
+        "modo_fecha": options.csv_date_mode, "leer_dia": options.read_day,
+        "sin_pdf": options.skip_pdfs,
+    }
+    with (carpeta / "exportaciones.jsonl").open("a", encoding="utf-8") as salida:
+        salida.write(json.dumps(registro, ensure_ascii=False) + "\n")
 
 
 def marcar_revision(
@@ -223,6 +247,7 @@ def write_outputs(
 
     datos_dir = run_dir / "datos"
     datos_dir.mkdir(parents=True, exist_ok=True)
+    registrar_exportacion(run_dir, options)
 
     from app.validation.discrepancias import clasificar_lote
 
@@ -373,6 +398,7 @@ def write_outputs(
         pdf_paths=pdf_paths,
     )
     logger.info(f"Stats de la ejecución: {stats_path}")
+    registrar_exportacion(run_dir, options, "exportacion_completada")
     stage("Finalizando…", 100)
     logger.info(f"Outputs generados en: {run_dir}")
 

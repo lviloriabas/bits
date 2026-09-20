@@ -305,6 +305,10 @@ class Template(BaseModel):
     )
     source_path: Optional[Path] = Field(default=None, exclude=True, repr=False)
     fields: List[FieldTemplate] = Field(default_factory=list)
+    discrepancy_fields: Optional[List[str]] = Field(
+        default=None,
+        description="Discrepancias activas: null detecta todas; [] no detecta ninguna",
+    )
 
     @field_validator("fields")
     @classmethod

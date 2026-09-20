@@ -80,8 +80,9 @@ Depurar retira páginas de los resultados, como duplicados o blancos, después d
 
 1. Pulse **Más acciones -> Depurar**.
 2. Elija **Duplicados**, **Páginas en blanco** o ambas opciones.
-3. Compare las apariciones repetidas por matrícula, fecha y vuelo, después de comprobar sus imágenes en el visor. Marque las que sobran y pulse **Eliminar**.
-4. Exporte de nuevo para que la entrega refleje la depuración.
+3. Seleccione una aparición para ver su miniatura y otra copia al lado. Las páginas en blanco también muestran su imagen. Marque o desmarque cada página con su casilla o con Enter. Las marcas se pueden cambiar; todavía no eliminan nada.
+4. Pulse **Eliminar** para aplicar las marcas elegidas.
+5. Exporte de nuevo para que la entrega refleje la depuración.
 
 Se conserva al menos una aparición de cada bitácora repetida y no se permite vaciar toda la ejecución. Depurar es una acción manual y no forma parte del proceso automático.
 
@@ -111,6 +112,10 @@ Exportar vuelve a generar los datos y PDF sin repetir OCR. Conserva los PDF ante
 
 En **REVISAR**, BITS guarda los campos disponibles y verifica lo escrito. Las páginas con incidencias pueden seguir amarillas, pendientes de corrección humana, aunque termine el trabajo automático. Ese batch conserva sus separadores y no se completa ni publica automáticamente.
 
+La cola muestra azul durante el indexado y mientras el batch esté indexado o incompleto. Solo muestra verde al completar. Una página que conserve el estado 3 no convierte el batch en completado. Los mensajes inferiores ocupan una línea; coloque el puntero encima para leer el texto completo.
+
+Los PDF se suben de uno en uno. La cola identifica cada carga y sigue con los demás batches. Para entrar en AirVault, BITS usa el enlace SSO en Edge y reutiliza su sesión.
+
 #### Opciones de AirVault
 
 | Opción                                     | Función                                                                                                                 |
@@ -125,10 +130,15 @@ En **REVISAR**, BITS guarda los campos disponibles y verifica lo escrito. Las p�
 | **Buscar** y flechas                       | Localizan bitácoras y recorren las coincidencias.                                                                       |
 | **Mostrar solo la ejecución seleccionada** | Limita la cola visible a esa ejecución.                                                                                 |
 | **Cancelar**                               | Detiene el trabajo y libera los batches abiertos; conserva lo escrito.                                                  |
+| **Detener subida si se detectan duplicados** | Marcada: bloquea el batch sospechoso. Desmarcada: muestra el aviso y continúa con la subida, el indexado y el completado solicitado. Se recuerda al cerrar; inicialmente está desmarcada. |
 
 Con clic derecho sobre un batch puede subirlo, revisarlo, indexarlo, completarlo, cancelar o reanudar su cola, ver sus bitácoras y copiar su nombre o identificador. Solo se habilitan las acciones que corresponden a su estado.
 
 **No es duplicado: volver a subir** autoriza un reenvío: úselo después de revisar en AirVault que la carga realmente falta. **Eliminar el batch…** actúa sobre el batch remoto; **Eliminar el registro de AirVault** quita el seguimiento local. **Eliminar la ejecución…**, en el historial, envía la carpeta local a la Papelera y conserva lo que ya está en AirVault.
+
+La comprobación de duplicados sigue generando avisos con la casilla desmarcada. La alerta queda guardada en el manifiesto y visible en la cola. Esto no vuelve a subir automáticamente una carga ya aceptada: primero se identifica el batch existente.
+
+Mientras **Revisar cada** esté activo, la cola sigue consultando los batches incompletos. Si **Completar batch** está marcado, también sigue pendiente de los indexados que todavía no se han completado. Los batches completados salen de la espera; **REVISAR** sigue reservado para corrección humana. Puede cancelar o desactivar la revisión periódica en cualquier momento.
 
 ### 9. Corregir excepciones con Web Reports
 
@@ -140,7 +150,11 @@ Log Page Audit es un reporte de AirVault que señala dos defectos de lo ya publi
 4. Las celdas subrayadas abren Web Search: la de **Página**, sus apariciones; la de **Rango del libro**, el libro entero.
 5. Pulse **Corregir todas…**, o seleccione filas con Ctrl o Mayús y pulse **Corregir seleccionadas…**. Confirme el resumen.
 
-De una duplicada se conserva la aparición más antigua y se borran las demás. Una mal indexada se pasa a la aeronave de su libro. Antes de escribir, cada caso se contrasta con lo que Web Search muestra en ese momento: si el reporte quedó viejo y alguien ya lo corrigió, la bitácora se deja como está.
+**Revisar imágenes antes de eliminar copias** abre una comparación para cada bitácora duplicada. La selección inicial conserva la más antigua. Puede cambiar las marcas, omitir la bitácora o pulsar **Eliminar seleccionadas**. Siempre debe conservar una copia. Las miniaturas se guardan en memoria mientras la ventana siga abierta, para reutilizarlas si el documento no cambió. Si desactiva la opción, la corrección conserva automáticamente la copia más antigua.
+
+Solo se eliminan documentos de tipo **LOG PAGE** con **Images = 1**. Si cualquiera tiene varias imágenes, falta ese recuento o el tipo corresponde a otra área, se bloquea el grupo y se informa el motivo. Justo antes de eliminar se vuelve a comprobar que las copias coincidan con las revisadas y que la que debe conservarse siga presente. Esto protege documentos de Fleet u otras áreas incluidos en la búsqueda.
+
+Una mal indexada se pasa a la aeronave de su libro. Antes de escribir, cada caso se contrasta con lo que Web Search muestra en ese momento: si el reporte quedó viejo y alguien ya lo corrigió, la bitácora se deja como está.
 
 Mientras algo corre en Edge, el cronómetro junto a la barra de progreso dice lo mismo que el de la ventana principal: **Estimado**, **Restante** y **Transcurrido**. La cuenta va por bitácora, no por página, y se ajusta con lo que tardan de verdad las de esta corrida. La primera vez parte de una estimación de fábrica; a partir de ahí usa lo que costó la última consulta o corrección completa en este equipo. Una corrida cancelada no cuenta para eso.
 
@@ -191,9 +205,19 @@ Abra **Herramientas -> Visor de CSV…** para consultar una ejecución guardada 
 
 La tabla permite consultar datos; sus celdas no se editan directamente. Depurar, quitar páginas y exportar requieren los archivos asociados de la ejecución. Después de retirar páginas, vuelva a exportar.
 
-## Editor de plantillas
+Los cambios de **Campos importantes** de la ventana principal se reflejan también en el visor de CSV abierto, para la misma plantilla.
 
-Abra **Herramientas -> Editor de plantillas…**. Una zona de plantilla es un rectángulo que indica dónde buscar un dato, por ejemplo matrícula, fecha o firma.
+Cada exportación conserva en `logs/` su plantilla y las opciones aplicadas. Consulte [la auditoría de cambios](AUDITORIA_CAMBIOS_2026-09.md) para ubicar las evidencias de procesamiento y los registros de limpieza de AirVault.
+
+## Discrepancias a detectar
+
+En **Herramientas -> Discrepancias a detectar**, active las firmas y licencias que desea comprobar. La selección se guarda en la plantilla y se aplica al siguiente procesamiento. No cambia los campos que se leen para identificar el documento. No hay un editor separado de tipos de discrepancia.
+
+La lista también se puede editar en el JSON de la plantilla: `discrepancy_fields: null` activa todas; una lista de identificadores activa solo esas; `[]` desactiva la detección. Las lecturas inciertas se distinguen de las ausencias confirmadas. Una licencia tenue no se considera ausente solamente porque desaparezca al compararla con el fondo del libro.
+
+## Editor de plantilla
+
+Abra **Herramientas -> Editor de plantilla…**. Una zona de plantilla es un rectángulo que indica dónde buscar un dato, por ejemplo matrícula, fecha o firma.
 
 1. Pulse **Abrir PDF** (`Ctrl+O`) y elija un documento representativo.
 2. Pulse **Cargar plantilla** para abrir la plantilla que desea ajustar.
