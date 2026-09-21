@@ -17,6 +17,7 @@ from app.templates.manager import TemplateManager
 from app.utils.fleet import load_fleet
 from app.validation.book_corrector import correct_matricula_by_book
 from app.validation.date_corrector import correct_dates_by_book
+from app.validation.discrepancias import con_discrepancias_elegidas
 from app.validation.log_sequence import infer_log_numbers_from_pdf_order
 
 if TYPE_CHECKING:  # el módulo de salidas se importa dentro del hilo
@@ -86,7 +87,9 @@ class PipelineWorker(QThread):
             from app.core.config import config_for_pdf
             from app.ocr.engine import create_engine
 
-            template = TemplateManager().load(self.template_path)
+            template = con_discrepancias_elegidas(
+                TemplateManager().load(self.template_path)
+            )
             engine_kwargs = {}
             if self.cpu_threads is not None:
                 engine_kwargs["cpu_threads"] = self.cpu_threads
@@ -318,7 +321,9 @@ class PreprocessWorker(QThread):
             from app.vision.pdf_loader import PdfPageRenderer, page_count
             from app.vision.preprocessing import deskew
 
-            template = TemplateManager().load(self.template_path)
+            template = con_discrepancias_elegidas(
+                TemplateManager().load(self.template_path)
+            )
 
             slices = slice_batch(
                 self.pdf_paths,

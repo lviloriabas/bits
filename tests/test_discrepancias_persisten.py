@@ -1,10 +1,15 @@
 """La seleccion del menu de discrepancias sobrevive a cerrar el programa.
 
-Vive en el JSON de la plantilla, asi que reabrir la ventana tiene que
-volver a dibujar las mismas casillas. Dos formas de perderla, las dos
-cubiertas aqui: que abrir el menu reescriba el archivo con los valores por
-defecto, y que guardar desde el editor de plantillas se lleve el ajuste por
-delante al rehacer la plantilla desde cero.
+Vive en el archivo local de la interfaz y no en el JSON de la plantilla, que
+si se versiona: marcar una casilla dejaba el repositorio con una
+modificacion pendiente y el pull de la otra maquina chocaba contra ella. De
+ahi que aqui se compruebe tanto que la seleccion vuelve como que el archivo
+de la plantilla no se toca.
+
+Tres formas de perderla, las tres cubiertas: que abrir el menu reescriba lo
+guardado con los valores por defecto, que guardar desde el editor de
+plantillas se lleve el ajuste por delante al rehacer la plantilla desde
+cero, y que lo elegido no llegue a lo que se procesa.
 """
 
 from __future__ import annotations
@@ -22,6 +27,9 @@ from app.validation.discrepancias import (
     TIPO_CORRECCION,
     TIPO_MANTENIMIENTO,
     TIPO_VUELO,
+    con_discrepancias_elegidas,
+    discrepancias_elegidas,
+    guardar_discrepancias_elegidas,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,11 +51,11 @@ def plantilla(tmp_path: Path) -> Path:
 
 
 def _guardar(ruta: Path, seleccion: dict) -> None:
-    manager = TemplateManager()
-    manager.save(
-        manager.load(ruta).model_copy(update={"discrepancy_types": seleccion}),
-        ruta,
-    )
+    guardar_discrepancias_elegidas(TemplateManager().load(ruta), seleccion)
+
+
+def _elegidas(ruta: Path) -> dict:
+    return discrepancias_elegidas(TemplateManager().load(ruta))
 
 
 def _ventana(app, ruta: Path):
@@ -86,25 +94,33 @@ def test_la_seleccion_se_relee_al_reabrir(app, plantilla):
     otra = _ventana(app, plantilla)
     otra._llenar_menu_discrepancias()
     assert _marcas(otra.discrepancias_menu) == esperado
-    assert TemplateManager().load(plantilla).discrepancy_types == SELECCION
+    assert _elegidas(plantilla) == SELECCION
 
 
-def test_abrir_el_menu_no_reescribe_la_plantilla(app, plantilla):
+def test_elegir_no_toca_el_archivo_de_la_plantilla(app, plantilla):
+    """Lo que se versiona se queda como estaba; si no, el pull choca."""
+    antes = plantilla.read_bytes()
+    ventana = _ventana(app, plantilla)
+    ventana._cambiar_tipo_discrepancia(TIPO_MANTENIMIENTO, False)
+    ventana._cambiar_discrepancia(TIPO_VUELO, "pilot_signature", False)
+    assert plantilla.read_bytes() == antes
+    assert _elegidas(plantilla)[TIPO_MANTENIMIENTO] == []
+
+
+def test_abrir_el_menu_no_reescribe_lo_guardado(app, plantilla):
     """Dibujar las casillas no puede disparar un guardado con los defectos."""
     _guardar(plantilla, SELECCION)
     ventana = _ventana(app, plantilla)
-    antes = plantilla.stat().st_mtime_ns
     for _ in range(3):
         ventana._llenar_menu_discrepancias()
-    assert plantilla.stat().st_mtime_ns == antes
-    assert TemplateManager().load(plantilla).discrepancy_types == SELECCION
+    assert _elegidas(plantilla) == SELECCION
 
 
 def test_encender_un_tipo_devuelve_todas_sus_casillas(app, plantilla):
     _guardar(plantilla, SELECCION)
     ventana = _ventana(app, plantilla)
     ventana._cambiar_tipo_discrepancia(TIPO_MANTENIMIENTO, True)
-    guardado = TemplateManager().load(plantilla).discrepancy_types
+    guardado = _elegidas(plantilla)
     assert guardado[TIPO_MANTENIMIENTO] == list(CAMPOS_POR_TIPO[TIPO_MANTENIMIENTO])
     # Y sin tocar a los otros dos.
     assert guardado[TIPO_VUELO] == SELECCION[TIPO_VUELO]
@@ -115,22 +131,37 @@ def test_una_casilla_suelta_se_guarda_sin_tocar_los_otros_tipos(app, plantilla):
     _guardar(plantilla, SELECCION)
     ventana = _ventana(app, plantilla)
     ventana._cambiar_discrepancia(TIPO_VUELO, "pilot_signature", True)
-    guardado = TemplateManager().load(plantilla).discrepancy_types
+    guardado = _elegidas(plantilla)
     assert set(guardado[TIPO_VUELO]) == {"pilot_signature", "captain_license"}
     assert guardado[TIPO_MANTENIMIENTO] == []
     assert guardado[TIPO_CORRECCION] == SELECCION[TIPO_CORRECCION]
+
+
+def test_lo_elegido_llega_a_la_plantilla_que_se_procesa(plantilla):
+    """Los hilos y la linea de comandos leen esto, no el archivo a secas."""
+    _guardar(plantilla, SELECCION)
+    puesta = con_discrepancias_elegidas(TemplateManager().load(plantilla))
+    assert puesta.discrepancy_types == SELECCION
+
+
+def test_sin_nada_elegido_manda_lo_que_trae_la_plantilla(plantilla):
+    """El archivo versionado sigue siendo el valor de partida."""
+    de_fabrica = TemplateManager().load(plantilla).discrepancy_types
+    assert _elegidas(plantilla) == {
+        tipo: list(de_fabrica[tipo]) for tipo in CAMPOS_POR_TIPO
+    }
 
 
 def test_el_editor_no_borra_la_seleccion_al_guardar(app, plantilla):
     """El editor solo edita geometria: el ajuste tiene que sobrevivir."""
     from app.gui.editor_window import EditorWindow
 
-    _guardar(plantilla, SELECCION)
     editor = EditorWindow()
     editor._image_size = (1000, 700)
-    editor._apply_template_to_scene(TemplateManager().load(plantilla))
+    base = TemplateManager().load(plantilla)
+    editor._apply_template_to_scene(base)
     rehecha = editor._collect_template()
-    assert rehecha.discrepancy_types == SELECCION
+    assert rehecha.discrepancy_types == base.discrepancy_types
 
 
 def test_la_fila_del_tipo_es_la_casilla_y_abre_el_submenu(app, plantilla):

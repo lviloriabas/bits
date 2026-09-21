@@ -73,6 +73,7 @@ from app.gui.csv_model import (
 from app.gui.depuracion_dialog import DEPURAR_TOOLTIP, DepurarPaginasDialog
 from app.gui.export_options import ExportOptionsGroup
 from app.gui.field_selector import ImportantFieldsDialog
+from app.gui.memoria import VISOR, recordar
 from app.gui.responsive import ROOMY, Density, density_for, fit_to_screen
 from app.gui.table_sort import ModelSortController
 from app.gui.theme import gestor_tema
@@ -1714,6 +1715,11 @@ class CsvViewerWindow(QMainWindow):
             "Dibuja los recuadros de los campos sobre la pagina del visor."
         )
         self.fields_check.toggled.connect(self._apply_pdf_overlay)
+        # Los dos controles de esta fila eligen cómo se mira el CSV, no qué
+        # CSV se mira, así que la elección vale para el siguiente también.
+        # Se reponen con la señal bloqueada: todavía no hay ninguno abierto,
+        # y al abrirlo se dibuja ya con lo que dicen.
+        recordar(VISOR, "mostrar_campos", self.fields_check)
         view_controls.addWidget(self.fields_check)
         view_controls.addStretch()
         view_controls.addWidget(QLabel("Vista de la tabla:"))
@@ -1721,6 +1727,7 @@ class CsvViewerWindow(QMainWindow):
         self.column_toggle.setEnabled(False)
         self.column_toggle.setVisible(False)
         self.column_toggle.toggled.connect(self._apply_column_mode)
+        recordar(VISOR, "columnas_importantes", self.column_toggle)
         view_controls.addWidget(self.column_toggle)
         self.important_fields_button = ImportantFieldsButton()
         self.important_fields_button.setEnabled(False)

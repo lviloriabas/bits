@@ -23,6 +23,7 @@ from app.airvault.config import (
     guardar_csv_date_mode,
     guardar_paginas_por_batch,
 )
+from app.gui.memoria import SALIDA, recordar
 from app.gui.widgets import (
     MultiSelectMenu,
     SpinBoxWithButtons,
@@ -67,6 +68,12 @@ class ExportOptionsGroup(QGroupBox):
             "archivo por cada separación marcada."
         )
         configure_combo_box(self.output_mode_combo, 12)
+        # Con qué formato se entrega es una decisión de quien entrega y no
+        # del programa, igual que la política de fecha de al lado: se abre
+        # en el último elegido. Se repone antes de conectar «_sync_parts»
+        # porque reponer no es elegir y no tiene que mover la fila de abajo
+        # dos veces; al final del constructor se ajusta una sola vez.
+        recordar(SALIDA, "formato", self.output_mode_combo)
         main_row.addWidget(self.output_mode_combo, 1)
 
         main_row.addSpacing(8)
@@ -116,19 +123,22 @@ class ExportOptionsGroup(QGroupBox):
         self._detail_row = detail_row
         self.separation_menu = MultiSelectMenu(self)
         self.matricula_check = self._checkable_action(
+            "separar_matricula",
             "Matrícula",
             "Separa la entrega por matrícula.",
             checked=True,
         )
         self.mes_check = self._checkable_action(
-            "Mes", "Separa la entrega por mes."
+            "separar_mes", "Mes", "Separa la entrega por mes."
         )
         self.discrepancias_check = self._checkable_action(
+            "discrepancias",
             "Posibles discrepancias",
             "Agrega una sección con posibles discrepancias de firma.",
             checked=True,
         )
         self.errores_check = self._checkable_action(
+            "errores",
             "Errores",
             "Genera errores.pdf con las páginas que requieren revisión manual.",
         )
@@ -147,6 +157,10 @@ class ExportOptionsGroup(QGroupBox):
         self.partes_check.setToolTip(
             "Reparte el PDF único en varias partes sin cortar secciones."
         )
+        # La cantidad de páginas ya se conservaba y la casilla que la
+        # enciende no, así que una entrega repartida volvía entera en el
+        # siguiente arranque con el número de partes todavía escrito.
+        recordar(SALIDA, "dividir", self.partes_check)
         detail_row.addWidget(self.partes_check)
         self.partes_spin = QSpinBox()
         self.partes_spin.setRange(10, 5000)
@@ -183,12 +197,15 @@ class ExportOptionsGroup(QGroupBox):
         fila.insertWidget(fila.indexOf(self.separation_button) + 1, boton)
 
     def _checkable_action(
-        self, text: str, tooltip: str, checked: bool = False
+        self, opcion: str, text: str, tooltip: str, checked: bool = False
     ):
         action = self.separation_menu.addAction(text)
         action.setCheckable(True)
         action.setChecked(checked)
         action.setToolTip(tooltip)
+        # El valor de arriba es con el que nace la instalación; a partir de
+        # la primera vez que alguien lo mueve manda lo que eligió.
+        recordar(SALIDA, opcion, action)
         return action
 
     def _guardar_csv_date_mode(self, _index: int) -> None:

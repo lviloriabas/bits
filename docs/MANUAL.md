@@ -249,6 +249,36 @@ El cambio es inmediato y vale para todas las ventanas abiertas a la vez, incluid
 
 La eleccion se recuerda: la proxima vez que abra el programa lo hara con el tema que dejo puesto. Se guarda en `interfaz.json`, junto al programa, asi que viaja con la copia portable y no depende del perfil de Windows.
 
+## Las opciones se quedan como las dejo
+
+Lo mismo vale para todo lo demas que se elige moviendo un control, no solo
+para el tema. Al volver a abrir el programa estan como las dejo la ultima
+vez:
+
+- En la ventana principal: la plantilla, «Verificar matriculas», lo que
+  muestra el menu «Campos» y las discrepancias marcadas en «Discrepancias a
+  detectar».
+- En «Salida»: el formato (un solo PDF o varios), la politica de fecha, lo
+  marcado en «Separacion» (matricula, mes, posibles discrepancias, errores)
+  y si la entrega se reparte en partes, con su cantidad de paginas.
+- En AirVault: «Completar batch», «Detener subida si se detectan
+  duplicados», «Compresion», «Mostrar solo la ejecucion seleccionada»,
+  «Revisar cada» con sus minutos, el maximo por batch y los pasos de
+  «Automatizacion».
+- En el visor de CSV: «Mostrar campos» y si la tabla abre con las columnas
+  importantes o con todas.
+- En Web Reports: que excepciones se traen y si se revisan las imagenes
+  antes de eliminar copias.
+
+No se recuerda lo que cambia en cada consulta y no es una preferencia: los
+PDF de entrada, la ejecucion elegida en el historial y el rango de fechas de
+Web Reports abren en blanco, como siempre.
+
+Todo esto vive en `interfaz.json` y `airvault.json`, junto al programa. Son
+archivos de cada instalacion y no se suben al repositorio, asi que marcar
+una casilla en esta maquina no estorba al `git pull` de la otra; lo que
+cambia en una no se lleva a la otra.
+
 ## Resolver problemas frecuentes
 
 | Problema                                          | Acción                                                                                                                                                  |

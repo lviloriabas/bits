@@ -42,8 +42,12 @@ desktop.ini
 # Preferencias de la copia portable (se generan al usar la aplicación)
 important_fields.json
 
-# Preferencias de la interfaz (de momento el tema, claro u oscuro). Es una
-# eleccion de quien usa la maquina, no del repositorio.
+# Preferencias de la interfaz: el tema, las casillas de salida, los filtros
+# de cada ventana, la plantilla con la que se trabaja y que discrepancias se
+# reclaman. Son elecciones de quien usa la maquina, no del repositorio, y el
+# archivo se reescribe solo en cuanto alguien toca un control: versionarlo
+# convertia cada casilla marcada en un cambio pendiente que bloqueaba el
+# pull en la otra maquina. Los valores de partida estan en el codigo.
 interfaz.json
 
 .claude/

@@ -47,6 +47,7 @@ from app.airvault.web_reports import (
     abrir_en_web_search,
 )
 from app.gui.cronometro import Cronometro, cronometro_qss
+from app.gui.memoria import WEB_REPORTS, recordar
 from app.gui.responsive import fit_to_screen
 from app.gui.theme import gestor_tema
 from app.gui.tokens import (
@@ -411,6 +412,11 @@ class WebReportsWindow(QDialog):
         self.filtro_combo.setToolTip(
             "Qué excepciones del reporte se traen a la tabla."
         )
+        # Quién revisa duplicadas y quién revisa mal indexadas suele ser la
+        # misma persona todos los días: el desplegable abre en lo último que
+        # pidió. El rango de fechas no se recuerda, que ese sí cambia en
+        # cada consulta.
+        recordar(WEB_REPORTS, "filtro", self.filtro_combo)
         grid.addWidget(self.filtro_combo, 0, 6)
         # El sitio que sobra se queda al final de la fila. Con el estiramiento
         # en la columna del desplegable, este crecía hasta el borde de la
@@ -509,6 +515,9 @@ class WebReportsWindow(QDialog):
         self.mostrar_previas = QCheckBox("Revisar imágenes antes de eliminar copias")
         self.mostrar_previas.setChecked(True)
         self.mostrar_previas.setToolTip("Carga las imágenes para comparar y ajustar qué copias se eliminan en cada bitácora.")
+        # Mirar las páginas antes de borrarlas cuesta cargarlas, así que
+        # quien trabaja sin ellas las apaga: apagadas se quedan.
+        recordar(WEB_REPORTS, "revisar_imagenes", self.mostrar_previas)
         self._cache_previa = {}
         cuerpo.addWidget(self.mostrar_previas)
         cuerpo.addLayout(self._fila_botones())

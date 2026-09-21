@@ -92,13 +92,15 @@ from __future__ import annotations
 
 import re
 from enum import Enum
-from typing import List, Optional, Tuple
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
 from pydantic import BaseModel, Field
 
 from app.models.schemas import FieldResult, PageResult, ValidationReport
 from app.templates.schema import Template
+from app.utils.preferencias_ui import guardar_opcion, leer_opcion
 from app.validation.grouping import log_number
 
 FIELD_PILOT = "pilot_signature"
@@ -133,6 +135,67 @@ CAMPOS_POR_TIPO = {
     TIPO_MANTENIMIENTO: (FIELD_PILOT, FIELD_TECH, FIELD_TECH_LICENSE),
     TIPO_CORRECCION: (FIELD_PILOT, FIELD_TECH, FIELD_TECH_LICENSE),
 }
+
+# Dónde se guarda lo que el menú deja elegido, y con qué nombre.
+#
+# Es una preferencia de quien revisa, no parte de la plantilla: dos personas
+# con la misma plantilla pueden querer reclamar cosas distintas, y mañana la
+# misma persona otra. Vivía dentro del JSON de la plantilla, que sí se
+# versiona, así que marcar una casilla dejaba el repositorio con una
+# modificación pendiente y el pull de la otra máquina chocaba contra ella.
+# La plantilla conserva el valor de partida, el que se reparte con el
+# programa; lo elegido se queda en el archivo local de la interfaz.
+#
+# La clave lleva el nombre del archivo de la plantilla y no su ruta: la
+# carpeta entera se copia a otro Windows, donde la ruta ya no existe.
+_SECCION_DISCREPANCIAS = "discrepancias"
+
+
+def nombre_de_plantilla(template: Template) -> str:
+    """Con qué nombre se guarda lo elegido para esa plantilla."""
+    if template.source_path is not None:
+        return Path(template.source_path).stem
+    return template.name or "plantilla"
+
+
+def discrepancias_elegidas(template: Template) -> Dict[str, List[str]]:
+    """Qué casillas reclama hoy cada tipo, con la plantilla sin ajuste.
+
+    Sin nada elegido y sin nada escrito en la plantilla se reclama todo,
+    que es como el programa viene de fábrica.
+    """
+    guardado = leer_opcion(
+        f"{_SECCION_DISCREPANCIAS}.{nombre_de_plantilla(template)}"
+    )
+    if not isinstance(guardado, dict):
+        guardado = template.discrepancy_types
+    return {
+        tipo: list(campos if guardado is None else guardado.get(tipo, campos))
+        for tipo, campos in CAMPOS_POR_TIPO.items()
+    }
+
+
+def guardar_discrepancias_elegidas(
+    template: Template, activas: Dict[str, List[str]]
+) -> bool:
+    """Anota la selección de esa plantilla sin tocar su archivo."""
+    return guardar_opcion(
+        f"{_SECCION_DISCREPANCIAS}.{nombre_de_plantilla(template)}",
+        {tipo: list(campos) for tipo, campos in activas.items()},
+    )
+
+
+def con_discrepancias_elegidas(template: Template) -> Template:
+    """La plantilla con lo elegido puesto, que es lo que filtra al clasificar.
+
+    Se aplica al cargarla para procesar (la interfaz y la línea de comandos)
+    y no al cargarla para editarla: el editor rehace el archivo, y meterle
+    la selección de esta máquina lo devolvería al repositorio.
+    """
+    return template.model_copy(
+        update={"discrepancy_types": discrepancias_elegidas(template)}
+    )
+
 
 # Cómo se nombra cada tipo en el menú.
 NOMBRE_TIPO = {

@@ -62,6 +62,7 @@ from app.utils.important_fields import (
 )
 from app.utils.logging import setup_logging
 from app.validation.date_corrector import BOOK_DATES_FILENAME
+from app.validation.discrepancias import con_discrepancias_elegidas
 
 
 def parse_args() -> argparse.Namespace:
@@ -290,7 +291,12 @@ def _print_pdf_result(pdf_path: Path, report, pages: PageRange) -> None:
 def _run(args: argparse.Namespace) -> int:
     from loguru import logger
 
-    template = TemplateManager().load(Path(args.template))
+    # Con la misma selección de discrepancias que la interfaz: es la misma
+    # instalación y el mismo archivo local, y las dos superficies tienen que
+    # entregar el mismo CSV sobre la misma plantilla.
+    template = con_discrepancias_elegidas(
+        TemplateManager().load(Path(args.template))
+    )
     config = AppConfig(
         dpi=args.dpi,
         deskew=not args.no_deskew,

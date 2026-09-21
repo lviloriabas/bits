@@ -85,6 +85,7 @@ from app.gui.eta import estimate_remaining_seconds, wall_ms_per_page
 from app.gui.export_options import ExportOptionsGroup
 from app.gui.field_selector import ImportantFieldsDialog
 from app.gui.fleet_editor import FLEET_FILENAME, FleetEditorDialog, FleetStore
+from app.gui.memoria import PRINCIPAL, recordar
 from app.gui.responsive import (
     COMPACT,
     COMPACT_HEIGHT,
@@ -778,6 +779,10 @@ class MainWindow(QMainWindow):
             application.aboutToQuit.connect(self._teardown)
         self._attach_logger()
         self._refresh_templates()
+        # Después de llenar el desplegable: antes no hay entre qué elegir.
+        # Se guarda el nombre de la plantilla y no su ruta, que la carpeta
+        # entera se copia a otra máquina y allí la ruta ya no existe.
+        recordar(PRINCIPAL, "plantilla", self.template_combo)
         self._restore_important_columns()
         self._install_zoom_shortcuts()
         # La hoja de la ventana se compone con su fragmento de densidad, así
@@ -1326,6 +1331,21 @@ class MainWindow(QMainWindow):
         self.fields_check.toggled.connect(
             self.important_fields_check.setEnabled
         )
+        # Qué se dibuja sobre la vista previa lo decide quien mira, y hasta
+        # ahora las dos casillas volvían apagadas en cada arranque. Se
+        # reponen con la señal bloqueada: no hay página rasterizada todavía,
+        # y el overlay se arma con estas casillas cuando la haya.
+        recordar(PRINCIPAL, "visualizar_campos", self.fields_check)
+        recordar(
+            PRINCIPAL,
+            "columnas_importantes",
+            self.important_fields_check,
+            # «Columnas importantes» solo se puede tocar con los campos a la
+            # vista, y esa dependencia la lleva la señal que va bloqueada.
+            al_restaurar=lambda: self.important_fields_check.setEnabled(
+                self.fields_check.isChecked()
+            ),
+        )
         important_fields_action = view_menu.addAction(
             "Elegir columnas importantes…"
         )
@@ -1357,6 +1377,10 @@ class MainWindow(QMainWindow):
             "Corrige la matrícula leída contra la lista de aviones: la que no "
             "esté se cambia por la más parecida y queda marcada para revisar."
         )
+        # Marcada de fábrica, porque corregir contra la flota es lo normal;
+        # quien la apaga (una entrega de aviones que todavía no están en la
+        # lista) la encuentra apagada en el siguiente arranque.
+        recordar(PRINCIPAL, "verificar_matriculas", self.fleet_check)
         tools_row.addWidget(self.fleet_check)
         fleet_button = QPushButton("Editar flota…")
         fleet_button.setToolTip(
@@ -3027,16 +3051,12 @@ class MainWindow(QMainWindow):
 
     def _seleccion_discrepancias(self, template: Template) -> dict[str, list[str]]:
         """Qué casillas reclama hoy cada tipo, con la plantilla sin ajuste."""
-        from app.validation.discrepancias import CAMPOS_POR_TIPO
+        from app.validation.discrepancias import discrepancias_elegidas
 
-        guardado = template.discrepancy_types
-        return {
-            tipo: list(campos if guardado is None else guardado.get(tipo, campos))
-            for tipo, campos in CAMPOS_POR_TIPO.items()
-        }
+        return discrepancias_elegidas(template)
 
     def _llenar_menu_discrepancias(self) -> None:
-        """La seleccion queda en la plantilla, portable y editable como texto."""
+        """Dibuja las casillas con lo elegido; abrir el menu no guarda nada."""
         from app.validation.discrepancias import (
             CAMPOS_POR_TIPO,
             NOMBRE_CAMPO,
@@ -3110,16 +3130,24 @@ class MainWindow(QMainWindow):
     def _guardar_discrepancias(
         self, template: Template, activas: dict[str, list[str]]
     ) -> None:
-        if template.source_path is None:
+        """Anota lo elegido para esta plantilla, en el archivo de la interfaz.
+
+        No se escribe en el JSON de la plantilla: ese se versiona, y marcar
+        una casilla dejaba el repositorio con un cambio pendiente que
+        chocaba con el pull de la otra máquina.
+        """
+        from app.validation.discrepancias import guardar_discrepancias_elegidas
+
+        if not guardar_discrepancias_elegidas(template, activas):
+            QMessageBox.warning(
+                self,
+                "Discrepancias a detectar",
+                "No se pudo guardar la selección junto al programa.",
+            )
             return
-        actualizada = template.model_copy(
-            update={"discrepancy_types": activas}
-        )
-        try:
-            TemplateManager().save(actualizada, template.source_path)
-        except OSError as exc:
-            QMessageBox.warning(self, "Discrepancias a detectar", str(exc))
-            return
+        # La plantilla en memoria lleva dentro la selección anterior y el
+        # archivo no cambió de fecha, así que sin soltarla la próxima
+        # lectura devolvería la de antes.
         self._template_cache = None
         self._sincronizar_menu_discrepancias(activas)
         self.statusBar().showMessage("Discrepancias guardadas para el próximo procesamiento")
@@ -3149,7 +3177,14 @@ class MainWindow(QMainWindow):
                 and cached[1] == modified
             ):
                 return cached[2]
-            template = TemplateManager().load(path)
+            # Con las discrepancias elegidas ya puestas: es la misma
+            # plantilla que recibirán los hilos que procesan, así que lo
+            # que la tabla marca en pantalla y lo que sale en el CSV dicen
+            # lo mismo. El editor carga la suya aparte, en otro proceso, y
+            # por eso sigue rehaciendo el archivo sin esta selección.
+            from app.validation.discrepancias import con_discrepancias_elegidas
+
+            template = con_discrepancias_elegidas(TemplateManager().load(path))
             self._template_cache = (path, modified, template)
             return template
         except Exception as exc:  # noqa: BLE001

@@ -50,6 +50,7 @@ from app.gui.automatizacion import (COMPLETAR, MenuAutomatizacion,
                                     OpcionesAutomatizacion)
 from app.gui.csv_utils import (TEXTO_ELEGIR_EJECUCION, find_csv_files,
                                find_run_dirs, run_read_day)
+from app.gui.memoria import AIRVAULT, recordar
 from app.gui.responsive import available_area, fit_to_screen
 from app.gui.text_copy import CopyableListWidget
 from app.gui.theme import gestor_tema
@@ -1191,6 +1192,11 @@ class AirVaultWindow(QDialog):
             "Limita la cola y sus acciones a los batches de la ejecución seleccionada."
         )
         self.solo_ejecucion_check.toggled.connect(self._al_filtrar_ejecucion)
+        # Trabajar sobre una sola ejecución o sobre toda la cola es una
+        # manera de trabajar, no algo de esta sesión. Se repone con la señal
+        # bloqueada porque la cola todavía no existe; al llenarla se pinta
+        # ya filtrada.
+        recordar(AIRVAULT, "solo_ejecucion", self.solo_ejecucion_check)
         cuerpo.addWidget(self.solo_ejecucion_check)
         cuerpo.addLayout(self._cabecera_de_lotes())
         cuerpo.addWidget(self._lotes(), 1)
@@ -1339,6 +1345,9 @@ class AirVaultWindow(QDialog):
             "Envía los PDF a AirVault a 200 DPI. No cambia los PDF "
             "exportados."
         )
+        # Depende de la conexión de cada instalación, no de la entrega: en
+        # un enlace lento se deja marcada y así tiene que volver a abrir.
+        recordar(AIRVAULT, "compresion", self.compresion_check)
         grid.addWidget(self.compresion_check, 1, 2)
 
         # La misma elección que en la ventana principal, vista desde aquí:
@@ -2532,6 +2541,7 @@ class AirVaultWindow(QDialog):
             "Apagado, hay que pulsar «Revisar en AirVault»."
         )
         self.auto_check.toggled.connect(self._ajustar_vigilancia)
+        recordar(AIRVAULT, "revisar_cada", self.auto_check)
         fila.addWidget(self.auto_check)
 
         self.minutos_spin = QSpinBox()
@@ -2543,6 +2553,11 @@ class AirVaultWindow(QDialog):
             "apura la cola."
         )
         self.minutos_spin.valueChanged.connect(self._ajustar_vigilancia)
+        # Las dos se reponen con la señal bloqueada: arrancar el reloj aquí
+        # no serviría de nada, porque todavía no hay batches que esperar.
+        # «_ajustar_vigilancia» corre en cuanto la cola se llena y lee de
+        # estos dos controles cada cuánto preguntar.
+        recordar(AIRVAULT, "minutos", self.minutos_spin)
         self.minutos_control = SpinBoxWithButtons(self.minutos_spin)
         fila.addWidget(self.minutos_control)
 

@@ -59,6 +59,45 @@ def _preferencias_portables_intactas():
         ruta.write_text(previo, encoding="utf-8")
 
 
+@pytest.fixture(scope="session", autouse=True)
+def opciones_de_interfaz(tmp_path_factory):
+    """Manda ``interfaz.json`` a un archivo de la sesion, no al de verdad.
+
+    Casi cada control de la interfaz anota lo que se elige (ver
+    :mod:`app.gui.memoria`), asi que una prueba que marca una casilla le
+    cambiaria a quien ejecute el programa despues con que valores abre. Se
+    devuelve la ruta para las pruebas que quieran leer lo escrito.
+    """
+    from pathlib import Path
+
+    import app.utils.preferencias_ui as preferencias
+
+    archivo = (
+        tmp_path_factory.mktemp("interfaz") / preferencias.INTERFAZ_FILENAME
+    )
+    parche = pytest.MonkeyPatch()
+    parche.setattr(
+        preferencias,
+        "ruta_preferencias",
+        lambda raiz=None: (
+            Path(raiz) / preferencias.INTERFAZ_FILENAME if raiz else archivo
+        ),
+    )
+    yield archivo
+    parche.undo()
+
+
+@pytest.fixture(autouse=True)
+def _opciones_sin_heredar(opciones_de_interfaz):
+    """Cada prueba empieza sin preferencias, con los valores de fabrica.
+
+    Sin esto, una prueba que apaga una casilla decide con que valor nace la
+    ventana de la siguiente, y cual falla depende del orden en que corran.
+    """
+    opciones_de_interfaz.unlink(missing_ok=True)
+    yield
+
+
 @pytest.fixture(scope="session")
 def app():
     """La ``QApplication`` unica de la sesion.

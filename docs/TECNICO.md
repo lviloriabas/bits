@@ -233,6 +233,16 @@ del contenido. Solo se actualizan los marcos de ventanas visibles: pedir
 
 El tema elegido se guarda en `interfaz.json` (`app/utils/preferencias_ui.py`), junto al programa y no en el registro de Windows, para que viaje con la copia portable.
 
+### Memoria de las opciones
+
+Cada casilla, desplegable o contador que alguien mueve queda anotado en ese mismo `interfaz.json`. Lo ata `app/gui/memoria.py` con una sola llamada al lado del control: `recordar(seccion, nombre, control)` lo deja en lo último guardado y conecta su señal para anotar cada cambio. El valor de partida es el que el control trae escrito en el código, así que quien nunca tocó una opción la encuentra como estaba y no se escribe nada hasta que la mueva. Restaurar se hace con la señal bloqueada: abrir una ventana no puede disparar lo que el control hace al moverse.
+
+Las claves llevan delante la ventana (`principal`, `salida`, `airvault`, `visor`, `web_reports`) para que dos ventanas con la misma casilla no se pisen. Los desplegables se guardan por el texto de la opción elegida y no por su posición, que cambia en cuanto se agrega o reordena una opción.
+
+Las opciones del indexado que ya tenían memoria (`Completar batch`, los pasos del proceso automático, la política de duplicados, las páginas por batch y la política de fecha del CSV) siguen en `airvault.json`: mismo tipo de archivo local, y moverlas ahora le borraría a cada instalación lo que ya tiene elegido.
+
+Nada de esto se versiona. Los dos archivos se reescriben solos en cuanto alguien toca un control, así que tenerlos en el repositorio convertía cada casilla marcada en una modificación pendiente y bloqueaba el `git pull` en la otra máquina. Por el mismo motivo, la selección de «Discrepancias a detectar» dejó de escribirse dentro del JSON de la plantilla (que sí se versiona) y pasó a `interfaz.json`, con una entrada por plantilla; el archivo de la plantilla conserva el valor de partida y `con_discrepancias_elegidas` (`app/validation/discrepancias.py`) le pone lo elegido al cargarla para procesar, tanto desde la interfaz como desde `run_cli.py`.
+
 ## Configuración y diagnóstico
 
 | Ubicación | Contenido |
@@ -240,7 +250,7 @@ El tema elegido se guarda en `interfaz.json` (`app/utils/preferencias_ui.py`), j
 | `template/` | Plantillas y referencias del formulario. |
 | `fleet.json` | Matrículas válidas para OCR. |
 | `important_fields.json` | Columnas importantes por plantilla. |
-| `interfaz.json` | Preferencias de la interfaz; de momento el tema, claro u oscuro. |
+| `interfaz.json` | Preferencias de la interfaz: tema, casillas de salida, filtros de cada ventana, plantilla elegida y discrepancias a detectar por plantilla. No se versiona. |
 | `airvault.json` | Configuración y preferencias de AirVault; ejemplo en `airvault.example.json`. |
 | `airvault_flota.json` | Correspondencias de aeronave, flota y arrendador. |
 | `book_*.json` | Memorias de libros y turno de comprobación. |
