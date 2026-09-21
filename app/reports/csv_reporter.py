@@ -55,11 +55,9 @@ class CsvReporter:
       escribir el reporte; si esa clasificación no se ejecutó, la columna
       queda en ``false``. Es la columna que le pone AUDIT IN PROGRESS a la
       página al indexarla, así que las lecturas inciertas no entran.
-    - ``disc_reason``: qué le falta a la página, en una frase corta
-      («Faltan firma de técnico y licencia de técnico»). Solo se escribe
-      cuando ``disc`` es ``true``: es la misma decisión contada en palabras,
-      para no tener que abrir el reporte de discrepancias para saber qué
-      reclamar. Sale de ``page.discrepancy_note``, que fija la misma pasada
+    - ``disc_reason``: razón formal que se seleccionará en AirVault, sin el
+      prefijo ``DISCREPANCY NOTE:``. Solo se escribe cuando ``disc`` es
+      ``true``. Sale de ``page.discrepancy_note``, que fija la misma pasada
       de ``clasificar_lote``.
     - ``date``: fecha normalizada (YYYY/MM/dd) combinando day/month/year.
     - ``time_ms``: tiempo de procesamiento de la página, repartido sobre el

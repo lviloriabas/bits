@@ -70,11 +70,9 @@ class PageResult(BaseModel):
     reticula_rayas: int = 0
     processing_ms: float = 0.0
     discrepancy: bool = False
-    # Qué discrepancia se detectó, en una frase corta y en castellano
-    # («Faltan firma de técnico y licencia de técnico»). La escribe
-    # ``clasificar_lote`` junto con ``discrepancy``, y solo cuando esa
-    # bandera queda en True: es el texto de la columna ``disc_reason`` del
-    # CSV, que está vacía siempre que no haya nada que reclamar.
+    # Razón de AirVault sin el prefijo ``DISCREPANCY NOTE:``. La escribe
+    # ``clasificar_lote`` junto con ``discrepancy`` y solo cuando esa bandera
+    # queda en True: es el texto de la columna ``disc_reason`` del CSV.
     discrepancy_note: str = ""
     discrepancy_fields: List[str] = Field(default_factory=list)
     # Evidencia de la palabra grande, con caja normalizada a la pagina.

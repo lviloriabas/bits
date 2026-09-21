@@ -2,7 +2,12 @@
 
 import pytest
 
-from app.airvault.ecn import CAMPOS_ECN, RAZON_POR_CAMPO, conservar_razones, razones_ecn
+from app.airvault.ecn import (
+    CAMPOS_ECN,
+    RAZON_POR_CAMPO,
+    conservar_razones,
+    razones_ecn,
+)
 from app.airvault.indexer import Indexador, verificar_revision
 from app.airvault.ecn import campos_del_resumen
 from app.airvault.mapping import registros_desde_entrega, valores_de_indice
@@ -11,12 +16,24 @@ from tests.test_airvault_indexer import manifiesto, PICKLIST
 
 
 def test_capitan_comparte_categoria_y_tecnico_prioriza_firma():
-    assert len(razones_ecn(["captain_signature", "captain_license"])) == 1
+    assert razones_ecn(["captain_signature", "captain_license"]) == [
+        "DISCREPANCY NOTE: MISSING SIGNATURE AND/OR LICENSE NUMBER OF THE CAPTAIN",
+    ]
     assert razones_ecn(["technician_signature", "technician_license"]) == [
         "DISCREPANCY NOTE: MISSING TECHNICIAN SIGNATURE",
     ]
     assert razones_ecn(["technician_license"]) == ["DISCREPANCY NOTE: MISSING LICENSE NUMBER"]
     assert razones_ecn(["correction_block", "desconocido"]) == []
+
+
+@pytest.mark.parametrize("razon", [
+    "MISSING SIGNATURE AND/OR LICENSE NUMBER OF THE CAPTAIN",
+    "MISSING SIGNATURE AND/OR LICENSE NUMBER OF THE PILOT",
+    "MISSING TECHNICIAN SIGNATURE",
+    "MISSING LICENSE NUMBER",
+])
+def test_airvault_recibe_la_razon_del_csv_con_su_prefijo(razon):
+    assert razones_ecn([], razon) == [f"DISCREPANCY NOTE: {razon}"]
 
 
 @pytest.mark.parametrize("faltantes,esperada", [
@@ -71,3 +88,24 @@ def test_entrega_anterior_conserva_razones_del_resumen_sin_cambiar_csv():
     assert campos_del_resumen("Corrección escrita: falta licencia de técnico") == ["technician_license"]
     assert campos_del_resumen("No falta firma de piloto") == []
     assert campos_del_resumen("Falta firma de piloto; incierta") == []
+
+
+def test_la_razon_guardada_distingue_piloto_de_tecnico():
+    filas = [{
+        "file": "x.pdf",
+        "page": "1",
+        "disc": "true",
+        "disc_reason": "MISSING TECHNICIAN SIGNATURE",
+    }]
+    indice = [{
+        "archivo": "x.pdf",
+        "pagina": 1,
+        "discrepancy_fields": ["pilot_signature"],
+        "disc_reason": "MISSING TECHNICIAN SIGNATURE",
+    }]
+    registro = registros_desde_entrega(filas, indice)[0]
+
+    assert registro.discrepancy_fields == ["pilot_signature"]
+    assert valores_de_indice(registro, "Log Page", "PUBLISHED")[9692] == (
+        "DISCREPANCY NOTE: MISSING TECHNICIAN SIGNATURE"
+    )

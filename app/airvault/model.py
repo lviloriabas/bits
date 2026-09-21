@@ -89,6 +89,7 @@ class Registro(BaseModel):
     duplicado: bool = False
     discrepancia: bool = False
     discrepancy_fields: List[str] = Field(default_factory=list)
+    discrepancy_reason: str = ""
     # True conserva una causa de revision independiente de los faltantes
     # (firmas, fecha dudosa o contradiccion del libro). False permite validar
     # cuando el indice ya esta completo. None conserva la revision de las

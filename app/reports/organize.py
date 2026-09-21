@@ -763,6 +763,8 @@ def _paginas_json(secuencia: Sequence[EntradaPdf]) -> List[dict]:
             "pagina": entrada.ref.page.page_number,
             **({"discrepancy_fields": entrada.ref.page.discrepancy_fields}
                if entrada.ref.page.discrepancy_fields else {}),
+            **({"disc_reason": entrada.ref.page.discrepancy_note}
+               if entrada.ref.page.discrepancy_note else {}),
             **(
                 {"revision_pendiente": bool(
                     entrada.ref.page.discrepancy

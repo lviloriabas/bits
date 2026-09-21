@@ -245,6 +245,29 @@ def test_el_indice_marca_solo_la_pagina_con_fecha_dudosa(tmp_path):
     ]
 
 
+def test_el_indice_conserva_la_razon_exacta_de_la_discrepancia(tmp_path):
+    pagina = _page(1, "2147337", "HP-1534CMP")
+    pagina.discrepancy = True
+    pagina.discrepancy_fields = ["pilot_signature"]
+    pagina.discrepancy_note = "MISSING TECHNICIAN SIGNATURE"
+    reporte = _reporte(pagina)
+
+    destino = escribir_indice_paginas(
+        [ArchivoDeEntrega(
+            Path("ejecucion REVISAR.pdf"),
+            secuencia_de_revisar([reporte]),
+            revisar=True,
+        )],
+        tmp_path / "corrida_paginas.json",
+    )
+    paginas = json.loads(
+        Path(destino).read_text(encoding="utf-8")
+    )["partes"][0]["paginas"]
+
+    assert paginas[1]["discrepancy_fields"] == ["pilot_signature"]
+    assert paginas[1]["disc_reason"] == "MISSING TECHNICIAN SIGNATURE"
+
+
 def test_el_indice_usa_el_nombre_con_el_que_sale_en_el_csv(tmp_path):
     """El PDF apartado se numera; el CSV conserva el nombre original.
 

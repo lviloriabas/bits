@@ -1117,6 +1117,11 @@ class Trabajo:
                 cambios["discrepancy_fields"] = list(dict.fromkeys(
                     anterior.discrepancy_fields + reconstruido.discrepancy_fields
                 ))
+                if (
+                    not anterior.discrepancy_reason
+                    and reconstruido.discrepancy_reason
+                ):
+                    cambios["discrepancy_reason"] = reconstruido.discrepancy_reason
                 reconstruido = anterior.model_copy(update=cambios)
             reconstruido.pagina_batch = anterior.pagina_batch
             reconstruido.estado = (

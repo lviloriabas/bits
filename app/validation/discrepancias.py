@@ -82,10 +82,9 @@ interruptor (``tipo_de_menu`` devuelve None) y se reportan como siempre.
 Las discrepancias se ordenan globalmente por número de bitácora
 (``log_number``) ascendente, sin subdividirlas por matrícula o mes.
 
-Cada discrepancia confirmada resume en una frase qué le falta a la página
-(``Discrepancia.resumen``). Es lo que va a la columna ``disc_reason`` del
-CSV, así que se escribe corto y en el idioma del que revisa: «Faltan firma
-de técnico y licencia de técnico», no una lista de identificadores.
+Cada discrepancia confirmada guarda la razón formal que se seleccionará en
+AirVault (``Discrepancia.resumen``). Es lo que va a la columna
+``disc_reason`` del CSV, sin el prefijo ``DISCREPANCY NOTE:``.
 """
 
 from __future__ import annotations
@@ -214,24 +213,6 @@ NOMBRE_CAMPO = {
     FIELD_TECH_LICENSE: "Licencia de técnico",
 }
 
-# Cómo se nombra cada casilla dentro del resumen de una línea. Van en
-# minúscula porque se encadenan detrás de «Falta(n)».
-_NOMBRE_CORTO = {
-    FIELD_PILOT: "firma de piloto",
-    FIELD_CAPTAIN: "firma de capitán",
-    FIELD_CAPTAIN_LICENSE: "licencia de capitán",
-    FIELD_TECH: "firma de técnico",
-    FIELD_TECH_LICENSE: "licencia de técnico",
-}
-
-
-def _enumerar(nombres: List[str]) -> str:
-    """Une los nombres en castellano: «a», «a y b», «a, b y c»."""
-    if len(nombres) <= 1:
-        return "".join(nombres)
-    return f"{', '.join(nombres[:-1])} y {nombres[-1]}"
-
-
 class TipoEntrada(str, Enum):
     """Tipo de entrada de la bitácora."""
 
@@ -276,7 +257,7 @@ class Discrepancia(BaseModel):
         return [campo.razon for campo in self.campos]
 
     def resumen(self) -> str:
-        """Una línea con lo que le falta a la página, para la columna del CSV.
+        """Razón de AirVault sin prefijo, para la columna ``disc_reason``.
 
         Solo nombra las ausencias confirmadas: una lectura incierta no es una
         falta y no se acusa (la misma regla que deja ``page.discrepancy`` en
@@ -284,18 +265,14 @@ class Discrepancia(BaseModel):
         es lo que el CSV escribe cuando no hay nada que reportar.
         """
         faltan = [
-            _NOMBRE_CORTO[campo.field_id]
+            campo.field_id
             for campo in self.campos
             if campo.categoria is Categoria.MISSING
-            and campo.field_id in _NOMBRE_CORTO
         ]
         if not faltan:
             return ""
-        verbo = "Falta" if len(faltan) == 1 else "Faltan"
-        frase = f"{verbo} {_enumerar(faltan)}"
-        if self.por_correccion:
-            return f"Corrección escrita: {frase[0].lower()}{frase[1:]}"
-        return frase
+        from app.airvault.ecn import razon_de_discrepancia
+        return razon_de_discrepancia(self.tipo.value, faltan)
 
 
 def _campo(page: PageResult, field_id: str) -> Optional[FieldResult]:

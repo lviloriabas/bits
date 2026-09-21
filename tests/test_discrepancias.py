@@ -530,9 +530,8 @@ class TestColumnaDiscEnElCsv(unittest.TestCase):
 
         self.assertEqual([row["disc_reason"] for row in rows], [
             "",
-            "Faltan firma de capitán y licencia de capitán",
-            "Corrección escrita: faltan firma de piloto, firma de técnico "
-            "y licencia de técnico",
+            "MISSING SIGNATURE AND/OR LICENSE NUMBER OF THE CAPTAIN",
+            "MISSING TECHNICIAN SIGNATURE",
         ])
 
     def test_la_columna_va_pegada_a_disc(self):
@@ -626,28 +625,43 @@ class TestResumenDeLaDiscrepancia(unittest.TestCase):
         entradas = clasificar_lote([_reporte(pagina)], TEMPLATE)
         return entradas[0].resumen()
 
-    def test_una_sola_falta_va_en_singular(self):
+    def test_firma_de_capitan_usa_la_razon_formal_de_capitan(self):
         pagina = _vuelo_ok(captain_signature=("false", AUSENTE))
-        self.assertEqual(self._resumen(pagina), "Falta firma de capitán")
-
-    def test_varias_faltas_van_en_plural_y_encadenadas(self):
-        pagina = _vuelo_ok(captain_signature=("false", AUSENTE),
-                           captain_license=("false", AUSENTE))
-        self.assertEqual(self._resumen(pagina),
-                         "Faltan firma de capitán y licencia de capitán")
-
-    def test_tres_faltas_llevan_coma_y_una_sola_conjuncion(self):
         self.assertEqual(
-            self._resumen(_corregida()),
-            "Corrección escrita: faltan firma de piloto, firma de técnico "
-            "y licencia de técnico",
+            self._resumen(pagina),
+            "MISSING SIGNATURE AND/OR LICENSE NUMBER OF THE CAPTAIN",
         )
 
-    def test_el_recuadro_escrito_se_nombra_en_el_resumen(self):
+    def test_firma_y_licencia_de_capitan_comparten_la_misma_razon(self):
+        pagina = _vuelo_ok(captain_signature=("false", AUSENTE),
+                           captain_license=("false", AUSENTE))
+        self.assertEqual(
+            self._resumen(pagina),
+            "MISSING SIGNATURE AND/OR LICENSE NUMBER OF THE CAPTAIN",
+        )
+
+    def test_firmas_de_mantenimiento_usan_la_razon_de_tecnico(self):
+        self.assertEqual(
+            self._resumen(_corregida()),
+            "MISSING TECHNICIAN SIGNATURE",
+        )
+
+    def test_licencia_de_tecnico_usa_la_razon_de_licencia(self):
         pagina = _corregida(pilot_signature=("true", PRESENTE),
                             technician_signature=("true", PRESENTE))
-        self.assertEqual(self._resumen(pagina),
-                         "Corrección escrita: falta licencia de técnico")
+        self.assertEqual(self._resumen(pagina), "MISSING LICENSE NUMBER")
+
+    def test_firma_de_piloto_distingue_vuelo_de_mantenimiento(self):
+        vuelo = _vuelo_ok(pilot_signature=("false", AUSENTE))
+        mantenimiento = _mant_ok(pilot_signature=("false", AUSENTE))
+        self.assertEqual(
+            self._resumen(vuelo),
+            "MISSING SIGNATURE AND/OR LICENSE NUMBER OF THE PILOT",
+        )
+        self.assertEqual(
+            self._resumen(mantenimiento),
+            "MISSING TECHNICIAN SIGNATURE",
+        )
 
     def test_una_lectura_incierta_no_deja_resumen(self):
         # UNCERTAIN no acusa, así que no hay nada que escribir en el CSV.
@@ -665,7 +679,10 @@ class TestResumenDeLaDiscrepancia(unittest.TestCase):
         clasificar_lote([_reporte(limpia, incierta, marcada)], TEMPLATE)
         self.assertEqual(limpia.discrepancy_note, "")
         self.assertEqual(incierta.discrepancy_note, "")
-        self.assertEqual(marcada.discrepancy_note, "Falta firma de capitán")
+        self.assertEqual(
+            marcada.discrepancy_note,
+            "MISSING SIGNATURE AND/OR LICENSE NUMBER OF THE CAPTAIN",
+        )
 
 
 if __name__ == "__main__":
