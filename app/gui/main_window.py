@@ -5252,6 +5252,11 @@ class MainWindow(QMainWindow):
         for worker in self._running_workers():
             worker.requestInterruption()
             worker.wait(10000)
+        # AirVault y Web Reports comparten un Edge durante toda la sesion.
+        # Ya sin hilos que lo usen, se cierra una sola vez y sin recorrer sus
+        # pestanas individualmente.
+        from app.airvault.navegador import cerrar_navegadores_al_salir
+        cerrar_navegadores_al_salir()
 
 
 def _color_for(status: Status):

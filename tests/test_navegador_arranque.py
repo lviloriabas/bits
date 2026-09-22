@@ -361,6 +361,39 @@ def _anotacion(perfil):
     return Path(perfil) / navegador._ANOTACION_DEL_PUERTO
 
 
+def test_la_gui_conserva_edge_y_cierra_todo_junto_al_salir(
+        monkeypatch, tmp_path):
+    """Ningun trabajo retira las paginas que otro hilo puede estar usando."""
+    navegador.cerrar_navegadores_al_salir()
+    vivos = {}
+    lanzados, ws, _matados = _perfil_con(monkeypatch, vivos, tmp_path)
+    navegador.mantener_navegadores_hasta_el_cierre()
+    sesion = navegador.SesionDeNavegador(
+        tmp_path, edge=Path("msedge.exe"), visible=False
+    )
+
+    try:
+        sesion.abrir("https://airvault/sso")
+        sesion.abrir_pestana("https://airvault/reporte")
+        puerto = sesion.puerto
+        sesion.cerrar()
+
+        assert puerto in vivos
+        assert "Browser.close" not in ws.pedidos
+        assert "Target.closeTarget" not in ws.pedidos
+        assert "--start-minimized" in lanzados[0]
+        assert "--headless=new" not in lanzados[0]
+
+        navegador.cerrar_navegadores_al_salir()
+
+        assert puerto not in vivos
+        assert ws.pedidos.count("Browser.close") == 1
+        assert "Target.closeTarget" not in ws.pedidos
+        assert not _anotacion(tmp_path).exists()
+    finally:
+        navegador.cerrar_navegadores_al_salir()
+
+
 def test_se_habla_con_el_edge_que_ya_tenia_tomado_el_perfil(monkeypatch,
                                                             tmp_path):
     """Lanzar otro no serviria: le pasaria la orden y se iria sin abrir nada.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date
 
+import pytest
 from PySide6.QtCore import QDate
 
 from app.airvault.config import AirVaultConfig
@@ -11,6 +12,7 @@ from app.airvault.web_reports import (
     TIPO_DUPLICADA,
     TIPO_MAL_INDEXADA,
     ClienteLogPageAudit,
+    _Pagina,
     parsear_filas,
     url_busqueda_log,
 )
@@ -36,6 +38,31 @@ def _fila(
         {"t": ""},
         {"t": detalle},
     ]
+
+
+def test_la_gui_suelta_el_socket_sin_cerrar_la_pestana(monkeypatch):
+    cerrados: list[str] = []
+
+    class _SocketFalso:
+        def cerrar(self):
+            cerrados.append("socket")
+
+    pagina = object.__new__(_Pagina)
+    pagina.ws = _SocketFalso()
+    pagina._version = {
+        "webSocketDebuggerUrl": "ws://127.0.0.1:4321/devtools/browser/x"
+    }
+    pagina._target_id = "reporte"
+    monkeypatch.setattr(web_reports, "cierre_diferido_activo", lambda: True)
+    monkeypatch.setattr(
+        web_reports,
+        "_WebSocket",
+        lambda *_a, **_k: pytest.fail("no debe cerrar la pestana"),
+    )
+
+    pagina.cerrar()
+
+    assert cerrados == ["socket"]
 
 
 def test_parsea_duplicadas_y_mal_indexadas() -> None:

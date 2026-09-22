@@ -32,6 +32,7 @@ def main() -> int:
     try:
         from PySide6.QtCore import QTimer
         from PySide6.QtWidgets import QApplication
+        from app.airvault.navegador import mantener_navegadores_hasta_el_cierre
         from app.gui.main_window import MainWindow
         from app.gui.text_copy import install_text_copy_support
         from app.gui.theme import install_application_theme
@@ -55,6 +56,7 @@ def main() -> int:
     install_text_copy_support(app)
     app_icon = QIcon(str(icon))
     app.setWindowIcon(app_icon)
+    mantener_navegadores_hasta_el_cierre()
     window = MainWindow()
     window.setWindowIcon(app_icon)
     window.show()

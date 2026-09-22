@@ -23,6 +23,7 @@ from app.airvault.config import AirVaultConfig
 from app.airvault.navegador import (
     PERFIL_POR_DEFECTO,
     SesionDeNavegador,
+    cierre_diferido_activo,
     _del_dominio,
     _WebSocket,
 )
@@ -364,6 +365,8 @@ class _Pagina:
         if self.ws is not None:
             self.ws.cerrar()
             self.ws = None
+        if cierre_diferido_activo():
+            return
         try:
             navegador = _WebSocket(
                 self._version["webSocketDebuggerUrl"], timeout=5.0
