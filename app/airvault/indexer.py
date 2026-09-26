@@ -48,11 +48,14 @@ from app.airvault.session import (
     ErrorDeAirVault,
     ErrorDeConexion,
     ErrorDeSesion,
+    SesionCancelada,
 )
 
 # Fallos que no son de una pagina sino del camino entero: insistir con la
 # siguiente solo sirve para marcar cuatrocientas paginas con el mismo error.
-FALLOS_DE_CAMINO = (ErrorDeSesion, ErrorDeConexion)
+# La cancelacion va aqui tambien: sin ella, cancelar a mitad de una lectura
+# anotaba cada pagina restante como ilegible antes de parar.
+FALLOS_DE_CAMINO = (ErrorDeSesion, ErrorDeConexion, SesionCancelada)
 
 # Estos avisos describen calidad incompleta, no una correspondencia rota: se
 # envia lo disponible y AirVault deja la pagina pendiente de revision.
@@ -67,6 +70,12 @@ AVISOS_DE_REVISION = {
     "matricula_desconocida",
     "log_duplicado",
 }
+
+# Pausas antes de volver a escribir una pagina que AirVault no acepto o no
+# conservo. Los datos del batch automatico ya los valido el proceso, asi que
+# si el guardado falla es por AirVault y se repite esa pagina antes de darla
+# por fallida y seguir con la siguiente.
+ESPERAS_REINTENTO_PAGINA = (3.0, 10.0)
 
 # Segundos entre relecturas de las paginas que no se confirmaron al
 # verificar lo recien escrito. Crecen porque lo que se espera es que AirVault
@@ -172,8 +181,10 @@ class Indexador:
         al_guardar: Optional[Callable[[Manifiesto], None]] = None,
         resolutor: Optional[ResolutorFlota] = None,
         permitir_log_distinto: bool = False,
+        dormir: Optional[Callable[[float], None]] = None,
     ):
         self.cliente = cliente
+        self._dormir = dormir
         self.manifiesto = manifiesto
         self.picklist = list(picklist_matriculas)
         self.sobrescribir = sobrescribir
@@ -512,15 +523,9 @@ class Indexador:
                     )
                     else ESTADO_VALIDO
                 )
-                self.cliente.guardar_pagina(
-                    plan.batch_id,
-                    entrada.pagina_batch,
-                    valores,
-                    estado,
-                    entrada.pagina_batch,
+                self._escribir_con_reintentos(
+                    plan.batch_id, entrada, valores, estado
                 )
-                if self.manifiesto.solo_subir:
-                    self._verificar_guardado(entrada, valores, estado)
             except FALLOS_DE_CAMINO as exc:
                 # Se cayo la sesion o la red. Seguir escribiendo marcaria
                 # como fallidas paginas que nadie llego a intentar; se para
@@ -613,6 +618,47 @@ class Indexador:
                     )
         return resultado
 
+    def _escribir_con_reintentos(
+        self, batch_id: str, entrada: PlanPagina,
+        valores: Mapping[int, str], estado: int,
+    ) -> None:
+        """Guarda una pagina y, si AirVault no la acepta, la vuelve a intentar.
+
+        Una caida de sesion o de red no se repite aqui: la sesion ya la
+        reintento y el camino entero esta cortado. Lo demas (un rechazo, un
+        error del servidor, un guardado que no se conservo) es de AirVault y
+        suele pasar solo.
+        """
+        pausas = (*ESPERAS_REINTENTO_PAGINA, None)
+        for pausa in pausas:
+            try:
+                self.cliente.guardar_pagina(
+                    batch_id, entrada.pagina_batch, valores, estado,
+                    entrada.pagina_batch,
+                )
+                if self.manifiesto.solo_subir:
+                    self._verificar_guardado(entrada, valores, estado)
+                return
+            except FALLOS_DE_CAMINO:
+                raise
+            except Exception as exc:  # noqa: BLE001 - se repite la pagina
+                if pausa is None:
+                    raise
+                logger.warning(
+                    "AirVault no acepto la pagina {} del batch {} ({}); se "
+                    "vuelve a intentar en {:.0f} s",
+                    entrada.pagina_batch, batch_id, exc, pausa,
+                )
+                self._esperar(pausa)
+
+    def _esperar(self, segundos: float) -> None:
+        """Pausa que se corta si alguien cancela."""
+        if self._dormir is not None:
+            self._dormir(segundos)
+            return
+        esperar = getattr(getattr(self.cliente, "sesion", None), "esperar", None)
+        (esperar if callable(esperar) else time.sleep)(segundos)
+
     def _verificar_guardado(
         self, entrada: PlanPagina, valores: Mapping[int, str], estado: int,
     ) -> None:
@@ -634,12 +680,18 @@ class Indexador:
 
 
 def campos_distintos(esperados: Mapping[int, str], recibidos: Mapping[int, str]) -> List[str]:
-    """Compara solo los campos enviados y admite fechas remotas equivalentes."""
+    """Compara solo los campos enviados y admite fechas remotas equivalentes.
+
+    No distingue mayusculas: AirVault guarda Doc Type como «LOG PAGE» aunque
+    se le mande «Log Page», tambien en las paginas que si conservaron el
+    resto del guardado. Compararlo tal cual daba por perdido el guardado de
+    todas las paginas de REVISAR y las volvia a escribir tres veces.
+    """
     distintos = []
     for campo, esperado in esperados.items():
         recibido = str(recibidos.get(campo, "") or "").strip()
         esperado = str(esperado or "").strip()
-        coincide = recibido == esperado
+        coincide = recibido.casefold() == esperado.casefold()
         if campo == CAMPO_END_DATE and esperado:
             fecha = fecha_desde_airvault(esperado)
             coincide = bool(fecha) and fecha_desde_airvault(recibido) == fecha

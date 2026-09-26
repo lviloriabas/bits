@@ -114,6 +114,20 @@ class TestAdaptsToTheMachine(unittest.TestCase):
         budget = workers * parallelism._WORKER_MEMORY_MB
         self.assertLessEqual(budget, 10000 - reserved_memory_mb())
 
+    def test_no_agota_el_margen_con_trece_gigabytes_libres(self):
+        """El caso real con 11 procesos paginaba modelos y se volvió lento."""
+        patches = _machine(threads=12, total_mb=32691, free_mb=12999)
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        workers, threads = recommended_parallelism(11)
+        self.assertEqual((workers, threads), (9, 1))
+        self.assertGreaterEqual(
+            12999 - reserved_memory_mb()
+            - workers * parallelism._WORKER_MEMORY_MB,
+            500,
+        )
+
     def test_the_same_machine_with_less_free_memory_uses_fewer_processes(self):
         counts = []
         for free in (12000, 10000, 8000, 6000):

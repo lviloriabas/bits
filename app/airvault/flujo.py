@@ -2720,10 +2720,17 @@ def subir_partes(
 
     Justo antes de cada carga se busca otra vez su nombre. Si apareció desde
     la primera pasada, se recupera el ID y no se crea un duplicado; si sigue
-    ausente, se sube y se continúa con la fila siguiente. Los callbacks capaces
-    de iniciar el indexado se conservan detrás de todas las cargas. Un fallo
-    queda aislado en su trabajo: no impide intentar las demas partes de la
+    ausente, se sube y se continúa con la fila siguiente. Un fallo queda
+    aislado en su trabajo: no impide intentar las demas partes de la
     ejecucion.
+
+    ``al_encontrar`` recibe cada batch en cuanto queda confirmado (ID, título,
+    páginas y contenido), sin esperar a las cargas que faltan. Lo que no se
+    hace en paralelo es subir: con dos archivos en vuelo AirVault los junta.
+    Indexar un batch ya confirmado no crea batches ni toca la cola, así que
+    puede avanzar mientras el siguiente archivo sube. Esperar a todas las
+    cargas dejaba una ejecución de ocho partes sin una sola página escrita
+    durante horas.
 
     Las cargas van de una en una y cada una se cierra antes de empezar la
     siguiente: se sube, se espera a que AirVault la publique y se le pone su
@@ -2757,6 +2764,17 @@ def subir_partes(
     _validar_sin_bitacoras_repetidas(trabajos, ejecucion)
     claves_forzadas = {str(clave) for clave in forzados or ()}
     por_subir = list(trabajos)
+    confirmados: set[str] = set()
+
+    def publicar(trabajo: "Trabajo") -> None:
+        """Entrega un batch confirmado al indexado, una sola vez."""
+        clave = str(trabajo.carpeta)
+        if clave in confirmados:
+            return
+        confirmados.add(clave)
+        if al_encontrar is not None:
+            al_encontrar(trabajo, trabajos)
+
     if cliente is not None:
         # Lo que se mando subir a mano ni se consulta: se sube. Preguntar
         # otra vez por un batch que la persona acaba de buscar en AirVault
@@ -2839,14 +2857,11 @@ def subir_partes(
                 0,
                 0,
             )
-        encontrados_antes = [
-            parte.trabajo for parte in estados if parte.batch_id
-        ]
-    else:
-        encontrados_antes = []
+        for parte in estados:
+            if parte.batch_id:
+                publicar(parte.trabajo)
 
     fallos: List[Tuple["Trabajo", str]] = []
-    hallados: List["Trabajo"] = []
     nombres_embebidos: dict[str, str] = {}
     for trabajo in por_subir:
         cabeza = _prefijo(trabajo)
@@ -2876,8 +2891,7 @@ def subir_partes(
                 continue
             if publicado is not None:
                 trabajo.anotar_lote(cliente, publicado)
-                if trabajo not in encontrados_antes:
-                    encontrados_antes.append(trabajo)
+                publicar(trabajo)
                 if avisar is not None:
                     avisar(
                         f"{cabeza}AirVault ya lo tiene publicado "
@@ -2905,8 +2919,8 @@ def subir_partes(
                 [estado_actual], cliente, avisar=avisar
             )[0]
             if estado_actual.estado != SIN_SUBIR:
-                if estado_actual.batch_id and trabajo not in encontrados_antes:
-                    encontrados_antes.append(trabajo)
+                if estado_actual.batch_id:
+                    publicar(trabajo)
                 if avisar is not None:
                     avisar(
                         f"{cabeza}Encontrado en AirVault; no se vuelve a subir",
@@ -2993,9 +3007,11 @@ def subir_partes(
         # Este batch se deja identificado y con su titulo antes de mandar
         # el siguiente. Dos cargas seguidas llegan juntas a la cola y se
         # publican como dos ``Empty-Batch`` que ninguna instantanea separa;
-        # esperar aqui deja una sola carga sin nombre a la vez.
+        # esperar aqui deja una sola carga sin nombre a la vez. En cuanto
+        # queda confirmado pasa al indexado, que avanza mientras sube el
+        # siguiente archivo.
         if trabajo.manifiesto.batch_id:
-            hallados.append(trabajo)
+            publicar(trabajo)
             continue
         if avisar is not None:
             avisar(f"{cabeza}Subido; buscando el batch en AirVault", 0, 0)
@@ -3023,25 +3039,21 @@ def subir_partes(
                     0,
                 )
             break
-        hallados.append(trabajo)
+        publicar(trabajo)
 
     if cliente is not None and len(por_subir) > 1:
         from app.airvault.mezclas import recuperar_mezclas
 
-        recuperados = recuperar_mezclas(trabajos, cliente, avisar)
-        if recuperados:
-            hallados = [t for t in hallados if t not in recuperados]
-            encontrados_antes = [t for t in encontrados_antes if t not in recuperados]
-            if al_finalizar_subidas is not None:
-                al_finalizar_subidas(trabajos)
-
-    # Esta es la barrera entre Quick Upload y cualquier indexado: los
-    # callbacks se difieren hasta haber intentado todos los archivos.
-    if al_encontrar is not None:
-        for trabajo in encontrados_antes:
-            al_encontrar(trabajo, trabajos)
-        for trabajo in hallados:
-            al_encontrar(trabajo, trabajos)
+        # Una mezcla se arma con cargas que no quedaron confirmadas. Las que
+        # ya pasaron al indexado tienen su propio batch y se estan
+        # escribiendo; no pueden entrar en la recuperacion.
+        recuperados = recuperar_mezclas(
+            [t for t in trabajos if str(t.carpeta) not in confirmados],
+            cliente,
+            avisar,
+        )
+        if recuperados and al_finalizar_subidas is not None:
+            al_finalizar_subidas(trabajos)
 
     return fallos
 
@@ -4768,6 +4780,29 @@ def comprobar_partes(
     ]
 
 
+def _nada_en_verde(trabajo: "Trabajo", cliente) -> bool:
+    """Si el mapa del batch dice que ninguna pagina esta en verde.
+
+    Es una sola peticion. Solo vale para el batch automatico: REVISAR da por
+    buenas paginas en amarillo, asi que ahi el mapa no basta. Si el mapa no
+    se puede leer se hace la lectura completa, como siempre.
+    """
+    from app.airvault.indexer import FALLOS_DE_CAMINO
+
+    batch_id = str(trabajo.manifiesto.batch_id or "").strip()
+    leer_mapa = getattr(cliente, "paginas_del_lote", None)
+    if trabajo.manifiesto.solo_subir or not batch_id or not callable(leer_mapa):
+        return False
+    try:
+        paginas = [p for p in leer_mapa(batch_id) if not p.borrada]
+    except FALLOS_DE_CAMINO:
+        raise
+    except Exception as exc:  # noqa: BLE001 - se cae a la lectura completa
+        logger.debug("No se pudo leer el mapa del batch {}: {}", batch_id, exc)
+        return False
+    return bool(paginas) and not any(p.valida for p in paginas)
+
+
 def detectar_indexados(
     estados: Sequence[EstadoParte],
     cliente,
@@ -4800,6 +4835,12 @@ def detectar_indexados(
                 0,
                 0,
             )
+        if _nada_en_verde(trabajo, cliente):
+            # Recien publicado ninguna pagina esta en verde y releerlas una
+            # por una solo confirmaria eso. Con varios batches de 500
+            # paginas eran miles de lecturas en cada revision periodica.
+            detectados.append(parte)
+            continue
         validas, total, _problemas = trabajo.verificar(cliente)
         completo = total > 0 and validas == total
         detectados.append(EstadoParte(

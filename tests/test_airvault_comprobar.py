@@ -303,6 +303,30 @@ def test_revisar_detecta_paginas_completadas_a_mano(tmp_path):
     assert trabajo.manifiesto.etapa_hecha("verificar")
 
 
+def test_un_batch_sin_paginas_en_verde_no_se_relee_pagina_por_pagina(
+    tmp_path,
+):
+    """El mapa del batch basta para saber que aun no hay nada indexado."""
+    from app.airvault.client import PaginaDelLote
+
+    trabajo, cliente = trabajo_subido(tmp_path)
+    trabajo.fijar_lote("003SRO")
+    cliente.mapa = [PaginaDelLote(n, 3, n) for n in (1, 2)]
+    estados = comprobar_partes([trabajo], cliente)
+    cliente.lecturas.clear()
+
+    detectado, = detectar_indexados(estados, cliente)
+
+    assert detectado.estado == LISTO
+    assert cliente.lecturas == []
+    assert not trabajo.manifiesto.etapa_hecha("verificar")
+
+    # Con una sola pagina en verde ya hay algo que confirmar.
+    cliente.mapa = [PaginaDelLote(1, 0, 1), PaginaDelLote(2, 3, 2)]
+    detectar_indexados(estados, cliente)
+    assert sorted(cliente.lecturas) == [1, 2]
+
+
 def test_worker_de_revision_descarta_el_plan_anterior_al_indexado_manual(
     tmp_path,
 ):
@@ -1284,6 +1308,198 @@ def test_worker_completa_aunque_el_mapa_tarde_en_ver_la_pagina_verde(tmp_path):
     assert dormidas == [ESPERAS_CIERRE[0]]
 
 
+def test_worker_aplica_completar_si_se_activa_mientras_escribe(tmp_path):
+    from app.gui.airvault_window import TrabajoAirVaultWorker
+
+    trabajo, base = trabajo_subido(tmp_path)
+    trabajo.fijar_lote("003SRO")
+    cliente = ClienteFalso(
+        paginas=base.paginas, lotes=base.lotes, picklist=base.picklist,
+        page_count=2,
+    )
+    plan = trabajo.planificar(cliente)
+    estado = {"tanda_hecha": True, "completar": False}
+    worker = TrabajoAirVaultWorker("indexar", estado)
+
+    def activar_al_verificar(texto, _hechas, _total):
+        if texto == "Verificando batches":
+            estado["completar"] = True
+
+    worker._avisar = activar_al_verificar
+    datos = worker._ejecutar_indexado(
+        [trabajo], [plan], cliente, completar=False
+    )
+
+    assert cliente.completados == ["003SRO"]
+    assert [cierre.completado for _t, cierre in datos["cierres"]] == [True]
+
+
+class _ManifiestoDeTanda:
+    """Lo minimo que miran el reintento y el cierre de una tanda."""
+
+    def __init__(self) -> None:
+        self.verificado = False
+        self.solo_subir = False
+
+    def etapa_hecha(self, nombre: str) -> bool:
+        return nombre == "verificar" and self.verificado
+
+    def bitacoras(self) -> list:
+        return [1, 2]
+
+
+def _tanda_con_un_batch_amarillo(tmp_path, monkeypatch):
+    """Dos batches: el primero queda entero en verde y el segundo no."""
+    from app.airvault.flujo import ResultadoCompletar
+    from app.airvault.indexer import Resultado
+
+    verde = SimpleNamespace(carpeta=tmp_path / "verde", manifiesto=_ManifiestoDeTanda())
+    amarillo = SimpleNamespace(carpeta=tmp_path / "amarillo", manifiesto=_ManifiestoDeTanda())
+    llamadas: dict[str, list] = {"planificar": [], "completar": [], "verificar": []}
+
+    def verificar(trabajos, _cliente, **_kwargs):
+        trabajo, = trabajos
+        llamadas["verificar"].append(trabajo)
+        if trabajo is verde:
+            trabajo.manifiesto.verificado = True
+            return 2, 2, []
+        return 1, 2, ["pagina 2: faltan datos obligatorios en AirVault: End Date"]
+
+    def planificar(trabajos, _cliente, **_kwargs):
+        llamadas["planificar"].append(list(trabajos))
+        return [(None, SimpleNamespace(resolutor=None)) for _t in trabajos]
+
+    def completar(trabajos, _cliente, **_kwargs):
+        llamadas["completar"].append(list(trabajos))
+        return [(t, ResultadoCompletar(True, [], 2, "ok")) for t in trabajos]
+
+    monkeypatch.setattr(
+        "app.airvault.flujo.indexar_partes", lambda *a, **k: Resultado()
+    )
+    monkeypatch.setattr("app.airvault.flujo.verificar_partes", verificar)
+    monkeypatch.setattr("app.airvault.flujo.planificar_partes", planificar)
+    monkeypatch.setattr("app.airvault.flujo.completar_partes", completar)
+    monkeypatch.setattr("app.airvault.flujo.cerrar_partes", lambda *a, **k: None)
+    return verde, amarillo, llamadas
+
+
+def test_worker_completa_el_batch_verde_aunque_otro_quede_amarillo(
+    tmp_path, monkeypatch
+):
+    """Una pagina amarilla de un batch no deja sin cerrar a los demas."""
+    from app.gui.airvault_window import TrabajoAirVaultWorker
+
+    verde, amarillo, llamadas = _tanda_con_un_batch_amarillo(
+        tmp_path, monkeypatch
+    )
+    worker = TrabajoAirVaultWorker("indexar", {"tanda_hecha": True})
+    worker._dormir = lambda _s: None
+    planes = [(None, SimpleNamespace(resolutor=None))] * 2
+
+    datos = worker._ejecutar_indexado(
+        [verde, amarillo], planes, object(), completar=True
+    )
+
+    assert datos["incompleto"]
+    assert llamadas["completar"] == [[verde]]
+    # El verde ya confirmado no se vuelve a leer ni a escribir.
+    assert all(tanda == [amarillo] for tanda in llamadas["planificar"])
+    assert llamadas["verificar"].count(verde) == 1
+
+
+def test_indexar_tambien_cierra_los_batches_ya_verificados(
+    tmp_path, monkeypatch
+):
+    """Un batch pendiente de escribir no retiene el cierre de los verificados."""
+    from app.gui.airvault_window import TrabajoAirVaultWorker
+
+    verde, amarillo, llamadas = _tanda_con_un_batch_amarillo(
+        tmp_path, monkeypatch
+    )
+    verde.manifiesto.verificado = True
+    estado = {
+        "tanda_hecha": True, "cliente": object(), "completar": True,
+        "listos": [amarillo],
+        "planes": {str(amarillo.carpeta): (None, SimpleNamespace(resolutor=None))},
+        "completar_tambien": [verde],
+    }
+    worker = TrabajoAirVaultWorker("indexar", estado)
+    worker._dormir = lambda _s: None
+    emitidos: list = []
+    worker.indexado.connect(emitidos.append)
+
+    worker._indexar()
+
+    assert llamadas["completar"] == [[verde]]
+    assert [t for t, _cierre in emitidos[0]["cierres"]] == [verde]
+    assert "completar_tambien" not in estado
+
+
+@pytest.mark.parametrize("casilla,acotado,esperado", [
+    (True, False, True),    # automatico con la casilla marcada: cierra
+    (False, False, False),  # automatico con la casilla desmarcada: no cierra
+    (False, True, True),    # orden del menu sobre esa fila: es explicita
+])
+def test_el_cierre_automatico_obedece_a_la_casilla(
+    tmp_path, monkeypatch, casilla, acotado, esperado
+):
+    from app.gui.airvault_window import TrabajoAirVaultWorker
+
+    verde, _amarillo, llamadas = _tanda_con_un_batch_amarillo(
+        tmp_path, monkeypatch
+    )
+    estado = {
+        "tanda_hecha": True, "completar": casilla,
+        "por_completar": [verde], "completar_acotado": acotado,
+    }
+    worker = TrabajoAirVaultWorker("completar", estado)
+    monkeypatch.setattr(worker, "_conectar", lambda: object())
+
+    worker._completar()
+
+    assert (llamadas["completar"] == [[verde]]) is esperado
+
+
+def test_indexar_termina_cada_batch_antes_de_empezar_el_siguiente(
+    tmp_path, monkeypatch
+):
+    """El primero se escribe, verifica y completa sin esperar a los demás."""
+    from app.airvault.indexer import Resultado
+    from app.gui.airvault_window import TrabajoAirVaultWorker
+
+    primero = SimpleNamespace(carpeta=tmp_path / "uno", manifiesto=_ManifiestoDeTanda())
+    segundo = SimpleNamespace(carpeta=tmp_path / "dos", manifiesto=_ManifiestoDeTanda())
+    plan = (None, SimpleNamespace(resolutor=None))
+    estado = {
+        "tanda_hecha": True, "cliente": object(), "completar": True,
+        "listos": [primero, segundo],
+        "planes": {str(primero.carpeta): plan, str(segundo.carpeta): plan},
+    }
+    worker = TrabajoAirVaultWorker("indexar", estado)
+    tandas: list[list] = []
+
+    def ejecutar(trabajos, _planes, _cliente, completar=False):
+        tandas.append(list(trabajos))
+        resultado = Resultado(escritas=2)
+        return {
+            "resultado": resultado, "validas": 2, "total": 2, "lotes": 1,
+            "cierres": [(trabajos[0], "cerrado")], "incompleto": False,
+            "incluye_revision": False, "carpetas": [str(trabajos[0].carpeta)],
+        }
+
+    monkeypatch.setattr(worker, "_ejecutar_indexado", ejecutar)
+    emitidos: list = []
+    worker.indexado.connect(emitidos.append)
+
+    worker._indexar()
+
+    assert tandas == [[primero], [segundo]]
+    datos, = emitidos
+    assert (datos["validas"], datos["total"], datos["lotes"]) == (4, 4, 2)
+    assert datos["resultado"].escritas == 4
+    assert [t for t, _c in datos["cierres"]] == [primero, segundo]
+
+
 def test_worker_retoma_el_indexado_cortado_y_solo_escribe_lo_que_falta(tmp_path):
     """Una escritura que se corta a la mitad se retoma sola, sin repetirla.
 
@@ -1623,8 +1839,14 @@ def test_subir_confirma_todos_y_carga_solo_la_division_pendiente(
     )
 
     assert subidas == ["DP | BIT -2"]
-    assert eventos[0] == ("subir", "DP | BIT -2")
-    assert all(evento[0] == "encontrado" for evento in eventos[1:])
+    # Los ya confirmados pasan al indexado antes de la carga pendiente.
+    assert eventos.index(("encontrado", "DP | BIT")) < eventos.index(
+        ("subir", "DP | BIT -2")
+    )
+    assert eventos.index(("encontrado", "DP | BIT REVISAR")) < eventos.index(
+        ("subir", "DP | BIT -2")
+    )
+    assert eventos[-1] == ("encontrado", "DP | BIT -2")
     assert trabajos[0].manifiesto.batch_id == "003PRI"
     assert trabajos[2].manifiesto.batch_id == "003REV"
 
@@ -1951,10 +2173,10 @@ def test_varios_empty_batch_del_mismo_tamano_conservan_su_id(
     assert cliente.lecturas == [1, 1, 1]
 
 
-def test_los_hallazgos_solo_se_publican_despues_de_todas_las_cargas(
+def test_cada_hallazgo_se_publica_antes_de_subir_el_siguiente(
     tmp_path, monkeypatch
 ):
-    """Un callback de hallazgo puede indexar, por eso respeta la barrera."""
+    """El indexado de un batch confirmado no espera a las cargas restantes."""
     trabajos = _trabajos_principal_division_y_revisar(tmp_path)
     cliente = ClienteFalso()
     eventos: list[tuple[str, str]] = []
@@ -1982,10 +2204,10 @@ def test_los_hallazgos_solo_se_publican_despues_de_todas_las_cargas(
 
     assert eventos == [
         ("subir", "DP | BIT"),
-        ("subir", "DP | BIT -2"),
-        ("subir", "DP | BIT REVISAR"),
         ("id", "DP | BIT"),
+        ("subir", "DP | BIT -2"),
         ("id", "DP | BIT -2"),
+        ("subir", "DP | BIT REVISAR"),
         ("id", "DP | BIT REVISAR"),
     ]
 
@@ -2014,10 +2236,10 @@ def test_un_batch_que_falla_no_impide_subir_los_otros(tmp_path, monkeypatch):
     ]
 
 
-def test_el_indexado_arranca_solo_despues_de_todas_las_subidas(
+def test_el_indexado_avanza_mientras_sube_el_siguiente_archivo(
     tmp_path, monkeypatch
 ):
-    """Puede solaparse con las busquedas, pero nunca con Quick Upload."""
+    """Las cargas van de una en una; el indexado de lo confirmado, en paralelo."""
     from app.airvault.flujo import EstadoParte
     from app.gui.airvault_window import TrabajoAirVaultWorker
 
@@ -2044,11 +2266,11 @@ def test_el_indexado_arranca_solo_despues_de_todas_las_subidas(
     def subir_falso(lotes, _sesion, al_encontrar=None, **_kwargs):
         primero, segundo = lotes
         eventos.append(("subir", primero.manifiesto.nombre_batch))
-        eventos.append(("subir", segundo.manifiesto.nombre_batch))
         primero.manifiesto.batch_id = "ID-1"
         eventos.append(("encontrar", primero.manifiesto.nombre_batch))
         al_encontrar(primero, lotes)
         assert indexando.wait(1), "el indexado no arranco en paralelo"
+        eventos.append(("subir", segundo.manifiesto.nombre_batch))
         segundo.manifiesto.batch_id = "ID-2"
         eventos.append(("encontrar", segundo.manifiesto.nombre_batch))
         al_encontrar(segundo, lotes)
@@ -2077,14 +2299,70 @@ def test_el_indexado_arranca_solo_despues_de_todas_las_subidas(
     primer_indexado = eventos.index(
         ("indexar", trabajos[0].manifiesto.nombre_batch)
     )
-    assert all(
-        eventos.index(("subir", trabajo.manifiesto.nombre_batch))
-        < primer_indexado
-        for trabajo in trabajos
+    assert primer_indexado < eventos.index(
+        ("subir", trabajos[1].manifiesto.nombre_batch)
     )
-    assert eventos.index(("indexar", trabajos[0].manifiesto.nombre_batch)) < (
-        eventos.index(("encontrar", trabajos[1].manifiesto.nombre_batch))
+    assert ("indexar", trabajos[1].manifiesto.nombre_batch) in eventos
+
+
+def test_un_batch_que_no_se_indexa_no_cancela_a_los_que_esperan(
+    tmp_path, monkeypatch
+):
+    """El fallo de uno se informa y el siguiente se indexa igual."""
+    from app.airvault.flujo import EstadoParte
+    from app.gui.airvault_window import TrabajoAirVaultWorker
+
+    trabajos = _trabajos_principal_division_y_revisar(tmp_path)[:2]
+    cliente = ClienteFalso()
+    indexados: list[str] = []
+
+    monkeypatch.setattr(
+        "app.airvault.flujo.comprobar_entrega",
+        lambda _csv: [SimpleNamespace(paginas=[1, 2])],
     )
+    monkeypatch.setattr(
+        "app.airvault.flujo.preparar_partes", lambda *args, **kwargs: trabajos,
+    )
+    monkeypatch.setattr(
+        "app.airvault.flujo.comprobar_partes",
+        lambda lotes, _cliente, avisar=None: [
+            EstadoParte(lotes[0], LISTO, "2 paginas")
+        ],
+    )
+
+    def subir_falso(lotes, _sesion, al_encontrar=None, **_kwargs):
+        for numero, trabajo in enumerate(lotes, start=1):
+            trabajo.manifiesto.batch_id = f"ID-{numero}"
+            al_encontrar(trabajo, lotes)
+
+    monkeypatch.setattr("app.airvault.flujo.subir_partes", subir_falso)
+    estado = {
+        "config": AirVaultConfig(), "csv": tmp_path / "corrida.csv",
+        "raiz": tmp_path, "carpeta_job": tmp_path / "job",
+        "nombre_lote": "DP | BIT", "paginas_por_batch": 100,
+        "sesion": SesionFalsa(), "indexar_al_encontrar": True,
+        "completar": False,
+    }
+    worker = TrabajoAirVaultWorker("subir", estado)
+    monkeypatch.setattr(worker, "_conectar", lambda: cliente)
+    monkeypatch.setattr(worker, "_cliente_paralelo", lambda _c: cliente)
+
+    def indexar_falso(trabajo, _cliente, _raiz):
+        if trabajo is trabajos[0]:
+            raise PermissionError(5, "Access is denied")
+        indexados.append(trabajo.manifiesto.nombre_batch)
+        return {}
+
+    monkeypatch.setattr(worker, "_indexar_batch_encontrado", indexar_falso)
+    subidos: list[dict] = []
+    worker.subido.connect(subidos.append)
+
+    worker._subir()
+
+    assert indexados == [trabajos[1].manifiesto.nombre_batch]
+    nombre, detalle = subidos[0]["fallos_indexado"][0]
+    assert nombre == trabajos[0].manifiesto.nombre_batch
+    assert "Access is denied" in detalle
 
 
 def test_el_worker_sube_tambien_los_pendientes_de_otras_ejecuciones(

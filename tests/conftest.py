@@ -98,6 +98,18 @@ def _opciones_sin_heredar(opciones_de_interfaz):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _reintentos_de_pagina_sin_espera(monkeypatch):
+    """Una pagina que AirVault no acepta se repite tras unos segundos.
+
+    Las pruebas simulan fallos que no se arreglan solos; esperar de verdad
+    entre intentos solo alargaria la suite.
+    """
+    monkeypatch.setattr(
+        "app.airvault.indexer.ESPERAS_REINTENTO_PAGINA", (0.0, 0.0)
+    )
+
+
 @pytest.fixture(scope="session")
 def app():
     """La ``QApplication`` unica de la sesion.

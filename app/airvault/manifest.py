@@ -11,11 +11,20 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 
 from app.airvault.model import Manifiesto
 
 MANIFIESTO_FILENAME = "manifiesto.json"
+
+# Windows no deja reemplazar un archivo mientras otro lo tiene abierto: el
+# antivirus que lo revisa, el indexador de busqueda u otra ventana que lee
+# los manifiestos. Pasa en un instante y se resuelve solo, pero el indexado
+# guarda tras cada pagina y un solo ``PermissionError`` cortaba el batch a
+# la mitad sin que el registro dijera por que. Se reintenta durante unos
+# dos segundos y medio antes de darlo por fallo.
+PAUSAS_REEMPLAZO = (0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6)
 
 
 def ruta_manifiesto(carpeta_job: Path | str) -> Path:
@@ -56,7 +65,14 @@ def guardar(manifiesto: Manifiesto, carpeta_job: Path | str) -> Path:
             handle.write(contenido)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp_name, destino)
+        for pausa in (*PAUSAS_REEMPLAZO, None):
+            try:
+                os.replace(tmp_name, destino)
+                break
+            except PermissionError:
+                if pausa is None:
+                    raise
+                time.sleep(pausa)
     except BaseException:
         Path(tmp_name).unlink(missing_ok=True)
         raise

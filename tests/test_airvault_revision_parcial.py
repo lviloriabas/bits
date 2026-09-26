@@ -113,6 +113,31 @@ def test_revision_termina_con_datos_parciales_y_no_los_reescribe():
     assert not cli.completados
 
 
+def test_doc_type_en_mayusculas_no_se_toma_por_guardado_perdido():
+    """AirVault guarda «LOG PAGE» aunque reciba «Log Page».
+
+    Asi estan las paginas de REVISAR que si conservaron fecha, log y razon
+    ECN. Compararlo tal cual marcaba todas como rechazadas y las reescribia.
+    """
+    from app.airvault.config import CAMPO_DOC_TYPE
+
+    class Mayusculas(ClienteFalso):
+        def guardar_pagina(self, *args):
+            resultado = super().guardar_pagina(*args)
+            valores = self.paginas[args[1]].valores
+            valores[CAMPO_DOC_TYPE] = valores[CAMPO_DOC_TYPE].upper()
+            return resultado
+
+    m = manifiesto(2)
+    m.solo_subir = True
+    cli = Mayusculas(page_count=2)
+    indexador = Indexador(cli, m, PICKLIST)
+    resultado = indexador.aplicar(indexador.planificar(2))
+    assert (resultado.escritas, resultado.fallidas) == (2, 0)
+    assert cli.paginas[1].valores[CAMPO_DOC_TYPE] == "LOG PAGE"
+    assert verificar_revision(cli, m) == (2, 2, [])
+
+
 def test_verificar_revision_no_confirma_datos_que_se_perdieron():
     m = manifiesto(1)
     m.solo_subir = True

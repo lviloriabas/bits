@@ -760,6 +760,19 @@ def test_actualizacion_filtrada_conserva_ocultos_sin_meterlos_en_el_worker(venta
     assert ventana.lotes.rowCount() == 2
 
 
+def test_filtro_cambia_en_vuelo_sin_perder_lotes_ocultos(ventana):
+    actual, anterior = cola_de_dos_ejecuciones(ventana)
+    ventana.solo_ejecucion_check.setChecked(True)
+    ventana._worker_filtrado = True
+
+    ventana.solo_ejecucion_check.setChecked(False)
+    ventana._al_actualizar_subidas({"trabajos": [actual.trabajo]})
+
+    assert anterior.trabajo in ventana._trabajos
+    assert ventana._estado["trabajos"] == [actual.trabajo]
+    assert ventana.lotes.rowCount() == 2
+
+
 def test_subir_no_indexa_nada_y_dice_que_falta_esperar(ventana):
     """Subir y estar listo son cosas distintas: entre medias está AirVault."""
     ventana._al_subir({"trabajos": [TrabajoFalso()], "cliente": object()})
@@ -1413,10 +1426,29 @@ def test_el_avance_sale_por_la_barra_de_la_ventana(ventana):
 # ── mientras escribe ───────────────────────────────────────────────
 
 def test_con_un_lote_a_medias_otra_ejecucion_sigue_disponible(ventana):
+    ventana.completar_check.setChecked(False)
     ventana._habilitar(False)
     assert ventana.historial.isEnabled()
+    assert ventana.detener_duplicados_check.isEnabled()
+    assert ventana.completar_check.isEnabled()
+    assert ventana.solo_ejecucion_check.isEnabled()
     assert not ventana.boton_subir.isEnabled()
     assert not ventana.boton_comprobar.isEnabled()
+
+    ventana.completar_check.setChecked(True)
+    assert ventana._estado["completar"] is True
+
+
+def test_politica_de_duplicados_cambia_en_trabajos_en_vuelo(ventana):
+    trabajo = TrabajoFalso()
+    ventana._trabajos = [trabajo]
+    ventana._habilitar(False)
+    nueva = not ventana.detener_duplicados_check.isChecked()
+
+    ventana.detener_duplicados_check.setChecked(nueva)
+
+    assert trabajo.config.detener_por_duplicados is nueva
+    assert ventana._estado["config"].detener_por_duplicados is nueva
 
 
 def test_elegir_otra_ejecucion_en_marcha_la_abre_en_paralelo(

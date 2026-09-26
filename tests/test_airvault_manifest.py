@@ -66,6 +66,46 @@ def test_no_deja_temporales(tmp_path):
     assert sobras == []
 
 
+def test_guardar_espera_a_que_otro_suelte_el_manifiesto(tmp_path, monkeypatch):
+    """En Windows reemplazar falla mientras otro tiene el archivo abierto.
+
+    Con un lector concurrente fallaba mas de la mitad de los guardados, y el
+    indexado guarda tras cada pagina: uno solo cortaba el batch.
+    """
+    manifiestos.guardar(_manifiesto(), tmp_path)
+    reemplazar = manifiestos.os.replace
+    intentos: list[int] = []
+    pausas: list[float] = []
+
+    def ocupado(origen, destino):
+        intentos.append(1)
+        if len(intentos) < 3:
+            raise PermissionError(5, "Access is denied")
+        reemplazar(origen, destino)
+
+    monkeypatch.setattr(manifiestos.os, "replace", ocupado)
+    monkeypatch.setattr(manifiestos.time, "sleep", pausas.append)
+    manifiesto = _manifiesto()
+    manifiesto.registros[0].estado = EstadoRegistro.ESCRITA
+
+    manifiestos.guardar(manifiesto, tmp_path)
+
+    assert len(intentos) == 3 and len(pausas) == 2
+    assert manifiestos.cargar(tmp_path).registros[0].estado is EstadoRegistro.ESCRITA
+
+
+def test_guardar_se_rinde_si_el_manifiesto_sigue_tomado(tmp_path, monkeypatch):
+    def siempre_ocupado(_origen, _destino):
+        raise PermissionError(5, "Access is denied")
+
+    monkeypatch.setattr(manifiestos.os, "replace", siempre_ocupado)
+    monkeypatch.setattr(manifiestos.time, "sleep", lambda _s: None)
+
+    with pytest.raises(PermissionError):
+        manifiestos.guardar(_manifiesto(), tmp_path)
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith(".manifiesto-")]
+
+
 def test_guardar_dos_veces_no_duplica_estado(tmp_path):
     manifiesto = _manifiesto()
     manifiesto.registros[0].estado = EstadoRegistro.ESCRITA

@@ -407,6 +407,37 @@ def test_una_pagina_rechazada_no_deja_sin_indexar_a_las_demas():
     assert manifiesto_.registros[1].estado is EstadoRegistro.ERROR
 
 
+def test_una_pagina_que_airvault_rechaza_una_vez_se_repite():
+    """Los datos del batch automatico ya estan validados: el fallo es de AirVault.
+
+    Antes la pagina quedaba marcada como fallida al primer rechazo y el
+    batch terminaba en amarillo hasta la siguiente vuelta.
+    """
+    class RechazaUnaVez(ClienteFalso):
+        rechazos = 0
+
+        def guardar_pagina(self, batch_id, pagina, *args):
+            if pagina == 2 and not self.rechazos:
+                self.rechazos += 1
+                raise ErrorDeAirVault("AirVault rechazo la pagina 2: 500")
+            return super().guardar_pagina(batch_id, pagina, *args)
+
+    cliente = RechazaUnaVez(
+        paginas={n: pagina(n) for n in (1, 2, 3)}, picklist=PICKLIST,
+        page_count=3,
+    )
+    manifiesto_ = manifiesto()
+    pausas: list[float] = []
+    indexador = Indexador(cliente, manifiesto_, PICKLIST, dormir=pausas.append)
+
+    resultado = indexador.aplicar(indexador.planificar(3))
+
+    assert (resultado.escritas, resultado.fallidas) == (3, 0)
+    assert [p for p, _v, _e in cliente.escrituras] == [1, 2, 3]
+    assert len(pausas) == 1
+    assert all(r.estado is EstadoRegistro.ESCRITA for r in manifiesto_.registros)
+
+
 # ── verificacion ───────────────────────────────────────────────────
 
 def test_verificar_cuenta_aparte_la_pagina_que_no_pudo_leerse():

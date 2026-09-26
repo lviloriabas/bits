@@ -77,15 +77,13 @@ _MAX_ENGINE_THREADS = 3
 # son el suelo mientras cada proceso necesite su propia copia) y el resto son
 # búferes de página y el arena de Paddle.
 #
-# Medir esto en un proceso suelto engaña: ahí da ~690 MB, y con ese número se
-# crean más procesos de los que caben. En un equipo de 16 GB eso es justo el
-# fallo de paginación que hay que evitar.
-#
-# El valor queda entre la media (823) y el pico por proceso (898) porque lo
-# que puede tumbar el equipo es la suma en un instante, y los procesos no
-# llegan a su pico a la vez: con 12 workers la suma medida se quedó en
-# 9042 MB, es decir 753 MB de media en el momento de mayor consumo.
-_WORKER_MEMORY_MB = 850
+# Presupuestar 850 MB, menos que el pico ya medido, dejó una ejecución con
+# 12.999 MB libres en 11 procesos: después de la reserva quedaban solo 49 MB
+# sobre los picos del pool. Windows empezó a paginar los modelos y 22 páginas
+# tardaron 517 s, frente a 11 páginas en 60 s sin esa presión. Un GiB por
+# proceso cubre el pico, los búferes transitorios y la imprecisión natural de
+# una lectura tomada antes de arrancar todos los hijos.
+_WORKER_MEMORY_MB = 1024
 # Memoria que se deja libre para el sistema, la GUI y las salidas PDF. Escala
 # con el equipo entre un suelo y un techo: en uno de 16 GB el suelo de 1,5 GB
 # deja el margen demasiado corto en cuanto el usuario abre el visor de CSV o un
