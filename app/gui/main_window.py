@@ -95,6 +95,7 @@ from app.gui.responsive import (
     fit_to_screen,
 )
 from app.gui.table_sort import ColumnSortController
+from app.gui.actualizacion import ActualizarWorker, BuscarActualizacionWorker
 from app.gui.airvault_window import AIRVAULT_TOOLTIP, AirVaultWindow
 from app.gui.web_reports_window import (
     WEB_REPORTS_TOOLTIP,
@@ -117,6 +118,7 @@ from app.gui.tokens import (
     FONT_CAPTION_PT,
     FONT_SUBTITLE_PT,
     RADIUS_CARD,
+    RADIUS_CONTROL,
     WEIGHT_STRONG,
     paleta,
     qss_vars,
@@ -178,6 +180,9 @@ _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _TABLE_CELL_CHUNK = 2000
 # Espera entre comprobaciones mientras se detiene el trabajo para cerrar.
 _SHUTDOWN_POLL_MS = 150
+# Cada cuanto se vuelve a preguntar al repositorio si hay version nueva.
+_CONSULTA_ACTUALIZACION_MS = 30 * 60 * 1000
+_ACTUALIZAR_TEXTO = "Hacer clic aquí para actualizar"
 _PISTA_BUSQUEDA = "La búsqueda abre cada coincidencia en la vista previa."
 _PREVIEW_EMPTY_MESSAGE = "Seleccione un archivo PDF para ver la vista previa"
 # Lo que se espera a un hilo despues de romperle el pool por debajo. Con el
@@ -764,6 +769,14 @@ class MainWindow(QMainWindow):
         self._current_file_index = 0
         self._file_page_counts: list[int] = []
 
+        # Aviso de version nueva. La consulta la arranca ``run_gui`` con
+        # ``vigilar_actualizaciones``; construir la ventana no va a la red.
+        self._buscar_actualizacion_worker: BuscarActualizacionWorker | None = None
+        self._actualizar_worker: ActualizarWorker | None = None
+        self._actualizacion_timer = QTimer(self)
+        self._actualizacion_timer.setInterval(_CONSULTA_ACTUALIZACION_MS)
+        self._actualizacion_timer.timeout.connect(self._buscar_actualizacion)
+
         self._build_ui()
         # El estilo ya esta instalado antes de construir la ventana. Pulir
         # aqui deja definitivas las metricas de los controles y evita medir
@@ -793,6 +806,100 @@ class MainWindow(QMainWindow):
     def load_initial_data(self) -> None:
         """Carga los datos del disco después de mostrar la ventana."""
         self._load_default_input()
+
+    # ── Versión nueva ───────────────────────────────────────────────────
+
+    def vigilar_actualizaciones(self) -> None:
+        """Pregunta ahora si hay versión nueva y luego cada media hora."""
+        self._buscar_actualizacion()
+        self._actualizacion_timer.start()
+
+    def _buscar_actualizacion(self) -> None:
+        """Lanza la consulta al repositorio si no hay otra en curso."""
+        if self._closing or self._actualizar_worker is not None:
+            return
+        previa = self._buscar_actualizacion_worker
+        if previa is not None and previa.isRunning():
+            return
+        worker = BuscarActualizacionWorker(SCRIPT_DIR, self)
+        worker.encontrado.connect(self._on_actualizacion_encontrada)
+        self._buscar_actualizacion_worker = worker
+        worker.start()
+
+    def _on_actualizacion_encontrada(self, pendientes: int) -> None:
+        """Muestra u oculta el botón según haya commits nuevos."""
+        if self._actualizar_worker is not None:
+            return
+        self.btn_actualizar.setToolTip(
+            f"Hay {pendientes} cambio(s) nuevo(s) en el repositorio. Al hacer "
+            "clic se descargan con git pull y la aplicación se reinicia."
+        )
+        self.btn_actualizar.setVisible(pendientes > 0)
+
+    def _actualizar_aplicacion(self) -> None:
+        """Trae la versión nueva y, si sale bien, reinicia la aplicación."""
+        if self._actualizar_worker is not None:
+            return
+        if self._running_workers():
+            QMessageBox.information(
+                self,
+                "Actualizar",
+                "Hay un trabajo en curso. Espere a que termine o cancélelo "
+                "antes de actualizar.",
+            )
+            return
+        logger.info("Actualizando la aplicación con git pull")
+        self.btn_actualizar.setEnabled(False)
+        self.btn_actualizar.setText("Actualizando…")
+        worker = ActualizarWorker(SCRIPT_DIR, self)
+        worker.terminado.connect(self._on_actualizacion_terminada)
+        self._actualizar_worker = worker
+        worker.start()
+
+    def _on_actualizacion_terminada(self, ok: bool, salida: str) -> None:
+        """Reinicia con la versión nueva o explica por qué no se pudo."""
+        worker = self._actualizar_worker
+        if worker is not None:
+            worker.wait()
+            worker.deleteLater()
+        self._actualizar_worker = None
+        if salida:
+            logger.info(f"git pull: {salida}")
+        if not ok:
+            self.btn_actualizar.setEnabled(True)
+            self.btn_actualizar.setText(_ACTUALIZAR_TEXTO)
+            QMessageBox.warning(
+                self,
+                "No se pudo actualizar",
+                "Git no pudo traer la versión nueva y la carpeta quedó como "
+                "estaba.\n\n" + (salida or "Sin detalle."),
+            )
+            return
+        self.btn_actualizar.setText("Reiniciando…")
+        self._reiniciar_aplicacion()
+
+    def _reiniciar_aplicacion(self) -> None:
+        """Abre una instancia con el código recién traído y cierra esta."""
+        try:
+            result = QProcess.startDetached(
+                sys.executable,
+                [str(SCRIPT_DIR / "run_gui.py")],
+                str(SCRIPT_DIR),
+            )
+            iniciado = result[0] if isinstance(result, (tuple, list)) else result
+        except Exception as exc:  # noqa: BLE001 - se informa abajo
+            logger.error(f"No se pudo reiniciar la aplicación: {exc}")
+            iniciado = False
+        if not iniciado:
+            QMessageBox.information(
+                self,
+                "Actualización lista",
+                "La versión nueva ya está descargada, pero la aplicación no "
+                "pudo reiniciarse sola. Ciérrela y vuelva a abrirla.",
+            )
+            self.btn_actualizar.hide()
+            return
+        self.close()
 
     def _on_tema_cambiado(self, nombre: str) -> None:
         """Rehace lo de esta ventana que no alcanza la hoja de la aplicación.
@@ -1500,6 +1607,16 @@ class MainWindow(QMainWindow):
         self.busy_label = QLabel("", self)
         self.busy_label.hide()
         self.busy_label.setToolTip("Procesamiento en curso")
+
+        # Solo aparece cuando el repositorio tiene commits que esta copia no
+        # tiene. Va primero en la fila y en el color de aviso para que se
+        # vea sin ocupar una franja propia.
+        self.btn_actualizar = QPushButton(_ACTUALIZAR_TEXTO)
+        self.btn_actualizar.setCursor(Qt.CursorShape.PointingHandCursor)
+        pintar_del_tema(self.btn_actualizar, _hoja_de_actualizar)
+        self.btn_actualizar.clicked.connect(self._actualizar_aplicacion)
+        self.btn_actualizar.hide()
+        row.addWidget(self.btn_actualizar)
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
@@ -5095,7 +5212,8 @@ class MainWindow(QMainWindow):
                 consulta_web = None
         for worker in (
             self._worker, self._preprocess_worker, self._outputs_worker,
-            self._input_scan_worker, consulta_web, *indexados,
+            self._input_scan_worker, consulta_web, self._actualizar_worker,
+            *indexados,
         ):
             if worker is None:
                 continue
@@ -5225,8 +5343,17 @@ class MainWindow(QMainWindow):
         for timer in (
             self._timer, self._table_timer, self._log_timer,
             self._shutdown_timer, self._resize_preview_timer,
+            self._actualizacion_timer,
         ):
             timer.stop()
+        # La consulta de versión nueva no se interrumpe: Git termina solo o
+        # por su tiempo límite, y destruir el hilo en marcha abortaría.
+        consulta = self._buscar_actualizacion_worker
+        if consulta is not None:
+            try:
+                consulta.wait()
+            except RuntimeError:
+                pass
         if self._csv_viewer is not None:
             self._csv_viewer.close()
         if self._web_reports_window is not None:
@@ -5257,6 +5384,18 @@ class MainWindow(QMainWindow):
         # pestanas individualmente.
         from app.airvault.navegador import cerrar_navegadores_al_salir
         cerrar_navegadores_al_salir()
+
+
+def _hoja_de_actualizar() -> str:
+    """El botón de versión nueva, en el color de aviso del tema."""
+    c = paleta()
+    return (
+        f"QPushButton {{ color: {c.STATUS_WARNING}; "
+        f"border: 1px solid {c.STATUS_WARNING}; "
+        f"border-radius: {RADIUS_CONTROL}px; font-weight: {WEIGHT_STRONG}; }}"
+        f"QPushButton:disabled {{ color: {c.TEXT_DISABLED}; "
+        f"border-color: {c.PANE_BORDER}; }}"
+    )
 
 
 def _color_for(status: Status):
