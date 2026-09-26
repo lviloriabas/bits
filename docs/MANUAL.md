@@ -4,6 +4,37 @@ BITS lee bitácoras escaneadas, organiza los resultados y prepara su carga en Ai
 
 Abra `BITS.exe` desde la carpeta completa del programa. La lectura funciona localmente, sin internet y usando el procesador. Para AirVault necesita conexión, Microsoft Edge y una cuenta autorizada. Consulte la [guía técnica](TECNICO.md) para mantenimiento.
 
+## Vista general
+
+El trabajo tiene dos mitades. La primera ocurre en el equipo y sin internet: leer los PDF, validar lo leído y armar la entrega. La segunda ocurre en AirVault: subir esa entrega, indexar cada página y publicarla. Web Reports es un paso aparte, para corregir lo que ya está publicado.
+
+```mermaid
+flowchart TD
+    subgraph local["En el equipo, sin internet"]
+        A["1. Seleccionar PDF y plantilla"] --> B["2. Elegir la salida"]
+        B --> C["3. Preprocesar<br/>opcional: comprobar zonas"]
+        C --> D["4. Procesar<br/>leer y validar"]
+        B --> D
+        D --> E["5. Revisar resultados"]
+        E --> F["6. Depurar<br/>opcional y manual"]
+        E --> G["7. Exportar<br/>PDF, CSV y JSON"]
+        F --> G
+    end
+
+    subgraph airvault["En AirVault, con Edge"]
+        H["8a. Subir batches"] --> I["8b. Indexar páginas"]
+        I --> J["8c. Completar batch<br/>publica en Web Search"]
+        I --> K["Batch REVISAR<br/>queda para una persona"]
+    end
+
+    G --> H
+    J -. "tiempo después" .-> W["9. Web Reports<br/>corrige duplicadas y mal indexadas"]
+```
+
+El botón **Automático** encadena los pasos 3, 4 y 7, y opcionalmente 8a, 8b y 8c. Revisar, depurar y atender **REVISAR** siempre quedan en manos de una persona.
+
+Una regla atraviesa todo el proceso: **lo que BITS no puede sostener con evidencia no lo inventa, lo aparta en REVISAR**. Por eso una entrega siempre tiene dos partes: la que se indexa y publica sola, y la que espera revisión humana.
+
 ## Proceso paso por paso
 
 ### 1. Seleccionar los archivos y la plantilla
@@ -70,6 +101,21 @@ Haga doble clic en una fila para localizar su página. También puede buscar un 
 | `disc`        | Se confirmó una falta de firma o licencia requerida.                                                            |
 | `disc_reason` | Explica la falta confirmada.                                                                                    |
 
+Cada página termina en uno de dos destinos. Estas son las condiciones que la mandan a **REVISAR**; basta una:
+
+```mermaid
+flowchart TD
+    P["Página leída y validada"] --> Q{"¿Se cumple alguna?"}
+    Q -->|"Está en blanco"| R["REVISAR<br/>review = true"]
+    Q -->|"Falta matrícula o número de bitácora"| R
+    Q -->|"La fecha es antigua, futura o no cuadra con el libro"| R
+    Q -->|"Falta confirmada de firma o licencia"| R
+    Q -->|"Falta un dato obligatorio para AirVault"| R
+    Q -->|"Ninguna"| N["Flujo normal<br/>se indexa y se completa solo"]
+```
+
+Un `WARNING` por sí solo no manda la página a **REVISAR**: si matrícula, número y fecha son utilizables, la página sigue en el flujo normal.
+
 Compruebe matrícula, número de bitácora y fecha. El número tiene siete dígitos. Cada libro contiene 50 páginas de una sola aeronave: los finales `00` a `49` pertenecen a un libro y `50` a `99` al siguiente. Dentro del libro, la fecha puede repetirse, pero no retroceder al aumentar el número.
 
 Las fechas de años anteriores pasan a revisión, salvo durante enero, cuando también se admite el año anterior. Una fecha manuscrita futura necesita corrección; una fecha representada a fin de mes se comprueba por mes. La marca **VOID** confirmada elimina el reclamo de firmas de una página anulada, pero no resuelve datos de identidad o fecha faltantes.
@@ -112,6 +158,19 @@ Exportar vuelve a generar los datos y PDF sin repetir OCR. Conserva los PDF ante
 
 En **REVISAR**, BITS guarda los campos disponibles y verifica lo escrito. Las páginas con incidencias pueden seguir amarillas, pendientes de corrección humana, aunque termine el trabajo automático. Ese batch conserva sus separadores y no se completa ni publica automáticamente.
 
+Así avanza cada batch de la cola. Cada paso queda anotado en el equipo, por eso **Continuar pendiente** retoma desde el primero que falte sin repetir lo ya confirmado:
+
+```mermaid
+flowchart LR
+    A["Preparado"] --> B["Subido"]
+    B --> C["Confirmado en AirVault<br/>Revisar en AirVault"]
+    C --> D["Indexado<br/>azul"]
+    D --> E["Completado<br/>verde, en Web Search"]
+    D --> F["REVISAR o páginas amarillas<br/>espera corrección humana"]
+    B -. "posible duplicado" .-> X["Detenido<br/>revise en AirVault"]
+    C -. "cantidad de páginas distinta<br/>o conflicto de matrícula" .-> X
+```
+
 La cola muestra azul durante el indexado y mientras el batch esté indexado o incompleto. Solo muestra verde al completar. Una página que conserve el estado 3 no convierte el batch en completado. Los mensajes inferiores ocupan una línea; coloque el puntero encima para leer el texto completo.
 
 Los PDF se suben de uno en uno. La cola identifica cada carga y sigue con los demás batches. Para entrar en AirVault, BITS usa el enlace SSO en Edge y reutiliza su sesión.
@@ -149,6 +208,21 @@ Log Page Audit es un reporte de AirVault que señala dos defectos de lo ya publi
 3. Revise la tabla. **Matrícula del libro** es la aeronave que le corresponde a la bitácora; **Matrícula indexada**, aquella bajo la que quedó archivada. En una mal indexada las dos difieren, y esa diferencia es el defecto. En una duplicada la segunda queda vacía: el reporte no la indica.
 4. Las celdas subrayadas abren Web Search: la de **Página**, sus apariciones; la de **Rango del libro**, el libro entero.
 5. Pulse **Corregir todas…**, o seleccione filas con Ctrl o Mayús y pulse **Corregir seleccionadas…**. Confirme el resumen.
+
+```mermaid
+flowchart TD
+    A["Consultar Log Page Audit<br/>no modifica nada"] --> B{"¿Qué defecto tiene la fila?"}
+    B -->|"Duplicada"| C["Revisar imágenes<br/>si la opción está activa"]
+    C --> D["Comprobar de nuevo en Web Search<br/>tipo LOG PAGE, Images = 1"]
+    D --> E["Eliminar copias<br/>se conserva al menos una"]
+    B -->|"Mal indexada"| F["Comprobar en Web Search<br/>que el defecto sigue ahí"]
+    F --> G["Reindexar a la aeronave del libro"]
+    B -->|"El reporte no lo deja decidido"| H["Caso a revisar<br/>con el motivo escrito"]
+    E --> Z["Resumen final<br/>corregidas y no corregidas, con motivo"]
+    G --> Z
+    D -. "no coincide" .-> Z
+    F -. "ya corregida" .-> Z
+```
 
 **Revisar imágenes antes de eliminar copias** abre una comparación para cada bitácora duplicada. La selección inicial conserva la más antigua. Puede cambiar las marcas, omitir la bitácora o pulsar **Eliminar seleccionadas**. Siempre debe conservar una copia. Las miniaturas se guardan en memoria mientras la ventana siga abierta, para reutilizarlas si el documento no cambió. Si desactiva la opción, la corrección conserva automáticamente la copia más antigua.
 

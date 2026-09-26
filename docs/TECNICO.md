@@ -2,6 +2,149 @@
 
 El [manual](MANUAL.md) describe la operación. Esta guía resume tecnologías, procesos, archivos de estado y puntos de mantenimiento. Las [instrucciones del repositorio](../AGENTS.md) siguen vigentes.
 
+## Resumen para quien llega al proyecto
+
+### Qué hace, en una frase
+
+BITS toma PDF escaneados de bitácoras, lee de cada página matrícula, número de bitácora, fecha y firmas, valida esas lecturas contra las reglas del libro y la flota, genera una entrega (PDF, CSV y JSON) y la sube e indexa en AirVault. Todo lo que no puede sostener con evidencia lo aparta en **REVISAR** para que lo resuelva una persona.
+
+Son cuatro trabajos encadenados, y cada uno tiene su carpeta en `app/`:
+
+| Trabajo | Qué produce | Dónde vive |
+|---|---|---|
+| **Leer** | Un `PageResult` por página, con cada campo, su texto crudo, alternativas y confianza. | `app/vision/`, `app/ocr/`, `app/core/pipeline.py` |
+| **Validar** | Estado `OK` / `WARNING` / `ERROR`, correcciones por libro y la decisión de revisión. | `app/validation/` |
+| **Entregar** | La carpeta de la ejecución en `output/`: CSV, JSON, `stats.json`, PDF e índice de páginas. | `app/reports/` |
+| **Indexar** | Batches subidos, indexados y completados en AirVault, con un manifiesto local por batch. | `app/airvault/` |
+
+La interfaz (`app/gui/`) no toma decisiones de negocio: lanza estos trabajos en segundo plano, muestra el avance y deja revisar los resultados.
+
+### Mapa del código
+
+```mermaid
+flowchart TB
+    subgraph entrada["Puntos de entrada"]
+        GUI["run_gui.py<br/>(BITS.exe)"]
+        CLI["run_cli.py"]
+        AVCLI["run_airvault.py"]
+        ED["run_editor.py"]
+    end
+
+    subgraph gui["app/gui: interfaz Qt"]
+        MW["main_window.py"]
+        WK["worker.py<br/>QThread"]
+        AVW["airvault_window.py"]
+        WRW["web_reports_window.py"]
+        CSVV["csv_viewer.py"]
+        EDW["editor_window.py"]
+    end
+
+    subgraph core["app/core: orquestación"]
+        PL["pipeline.py<br/>Pipeline, process_pdf_batch"]
+        PAR["parallelism.py"]
+    end
+
+    subgraph lectura["Lectura"]
+        VIS["app/vision<br/>render, alineación, rayas, firmas, VOID"]
+        OCR["app/ocr<br/>PaddleOCR en CPU"]
+    end
+
+    VAL["app/validation<br/>reglas de página y de libro"]
+    REP["app/reports<br/>CSV, JSON, PDF, stats"]
+    AV["app/airvault<br/>flujo, sesión, indexado, Web Reports"]
+    MOD["app/models + app/templates<br/>PageResult, ValidationReport, Template"]
+
+    GUI --> MW
+    CLI --> PL
+    AVCLI --> AV
+    ED --> EDW
+    MW --> WK --> PL
+    MW --> AVW --> AV
+    MW --> WRW --> AV
+    MW --> CSVV --> REP
+    PL --> PAR
+    PL --> VIS --> OCR
+    PL --> VAL
+    WK --> VAL
+    WK -.-> REP
+    CLI --> REP
+    AV --> REP
+    MOD -.-> PL
+    MOD -.-> VAL
+    MOD -.-> REP
+```
+
+Las flechas continuas son llamadas; las punteadas, dependencias de datos. Las dos entradas, GUI y consola, llegan al mismo `Pipeline` y al mismo `write_outputs()`; las dos entradas de AirVault llegan al mismo `app/airvault/flujo.py`.
+
+### Por qué está armado así
+
+Cada decisión de estructura responde a una restricción concreta. Conviene conocerlas antes de mover código.
+
+1. **Una sola implementación por proceso.** La GUI y la consola comparten `Pipeline`, `process_pdf_batch()` y `write_outputs()`. Para AirVault, `flujo.py` guarda el orden de las etapas y las condiciones para pasar de una a otra, sin interfaz. Así un arreglo en la lectura o en el indexado vale para las dos caras y se prueba una sola vez.
+2. **Validación en dos niveles: página y libro.** Hay reglas que una página sola no puede comprobar: un libro tiene 50 páginas de una sola aeronave, la fecha no retrocede al aumentar `log_number` y un número ilegible se puede deducir de sus vecinas. Por eso `validate_page()` corre dentro del pipeline, página por página, y las correcciones por libro (`log_sequence`, `book_corrector`, `date_corrector`, `fleet`) corren en `PipelineWorker` cuando ya terminaron todos los PDF.
+3. **Hilo para la interfaz, procesos para el OCR.** PaddleOCR es trabajo pesado de CPU y el GIL de Python impide repartirlo con hilos. `QThread` mantiene la ventana viva y `OcrProcessPool` reparte páginas o archivos entre procesos que cargan los modelos una sola vez y se reutilizan. `parallelism.py` decide cuántos procesos e hilos caben según núcleos y memoria libre.
+4. **El JSON es la fuente de verdad; CSV y PDF son vistas.** El JSON guarda alternativas, procedencia y confianza de cada campo. Por eso se puede exportar otra vez, depurar o cambiar la política de fecha sin repetir OCR. El CSV no alcanza para investigar una página.
+5. **Ante la duda, REVISAR, y una sola vez.** `needs_review()` (`app/validation/page_status.py`) decide a la vez la columna `review` del CSV y el reparto de la entrega. Si cada salida lo decidiera por su cuenta, el CSV y los PDF podrían contar cosas distintas.
+6. **AirVault reanudable y verificable.** Cada batch tiene un manifiesto en `output/airvault/` con el estado de cada etapa y de cada página. Reanudar no repite guardados ya verificados, y una carga aceptada sin descubrir nunca autoriza un reenvío automático. `flujo.py` no abre sesiones: recibe el cliente, así el recorrido entero se ejercita con el cliente falso de `tests/airvault_fake.py`. Lo que decide si una página se escribe vive aparte, en `guards.py` e `indexer.py`, que son lo más probado.
+7. **Portable, sin red y solo CPU.** Intérprete, bibliotecas y modelos viven en `portable/`; el OCR no descarga nada ni detecta GPU. Solo AirVault necesita red y Edge.
+8. **Web Reports por pantalla, no por peticiones sueltas.** El informe es SSRS y se conduce con Edge para que valgan los permisos de la cuenta y las validaciones del propio AirVault.
+
+### Recorrido de los datos al pulsar Procesar
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Op as Operador
+    participant MW as MainWindow
+    participant WK as PipelineWorker (QThread)
+    participant PB as process_pdf_batch
+    participant POOL as OcrProcessPool
+    participant PL as Pipeline
+    participant VAL as app/validation
+    participant OW as OutputsWorker
+
+    Op->>MW: Procesar
+    MW->>WK: PDF, plantilla, AppConfig
+    WK->>POOL: arranca procesos y carga modelos
+    WK->>PB: lista de PDF
+    loop por cada PDF, en paralelo por archivo o por página
+        PB->>PL: process(pdf)
+        PL->>PL: calibra: deskew y alineación contra la referencia
+        PL->>POOL: páginas
+        POOL-->>PL: PageResult (OCR, tinta, validate_page)
+        PL->>PL: segunda opinión de firmas con el fondo del libro
+        PL->>PL: busca marcas VOID en hojas sin firma
+        PL-->>PB: ValidationReport
+    end
+    PB-->>WK: reportes ordenados
+    WK->>VAL: deduce log_number, corrige matrícula y fecha por libro, flota
+    WK->>VAL: aprende libros en book_matriculas.json y book_fechas.json
+    WK-->>MW: succeeded(reportes)
+    MW->>OW: guarda CSV, JSON y stats sin PDF
+    Op->>MW: Exportar
+    MW->>OW: write_outputs con PDF e índice _paginas.json
+```
+
+Tras **Procesar**, la ventana guarda los datos de la ejecución en segundo plano sin componer PDF. **Exportar** llama otra vez a `write_outputs()` sobre la misma carpeta y genera los PDF; por eso exportar no repite OCR.
+
+### Del escaneo a AirVault: cómo cambia la forma del dato
+
+```mermaid
+flowchart LR
+    PDF["PDF escaneado"] --> IMG["Imagen de página<br/>200 DPI, enderezada"]
+    TPL["Template<br/>zonas y anclas"] --> CROP
+    IMG --> CROP["Recortes por campo"]
+    CROP --> FR["FieldResult<br/>valor, texto crudo,<br/>confianza, tinta"]
+    FR --> PR["PageResult<br/>campos, estado, dup,<br/>disc, review"]
+    PR --> VR["ValidationReport<br/>un PDF"]
+    VR --> JSON["JSON de la ejecución<br/>fuente de verdad"]
+    JSON --> CSV["CSV principal y completo"]
+    JSON --> ENT["PDF de entrega<br/>+ _paginas.json"]
+    ENT --> MAN["Manifiesto por batch<br/>Registro por página"]
+    CSV --> MAN
+    MAN --> AVR["AirVault<br/>campos del Web Index"]
+```
+
 ## Tecnologías y arranque
 
 | Componente | Tecnología y función |
@@ -38,14 +181,15 @@ Los motores se crean con `device="cpu"`. oneDNN está desactivado por compatibil
 
 ## Flujo de datos
 
-```text
-PDF originales + plantilla
-  -> renderizado y calibración
-  -> recortes, OCR y análisis de tinta
-  -> validación por página y corrección por libro
-  -> CSV, JSON y estadísticas
-  -> exportación PDF e índice de páginas
-  -> carga, revisión, indexado y cierre en AirVault
+```mermaid
+flowchart TD
+    A["PDF originales + plantilla"] --> B["Renderizado y calibración"]
+    B --> C["Recortes, OCR y análisis de tinta"]
+    C --> D["Validación por página"]
+    D --> E["Corrección por libro"]
+    E --> F["CSV, JSON y estadísticas"]
+    F --> G["Exportación PDF e índice de páginas"]
+    G --> H["Carga, revisión, indexado y cierre en AirVault"]
 ```
 
 La GUI y la consola comparten `Pipeline`, `process_pdf_batch()` y `write_outputs()`. La GUI ejecuta todos los PDF seleccionados; la consola también permite rangos. `PageRange` numera el conjunto desde 1 y lo divide por archivo.
@@ -109,6 +253,20 @@ Código: `app/core/pipeline.py`, `app/ocr/`, `app/vision/signature.py` y `book_b
 | Estado | `OK`, `WARNING` o `ERROR` según los datos principales y su evidencia. Firmas y vuelo opcional no determinan por sí solos ese estado. |
 | Revisión | `needs_review()` alimenta tanto `review` del CSV como el reparto de la entrega. Un `WARNING` no implica siempre revisión manual. |
 
+`needs_review()` es una sola pregunta con dos salidas. Cualquiera de estas condiciones manda la página a **REVISAR**; si no se cumple ninguna, viaja en los batches automáticos aunque su estado sea `WARNING`:
+
+```mermaid
+flowchart TD
+    P["PageResult ya validado<br/>por página y por libro"] --> Q{"¿Alguna se cumple?"}
+    Q -->|"blank"| R["review = true<br/>batch REVISAR"]
+    Q -->|"sin matrícula utilizable"| R
+    Q -->|"sin log_number utilizable"| R
+    Q -->|"date_review: fecha antigua, futura o incoherente"| R
+    Q -->|"discrepancy o airvault_discrepancy: falta firma o licencia confirmada"| R
+    Q -->|"airvault_review: falta un obligatorio del Web Index"| R
+    Q -->|"ninguna"| N["review = false<br/>batch normal, se puede completar"]
+```
+
 La clasificación de firmas se hace por página. Mantenimiento (licencia de técnico o corrección escrita) requiere firma de piloto, firma de técnico y licencia de técnico. Vuelo requiere firma de piloto y firma y licencia de capitán. La firma de técnico no determina el tipo porque su zona puede recibir sellos ajenos. `disc` y `disc_reason` describen faltas confirmadas; una lectura incierta no equivale a ausencia confirmada.
 
 Antes de confirmar posibles discrepancias, `void_mark.py` busca una marca VOID en regiones propuestas de toda la página. Exige dos lecturas compatibles, limita regiones y variantes y admite cancelación. Una marca confirmada anula el reclamo de firmas, conservando los controles de identidad y fecha. Si falta su modelo portable, registra el motivo y mantiene la discrepancia. Puede omitir marcas de trazo fino, letras muy separadas u orientación difícil; no debe interpretarse la ausencia de detección como prueba de que la página no es VOID. Medido sobre una muestra de 12 páginas etiquetadas a mano (`output/estudio_revision/muestra_void.json`): reconoce 2 de 5 marcas reales y no inventa ninguna en las 7 restantes. Las que omite son marcas enormes y cursivas que el reconocedor no lee ni engordando el trazo, ni con el modelo de manuscrito, ni ampliando los topes de tamaño; el detector de texto tampoco las propone como texto a ninguna escala. Subir ese recall pide un clasificador de la marca entrenado con páginas etiquetadas, no otro ajuste del reconocedor.
@@ -123,7 +281,20 @@ Código: `app/validation/`, `app/utils/date_window.py`, `app/vision/void_mark.py
 
 ### 4. Paralelismo y cancelación
 
-`QThread` mantiene la interfaz activa; procesos persistentes distribuyen el OCR pesado. `app/core/parallelism.py` calcula procesos e hilos según CPU y memoria. Los resultados se ordenan antes de escribirlos. La cancelación se propaga a los trabajos y corta la cadena automática; lo ya escrito puede permanecer, pero una ejecución OCR cancelada no es una entrega completa.
+`QThread` mantiene la interfaz activa; procesos persistentes distribuyen el OCR pesado. `app/core/parallelism.py` calcula procesos e hilos según CPU y memoria. Los resultados se ordenan antes de escribirlos.
+
+`process_pdf_batch()` elige cómo repartir según cuántos PDF hay frente a cuántos procesos tiene el pool:
+
+```mermaid
+flowchart TD
+    S["process_pdf_batch(PDF, pool)"] --> D{"¿archivos >= procesos del pool?"}
+    D -->|"sí"| F["Reparto por archivo<br/>cada proceso lee un PDF entero"]
+    D -->|"no"| G["Reparto por página<br/>los PDF van de uno en uno<br/>y sus páginas se reparten en el pool"]
+    F --> O["Reportes en el orden de entrada"]
+    G --> O
+```
+
+Con pocos archivos, repartir páginas aprovecha mejor el mismo pool; con muchos, cada proceso con su archivo evita coordinar página por página. La cancelación se propaga a los trabajos y corta la cadena automática; lo ya escrito puede permanecer, pero una ejecución OCR cancelada no es una entrega completa.
 
 ### 5. Reportes, depuración y exportación
 
@@ -162,6 +333,33 @@ Código: `app/reports/outputs.py`, `csv_reporter.py`, `json_reporter.py`, `organ
 | Planear | Mapea páginas y campos; comprueba obligatorios, duplicados, valores remotos y matrícula del libro. Una diferencia de cantidad bloquea el batch. |
 | Indexar | Escribe las páginas permitidas, relee los valores y actualiza el manifiesto. Conserva páginas válidas, omite conflictos y retira separadores del flujo normal. |
 | Completar | Completa solo batches válidos para Web Search. **REVISAR** conserva separadores y no se publica automáticamente. |
+
+Cada batch es un `Trabajo` (`flujo.py`) con su `Manifiesto` (`model.py`). Cada etapa guarda `pendiente`, `en_curso`, `hecha`, `error` u `omitida`, y cada página (`Registro`) guarda si quedó `escrita`, `omitida` o con `error`. Ese estado es lo que permite cerrar la ventana y retomar con **Continuar pendiente**.
+
+```mermaid
+stateDiagram-v2
+    state "Preparado" as Preparado
+    state "Subido, esperando publicación" as Subido
+    state "Descubierto en AirVault" as Descubierto
+    state "Planeado" as Planeado
+    state "Indexado y verificado" as Indexado
+    state "Completado en Web Search" as Completado
+    state "Revisión humana" as Humana
+    state "Bloqueado" as Bloqueado
+
+    [*] --> Preparado: preparar (CSV, PDF, _paginas.json)
+    Preparado --> Subido: subir por Quick Upload
+    Subido --> Descubierto: descubrir por nombre, cantidad y contenido
+    Subido --> Bloqueado: posible duplicado con la casilla marcada
+    Descubierto --> Planeado: planificar con mapping y guards
+    Planeado --> Bloqueado: cantidad distinta o libro en conflicto
+    Planeado --> Indexado: indexar, releer y verificar
+    Indexado --> Completado: completar si el batch es normal y válido
+    Indexado --> Humana: batch REVISAR o páginas amarillas
+    Completado --> [*]
+    Humana --> [*]
+    Bloqueado --> [*]: decide el operador
+```
 
 Si una página remota válida asigna otra aeronave al mismo libro, la escritura contradictoria se bloquea. Si AirVault contiene matrículas incompatibles para ese libro, no se toma un consenso remoto.
 
