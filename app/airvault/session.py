@@ -89,6 +89,15 @@ class ErrorDeConexion(RuntimeError):
     """No se pudo hablar con AirVault, ni siquiera reintentando."""
 
 
+class RespuestaPerdida(ErrorDeConexion):
+    """La peticion salio, pero su respuesta no llego.
+
+    Solo la levantan las peticiones que no se pueden repetir a ciegas (ver
+    ``repetir_sin_respuesta`` en :meth:`SesionAirVault._pedir`): AirVault
+    pudo haberla atendido, y mandarla otra vez haria dos veces lo mismo.
+    """
+
+
 class ErrorDeAirVault(RuntimeError):
     """AirVault contesto, y lo que contesto es un rechazo.
 
@@ -654,6 +663,14 @@ class SesionAirVault:
 
         La espera crece con cada intento; reintentar al instante contra un
         servidor que se esta ahogando solo lo empeora.
+
+        ``repetir_sin_respuesta=False`` es para lo que no se puede mandar dos
+        veces, como ``FinishUpload``, que crea el batch: si la peticion salio
+        y la respuesta no llego, se levanta :class:`RespuestaPerdida` en vez
+        de repetirla, y quien llama comprueba en la cola si se hizo. Un
+        rechazo del servidor (un 500) si se repite: ese si dice que no se
+        hizo. ``tiempo_limite`` sustituye al de la configuracion para una
+        peticion que se sabe larga.
         """
         if not self._autenticada:
             raise ErrorDeSesion("La sesion no esta autenticada")
@@ -661,6 +678,10 @@ class SesionAirVault:
         intentos = max(1, self.config.reintentos)
         escribe = metodo.upper() != "GET"
         propias = dict(extra.pop("headers", None) or {})
+        tiempo_limite = float(
+            extra.pop("tiempo_limite", None) or self.config.timeout_s
+        )
+        repetir_sin_respuesta = bool(extra.pop("repetir_sin_respuesta", True))
         # Renovar la autenticacion no consume uno de los reintentos de red.
         # Con ``reintentos=1`` la version anterior renovaba las cookies y
         # terminaba el bucle sin llegar a repetir la peticion que habia
@@ -679,22 +700,35 @@ class SesionAirVault:
                     cabeceras.setdefault(CABECERA_ANTIFORGERY, token)
             try:
                 respuesta = self.http.request(
-                    metodo, url, timeout=self.config.timeout_s,
+                    metodo, url, timeout=tiempo_limite,
                     headers=cabeceras or None, **extra
                 )
             except requests.exceptions.SSLError as exc:
                 # Una CA desconocida no se arregla reintentando y esconderla
                 # como un corte de red hace imposible diagnosticar la empresa.
                 raise ErrorDeConexion(_motivo_ssl(exc)) from exc
+            except requests.exceptions.ConnectTimeout as exc:
+                # La conexion ni se abrio: la peticion no salio y repetirla
+                # es seguro incluso para lo que no se puede mandar dos veces.
+                ultimo = f"no se pudo conectar en {tiempo_limite:.0f}s ({exc})"
             except requests.Timeout as exc:
-                ultimo = (
-                    f"no contesto en {self.config.timeout_s:.0f}s ({exc})"
-                )
+                self._parar_si_cancelada(ruta)
+                ultimo = f"no contesto en {tiempo_limite:.0f}s ({exc})"
+                if not repetir_sin_respuesta:
+                    raise RespuestaPerdida(
+                        f"AirVault no contesto {ruta} en "
+                        f"{tiempo_limite:.0f}s; pudo haberla atendido."
+                    ) from exc
             except requests.RequestException as exc:
                 # Cancelar cierra el pool, y eso llega aqui como un corte de
                 # red. No lo es: no hay nada que reintentar ni que contar.
                 self._parar_si_cancelada(ruta)
                 ultimo = f"no se pudo conectar ({exc})"
+                if not repetir_sin_respuesta:
+                    raise RespuestaPerdida(
+                        f"Se corto la conexion esperando {ruta} ({exc}); "
+                        "AirVault pudo haberla atendido."
+                    ) from exc
             else:
                 if self._caduco(respuesta):
                     if renovaciones == 0 and self._renovar_en_silencio():

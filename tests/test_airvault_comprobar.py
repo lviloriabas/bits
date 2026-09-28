@@ -1851,6 +1851,261 @@ def test_subir_confirma_todos_y_carga_solo_la_division_pendiente(
     assert trabajos[2].manifiesto.batch_id == "003REV"
 
 
+def test_una_carga_sin_confirmar_no_deja_sin_indexar_a_las_confirmadas(
+    tmp_path, monkeypatch
+):
+    """Si no se puede subir el siguiente, lo que ya esta en AirVault se indexa.
+
+    La salida temprana («no se inicia otra carga hasta confirmar la
+    anterior») volvia antes de entregar al indexado los batches ya
+    confirmados, asi que una carga lenta dejaba toda la ejecucion quieta.
+    """
+    trabajos = _trabajos_principal_division_y_revisar(tmp_path)
+    confirmado, sin_confirmar, sin_subir = trabajos
+    for trabajo in (confirmado, sin_confirmar):
+        trabajo.manifiesto.etapa("subir").marcar(EstadoEtapa.HECHA, "ok")
+        trabajo.guardar()
+    cliente = ClienteFalso(lotes=[lote("003PRI", "DP | BIT", 2)])
+    subidas: list[bool] = []
+    encontrados: list[str] = []
+    monkeypatch.setattr(
+        Trabajo, "subir", lambda *args, **kwargs: subidas.append(True)
+    )
+
+    fallos = subir_partes(
+        trabajos, SesionFalsa(), cliente=cliente,
+        al_encontrar=lambda trabajo, _todos: encontrados.append(
+            trabajo.manifiesto.nombre_batch
+        ),
+    )
+
+    assert subidas == []
+    assert [trabajo for trabajo, _detalle in fallos] == [sin_subir]
+    assert encontrados == ["DP | BIT"]
+
+
+def test_un_incompleto_que_sigue_amarillo_no_se_relee_pagina_por_pagina(
+    tmp_path,
+):
+    """La revision periodica lo releia entero cada dos minutos."""
+    trabajo, cliente = trabajo_subido(tmp_path)
+    trabajo.fijar_lote("003SRO")
+    trabajo.manifiesto.etapa("verificar").marcar(
+        EstadoEtapa.ERROR, "1/2 en Valid"
+    )
+    trabajo.guardar()
+    cliente.mapa = [PaginaDelLote(1, 0, 1), PaginaDelLote(2, 3, 2)]
+    estados = comprobar_partes([trabajo], cliente)
+    assert estados[0].estado == INCOMPLETO
+    cliente.lecturas.clear()
+
+    detectado, = detectar_indexados(estados, cliente)
+
+    assert detectado.estado == INCOMPLETO
+    assert cliente.lecturas == []
+
+    # Cuando el mapa ya lo ve todo en verde, si se confirma pagina a pagina.
+    cliente.mapa = [PaginaDelLote(1, 0, 1), PaginaDelLote(2, 0, 2)]
+    detectar_indexados(estados, cliente)
+    assert sorted(cliente.lecturas) == [1, 2]
+
+
+def test_reanudar_la_subida_indexa_tambien_los_ya_confirmados(
+    tmp_path, monkeypatch
+):
+    """La reanudacion solo manda lo que falta subir, pero indexa todo lo listo.
+
+    Antes el batch ya confirmado de la misma ejecucion no entraba en esa
+    tanda y esperaba a otra vuelta del reloj, que tampoco lo indexaba
+    mientras quedaran cargas pendientes. Como lo confirmado en la tanda, se
+    indexa antes de la carga siguiente.
+    """
+    from app.gui.airvault_window import TrabajoAirVaultWorker
+
+    confirmado, pendiente, incompleto = _trabajos_principal_division_y_revisar(
+        tmp_path
+    )
+    confirmado.manifiesto.etapa("subir").marcar(EstadoEtapa.HECHA, "ok")
+    confirmado.manifiesto.batch_id = "003PRI"
+    confirmado.guardar()
+    # El incompleto lo retoma la revision periodica, con su tope.
+    incompleto.manifiesto.etapa("subir").marcar(EstadoEtapa.HECHA, "ok")
+    incompleto.manifiesto.batch_id = "003REV"
+    incompleto.manifiesto.etapa("verificar").marcar(EstadoEtapa.ERROR, "1/2")
+    incompleto.guardar()
+    cliente = ClienteFalso()
+    eventos: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        "app.airvault.flujo.comprobar_partes",
+        lambda lotes, _cliente, avisar=None: [
+            EstadoParte(lotes[0], LISTO, "2 paginas")
+        ],
+    )
+
+    def subir_falso(lotes, _sesion, al_encontrar=None, **_kwargs):
+        for trabajo in lotes:
+            eventos.append(("subir", trabajo.manifiesto.nombre_batch))
+            trabajo.manifiesto.batch_id = "003DOS"
+            al_encontrar(trabajo, lotes)
+        return []
+
+    monkeypatch.setattr("app.airvault.flujo.subir_partes", subir_falso)
+    estado = {
+        "config": AirVaultConfig(), "raiz": tmp_path,
+        "sesion": SesionFalsa(), "indexar_al_encontrar": True,
+        "completar": False, "trabajos": [confirmado, pendiente, incompleto],
+        "pendientes_subida": [pendiente],
+    }
+    worker = TrabajoAirVaultWorker("subir_pendientes", estado)
+    monkeypatch.setattr(worker, "_conectar", lambda: cliente)
+
+    def indexar_falso(trabajo, _cliente, _raiz):
+        eventos.append(("indexar", trabajo.manifiesto.nombre_batch))
+        return {}
+
+    monkeypatch.setattr(worker, "_indexar_batch_encontrado", indexar_falso)
+
+    worker._subir_pendientes()
+
+    assert eventos == [
+        ("indexar", "DP | BIT"),
+        ("subir", "DP | BIT -2"),
+        ("indexar", "DP | BIT -2"),
+    ]
+
+    # La orden a mano sobre una fila no arrastra a las demas.
+    eventos.clear()
+    pendiente.manifiesto.batch_id = None
+    estado["forzados"] = [str(pendiente.carpeta)]
+    worker._subir_pendientes()
+    assert ("indexar", "DP | BIT") not in eventos
+
+
+def test_la_subida_indexa_cada_batch_de_punta_a_punta(tmp_path, monkeypatch):
+    """El recorrido entero del boton «Subir», contra un AirVault simulado.
+
+    Cada archivo sube, AirVault tarda en armarlo (el nombre aparece antes
+    que las paginas), se identifica, se escribe y se verifica antes de que
+    salga el siguiente. Es justo lo que no pasaba: el primer batch aparecia
+    a medias, la confirmacion fallaba, la cadena se cortaba y nada llegaba a
+    escribirse.
+    """
+    from dataclasses import replace as reemplazar
+
+    from app.gui.airvault_window import TrabajoAirVaultWorker
+
+    csv = corrida(tmp_path, pdfs=("a.pdf", "b.pdf"))
+    trabajos = preparar_partes(AirVaultConfig(), tmp_path / "job", csv, "DP | BIT")
+    assert [len(t.manifiesto.registros) for t in trabajos] == [1, 1]
+    eventos: list[tuple[str, str]] = []
+
+    class AirVaultSimulado(ClienteFalso):
+        """Cola, paginas por batch y cargas que tardan en armarse."""
+
+        def __init__(self):
+            super().__init__(picklist=["HP-1848CMP"])
+            self.por_lote: dict[str, dict] = {}
+            self.faltan_vueltas: dict[str, int] = {}
+
+        def publicar(self, nombre, paginas):
+            batch_id = f"003B{len(self.lotes) + 1}"
+            self.lotes.append(lote(batch_id, nombre, paginas))
+            self.por_lote[batch_id] = {}
+            self.faltan_vueltas[batch_id] = 2
+
+        def listar_lotes(self, filtro=""):
+            visibles = [
+                reemplazar(l, paginas=0) if self.faltan_vueltas.get(l.batch_id)
+                else l
+                for l in self.lotes
+            ]
+            if not filtro:
+                return visibles
+            return [l for l in visibles if filtro.lower() in l.nombre.lower()]
+
+        def abrir_lote(self, batch_id):
+            self.abiertos.append(batch_id)
+            actual = next(l for l in self.lotes if l.batch_id == batch_id)
+            return {"pageCount": actual.paginas, "batchId": batch_id}
+
+        def leer_pagina(self, batch_id, numero):
+            self.lecturas.append(numero)
+            return self.por_lote[batch_id].get(numero, pagina(numero, estado=3))
+
+        def guardar_pagina(self, batch_id, numero, valores, estado,
+                           pagina_siguiente=None):
+            eventos.append(("escribir", batch_id))
+            self.escrituras.append((numero, dict(valores), estado))
+            self.por_lote[batch_id][numero] = pagina(numero, estado, valores)
+            return {"ok": True}
+
+        def paginas_del_lote(self, batch_id):
+            actual = next(l for l in self.lotes if l.batch_id == batch_id)
+            return [
+                PaginaDelLote(
+                    n,
+                    self.por_lote[batch_id].get(n, pagina(n)).estado,
+                    n,
+                )
+                for n in range(1, actual.paginas + 1)
+            ]
+
+    cliente = AirVaultSimulado()
+
+    def subir(self, sesion, pdf="", avisar=None, cliente=None):
+        self.manifiesto.lotes_previos = [
+            actual.batch_id for actual in cliente.listar_lotes()
+        ]
+        self.manifiesto.etapa("subir").marcar(EstadoEtapa.HECHA, "ok")
+        self.guardar()
+        eventos.append(("subir", self.manifiesto.nombre_batch))
+        cliente.publicar(
+            self.manifiesto.nombre_batch, len(self.manifiesto.registros)
+        )
+
+    monkeypatch.setattr(Trabajo, "subir", subir)
+    monkeypatch.setattr(
+        "app.airvault.flujo.comprobar_entrega",
+        lambda _csv: [SimpleNamespace(paginas=[1])] * 2,
+    )
+    monkeypatch.setattr(
+        "app.airvault.flujo.preparar_partes", lambda *args, **kwargs: trabajos,
+    )
+    estado = {
+        "config": AirVaultConfig(), "csv": csv, "raiz": tmp_path,
+        "carpeta_job": tmp_path / "job", "nombre_lote": "DP | BIT",
+        "paginas_por_batch": 100, "sesion": SesionFalsa(),
+        "indexar_al_encontrar": True, "completar": True, "tanda_hecha": True,
+    }
+    worker = TrabajoAirVaultWorker("subir", estado)
+    monkeypatch.setattr(worker, "_conectar", lambda: cliente)
+
+    def dormir(_segundos):
+        # Lo que tarda AirVault en armar lo recibido.
+        for batch_id, faltan in cliente.faltan_vueltas.items():
+            cliente.faltan_vueltas[batch_id] = max(0, faltan - 1)
+
+    monkeypatch.setattr(worker, "_dormir", dormir)
+    subidos: list[dict] = []
+    worker.subido.connect(subidos.append)
+
+    worker._subir()
+
+    assert [evento for evento in eventos if evento[0] != "escribir"] == [
+        ("subir", "DP | BIT -1"), ("subir", "DP | BIT -2"),
+    ]
+    # Cada batch se escribe entero antes de que salga el archivo siguiente.
+    assert eventos.index(("escribir", "003B1")) < eventos.index(
+        ("subir", "DP | BIT -2")
+    )
+    assert ("escribir", "003B2") in eventos
+    assert [t.manifiesto.batch_id for t in trabajos] == ["003B1", "003B2"]
+    assert all(t.manifiesto.etapa_hecha("verificar") for t in trabajos)
+    assert cliente.completados == ["003B1", "003B2"]
+    assert subidos[0]["fallos"] == [] and subidos[0]["fallos_indexado"] == []
+
+
 def test_no_repite_un_batch_que_quick_upload_ya_confirmo_mientras_procesa(
     tmp_path, monkeypatch
 ):
@@ -2236,17 +2491,22 @@ def test_un_batch_que_falla_no_impide_subir_los_otros(tmp_path, monkeypatch):
     ]
 
 
-def test_el_indexado_avanza_mientras_sube_el_siguiente_archivo(
+def test_cada_batch_se_indexa_antes_de_subir_el_siguiente(
     tmp_path, monkeypatch
 ):
-    """Las cargas van de una en una; el indexado de lo confirmado, en paralelo."""
+    """Subida > Indexado, batch por batch, en el mismo hilo y la misma sesion.
+
+    El indexado corria en otro hilo con una copia de la sesion mientras el
+    siguiente archivo subia; AirVault atiende de una en una las peticiones
+    de una misma sesion, y el indexado se quedaba esperando a la carga.
+    """
     from app.airvault.flujo import EstadoParte
     from app.gui.airvault_window import TrabajoAirVaultWorker
 
     trabajos = _trabajos_principal_division_y_revisar(tmp_path)[:2]
     cliente = ClienteFalso()
     eventos: list[tuple[str, str]] = []
-    indexando = threading.Event()
+    hilos: set[int] = set()
 
     monkeypatch.setattr(
         "app.airvault.flujo.comprobar_entrega",
@@ -2269,7 +2529,6 @@ def test_el_indexado_avanza_mientras_sube_el_siguiente_archivo(
         primero.manifiesto.batch_id = "ID-1"
         eventos.append(("encontrar", primero.manifiesto.nombre_batch))
         al_encontrar(primero, lotes)
-        assert indexando.wait(1), "el indexado no arranco en paralelo"
         eventos.append(("subir", segundo.manifiesto.nombre_batch))
         segundo.manifiesto.batch_id = "ID-2"
         eventos.append(("encontrar", segundo.manifiesto.nombre_batch))
@@ -2285,24 +2544,28 @@ def test_el_indexado_avanza_mientras_sube_el_siguiente_archivo(
     }
     worker = TrabajoAirVaultWorker("subir", estado)
     monkeypatch.setattr(worker, "_conectar", lambda: cliente)
-    monkeypatch.setattr(worker, "_cliente_paralelo", lambda _c: cliente)
+    clientes = []
 
-    def indexar_falso(trabajo, _cliente, _raiz):
+    def indexar_falso(trabajo, cliente_usado, _raiz):
         eventos.append(("indexar", trabajo.manifiesto.nombre_batch))
-        indexando.set()
+        hilos.add(threading.get_ident())
+        clientes.append(cliente_usado)
         return {}
 
     monkeypatch.setattr(worker, "_indexar_batch_encontrado", indexar_falso)
 
     worker._subir()
 
-    primer_indexado = eventos.index(
-        ("indexar", trabajos[0].manifiesto.nombre_batch)
-    )
-    assert primer_indexado < eventos.index(
-        ("subir", trabajos[1].manifiesto.nombre_batch)
-    )
-    assert ("indexar", trabajos[1].manifiesto.nombre_batch) in eventos
+    assert eventos == [
+        ("subir", trabajos[0].manifiesto.nombre_batch),
+        ("encontrar", trabajos[0].manifiesto.nombre_batch),
+        ("indexar", trabajos[0].manifiesto.nombre_batch),
+        ("subir", trabajos[1].manifiesto.nombre_batch),
+        ("encontrar", trabajos[1].manifiesto.nombre_batch),
+        ("indexar", trabajos[1].manifiesto.nombre_batch),
+    ]
+    assert hilos == {threading.get_ident()}
+    assert clientes == [cliente, cliente]
 
 
 def test_un_batch_que_no_se_indexa_no_cancela_a_los_que_esperan(
@@ -2345,7 +2608,6 @@ def test_un_batch_que_no_se_indexa_no_cancela_a_los_que_esperan(
     }
     worker = TrabajoAirVaultWorker("subir", estado)
     monkeypatch.setattr(worker, "_conectar", lambda: cliente)
-    monkeypatch.setattr(worker, "_cliente_paralelo", lambda _c: cliente)
 
     def indexar_falso(trabajo, _cliente, _raiz):
         if trabajo is trabajos[0]:
@@ -2404,7 +2666,6 @@ def test_el_worker_sube_tambien_los_pendientes_de_otras_ejecuciones(
         return ClienteFalso()
 
     monkeypatch.setattr(worker, "_conectar", conectar)
-    monkeypatch.setattr(worker, "_cliente_paralelo", lambda cliente: cliente)
 
     worker._subir()
 

@@ -619,6 +619,63 @@ def test_indexar_termina_primero_todas_las_subidas(ventana, monkeypatch):
     assert continuaciones == [True]
 
 
+def test_un_batch_listo_se_indexa_aunque_otra_parte_siga_sin_subir(
+    ventana, monkeypatch
+):
+    """Subida > Indexado va batch por batch.
+
+    Antes se exigían todas las cargas terminadas: una sola subida atascada,
+    o que se quedó «en curso» porque FinishUpload no contestó, dejaba la
+    ejecución entera revisando sin escribir nada.
+    """
+    from app.airvault.flujo import LISTO, SIN_SUBIR
+
+    listo = parte(LISTO, "Listo", carpeta="listo")
+    pendiente = parte(SIN_SUBIR, "Pendiente", carpeta="pendiente")
+    pendiente.trabajo.manifiesto.etapa_hecha = lambda nombre: False
+    ventana._trabajos = [listo.trabajo, pendiente.trabajo]
+    ventana._estados = [listo, pendiente]
+    ventana._estado["planes"] = {"listo": (PlanFalso(), None)}
+    lanzados = []
+    continuaciones = []
+    monkeypatch.setattr(
+        ventana, "_lanzar", lambda modo, estado: lanzados.append(
+            (modo, list(estado["listos"]))
+        ),
+    )
+    monkeypatch.setattr(
+        ventana, "_continuar_pendiente", lambda: continuaciones.append(True)
+    )
+
+    ventana._indexar()
+
+    assert lanzados == [("indexar", [listo.trabajo])]
+    assert continuaciones == []
+
+
+def test_la_cadena_no_reescribe_sola_un_incompleto_sin_comprobaciones(
+    ventana,
+):
+    """Se sigue vigilando, pero no se reescribe entero cada dos minutos."""
+    from app.airvault.flujo import INCOMPLETO, LISTO
+
+    agotado = parte(INCOMPLETO, "Agotado", carpeta="agotado")
+    nuevo = parte(LISTO, "Nuevo", carpeta="nuevo")
+    ventana._trabajos = [agotado.trabajo, nuevo.trabajo]
+    ventana._estados = [agotado, nuevo]
+    ventana._estado["planes"] = {
+        "agotado": (PlanFalso(), None), "nuevo": (PlanFalso(), None),
+    }
+    ventana._reconfirmaciones = {"agotado": 0}
+
+    assert ventana._listos() == [agotado.trabajo, nuevo.trabajo]
+    assert ventana._listos_automaticos() == [nuevo.trabajo]
+
+    # Con comprobaciones pendientes, sí vuelve a escribirse solo.
+    ventana._reconfirmaciones = {"agotado": 1}
+    assert ventana._listos_automaticos() == [agotado.trabajo, nuevo.trabajo]
+
+
 # ── lo que cuenta al terminar ──────────────────────────────────────
 
 class PlanFalso:

@@ -45,7 +45,6 @@ from app.airvault.discovery import (
     recien_llegados,
 )
 from app.airvault.discovery import buscar as buscar_lote
-from app.airvault.discovery import esperar as esperar_lote
 from app.airvault.indexer import Indexador, Plan, Resultado, verificar_lote
 from app.airvault.mapping import (
     ResolutorFlota,
@@ -1253,6 +1252,28 @@ class Trabajo:
             raise ErrorDeCorrida(
                 f"No se pudo subir {archivo.name}: {resultado.detalle}"
             )
+        if not getattr(resultado, "confirmada", True):
+            # Los trozos llegaron y FinishUpload salio, pero su respuesta no.
+            # Sigue «en curso»: quien llama busca la carga en la cola con la
+            # foto previa, y encontrarla es lo que la da por hecha (ver
+            # :meth:`anotar_lote`). Levantar aqui cortaba la cadena igual
+            # que un rechazo, sin mirar si AirVault la tenia.
+            self.manifiesto.etapa("subir").marcar(
+                EstadoEtapa.EN_CURSO,
+                f"{archivo.name}: FinishUpload no contesto; se confirma en "
+                "la cola de AirVault",
+            )
+            self.manifiesto.resubir_por_mezcla = False
+            self._duplicado_permitido = False
+            self.guardar()
+            if avisar is not None:
+                avisar(
+                    "AirVault no contestó al terminar la carga; se busca en "
+                    "la cola en vez de reenviarla",
+                    0,
+                    0,
+                )
+            return
         self.manifiesto.etapa("subir").marcar(EstadoEtapa.HECHA, archivo.name)
         self.manifiesto.resubir_por_mezcla = False
         self._duplicado_permitido = False
@@ -1275,33 +1296,24 @@ class Trabajo:
 
         Un batch recien subido tarda en cruzar el procesamiento del servidor,
         asi que no aparecer todavía no es un error hasta que vence el limite
-        de espera.
+        de espera. Con ``esperar`` la espera dura hasta que AirVault lo tiene
+        entero y se puede identificar; ver :meth:`_esperar_confirmacion`.
         """
         esperadas = len(self.manifiesto.registros)
         nombre = self.manifiesto.nombre_batch
         if avisar is not None:
             avisar(f"Buscando el batch {nombre} en AirVault", 0, 0)
+        if esperar:
+            return self._esperar_confirmacion(cliente, dormir, avisar, cache)
         error_busqueda: Optional[Exception] = None
         lote = None
         try:
-            if esperar:
-                lote = esperar_lote(
-                    cliente.listar_lotes,
-                    nombre,
-                    self.manifiesto.repo_id,
-                    esperadas,
-                    self.config.espera_descubrimiento_s,
-                    self.config.espera_maxima_s,
-                    dormir=dormir,
-                    previos=self.manifiesto.lotes_previos or None,
-                )
-            else:
-                lote = buscar_lote(
-                    cliente.listar_lotes(),
-                    nombre,
-                    self.manifiesto.repo_id,
-                    esperadas,
-                )
+            lote = buscar_lote(
+                cliente.listar_lotes(),
+                nombre,
+                self.manifiesto.repo_id,
+                esperadas,
+            )
         except (LoteAmbiguo, LoteNoEncontrado) as exc:
             error_busqueda = exc
             lote = None
@@ -1329,14 +1341,119 @@ class Trabajo:
                 )
             ):
                 raise error_busqueda
-            raise ErrorDeCorrida(
-                f"AirVault todavía no permite confirmar cuál batch "
-                f"corresponde a «{nombre}». No se renombró ni vinculó "
-                "ninguno: el programa volverá a contrastar la cantidad de "
-                "páginas, el Batch Name y los Log Page Number internos, y "
-                "solo aceptará una coincidencia única."
-            )
+            raise ErrorDeCorrida(self._mensaje_sin_confirmar())
         return self.anotar_lote(cliente, lote, avisar)
+
+    def _esperar_confirmacion(
+        self,
+        cliente,
+        dormir: Callable[[float], None],
+        avisar: Optional[Aviso],
+        cache: Optional[dict[str, str]],
+    ) -> str:
+        """Espera a que AirVault tenga la carga entera y la identifica.
+
+        AirVault pone el batch en la cola antes de terminar de armarlo: el
+        nombre aparece enseguida y las paginas van llegando. La espera
+        anterior se daba por satisfecha con ver el nombre, y la
+        identificacion, que exige la cantidad exacta de paginas, fallaba al
+        instante. Ese fallo cortaba la cadena de subidas y dejaba el batch
+        sin indexar hasta la siguiente comprobacion periodica, que tampoco
+        lo indexaba mientras quedaran cargas por hacer. Ahora se mira la
+        cola cada ``espera_descubrimiento_s`` hasta que la carga cuadra en
+        paginas y contenido, o hasta ``espera_maxima_s``.
+
+        Un Batch Name interno que no se pudo leer en una vuelta (la primera
+        pagina aun sin procesar) se vuelve a pedir en la siguiente, en vez de
+        quedarse guardado como vacio.
+        """
+        nombre = self.manifiesto.nombre_batch
+        nombres_embebidos = cache if cache is not None else {}
+        espera = max(1.0, float(self.config.espera_descubrimiento_s or 0))
+        limite = max(0.0, float(self.config.espera_maxima_s or 0))
+        # Las vueltas acotan la espera aunque ``dormir`` no duerma, que es
+        # como la ejercitan las pruebas.
+        vueltas = max(1, int(limite // espera) + 1)
+        lotes_actuales: List[ResumenLote] = []
+        for vuelta in range(1, vueltas + 1):
+            for clave in [c for c, valor in nombres_embebidos.items() if not valor]:
+                del nombres_embebidos[clave]
+            lotes_actuales = list(cliente.listar_lotes())
+            lote = _lote_por_identidad_y_contenido(
+                self,
+                cliente,
+                lotes_actuales,
+                avisar=avisar,
+                cache=nombres_embebidos,
+            )
+            if lote is not None:
+                return self.anotar_lote(cliente, lote, avisar)
+            if vuelta == vueltas:
+                break
+            en_camino = self._carga_en_camino(lotes_actuales)
+            logger.info(
+                "El batch {!r} todavia no se puede confirmar ({}); se vuelve "
+                "a mirar en {:.0f} s (vuelta {}/{})",
+                nombre, en_camino, espera, vuelta, vueltas,
+            )
+            if avisar is not None:
+                avisar(
+                    f"{en_camino[:1].upper()}{en_camino[1:]}; se vuelve a "
+                    f"mirar en {espera:.0f} s",
+                    0,
+                    0,
+                )
+            dormir(espera)
+        if not any(
+            _es_nombre_provisional(actual.nombre, nombre)
+            or _nombre_visible_compatible(actual.nombre, nombre)
+            for actual in lotes_actuales
+        ):
+            raise LoteNoEncontrado(
+                f"No hay ningun batch llamado {nombre!r} en AirVault"
+            )
+        raise ErrorDeCorrida(self._mensaje_sin_confirmar())
+
+    def _carga_en_camino(self, lotes: Sequence[ResumenLote]) -> str:
+        """Lo que la cola deja ver de esta carga mientras AirVault la arma."""
+        manifiesto = self.manifiesto
+        esperadas = min(manifiesto.cantidades_paginas_compatibles())
+        nuevos = {
+            lote.batch_id.strip().upper()
+            for lote in recien_llegados(
+                lotes, manifiesto.lotes_previos, manifiesto.repo_id
+            )
+        }
+        armandose = [
+            lote for lote in lotes
+            if (not lote.repo_id or lote.repo_id == manifiesto.repo_id)
+            and lote.paginas < esperadas
+            and (
+                _nombre_visible_compatible(lote.nombre, manifiesto.nombre_batch)
+                or (
+                    lote.batch_id.strip().upper() in nuevos
+                    and _es_nombre_provisional(
+                        lote.nombre, manifiesto.nombre_batch
+                    )
+                )
+            )
+        ]
+        if armandose:
+            lote = max(armandose, key=lambda actual: actual.paginas)
+            return (
+                f"AirVault todavía arma el batch {lote.batch_id}: "
+                f"{lote.paginas} de {esperadas} páginas"
+            )
+        return "AirVault todavía no publica la carga completa"
+
+    def _mensaje_sin_confirmar(self) -> str:
+        return (
+            f"AirVault todavía no permite confirmar cuál batch "
+            f"corresponde a «{self.manifiesto.nombre_batch}». No se renombró "
+            "ni vinculó ninguno: el programa volverá a contrastar la cantidad "
+            "de páginas, el Batch Name y los Log Page Number internos, y "
+            "solo aceptará una coincidencia única."
+        )
 
     def anotar_lote(
         self, cliente, lote: ResumenLote, avisar: Optional[Aviso] = None
@@ -1348,6 +1465,21 @@ class Trabajo:
         trabajo igual de anotado se haya llegado por donde se haya llegado.
         """
         self._ponerle_nombre(cliente, lote, avisar)
+        # Que AirVault tenga el batch es la prueba de que la carga llego. Una
+        # subida que quedo «en curso» porque FinishUpload no contesto a
+        # tiempo no puede seguir asi despues de confirmarse: la ventana no
+        # indexaba nada mientras quedara una sola subida sin dar por hecha.
+        # La hora es la de la carga, no la de ahora: con ella se decide si
+        # las partes siguientes rebasaron a otra que no aparece.
+        subida = self.manifiesto.etapa("subir")
+        if subida.estado not in (EstadoEtapa.HECHA, EstadoEtapa.OMITIDA):
+            momento = (
+                subida.actualizada
+                if subida.estado is EstadoEtapa.EN_CURSO else None
+            )
+            subida.marcar(EstadoEtapa.HECHA, "confirmado en AirVault")
+            if momento:
+                subida.actualizada = momento
         # El ID solo queda ligado al trabajo después de que AirVault confirma
         # el título. Guardarlo antes permitía continuar e indexar aunque el
         # batch siguiera indistinguible como ``Empty-Batch``.
@@ -2725,12 +2857,12 @@ def subir_partes(
     ejecucion.
 
     ``al_encontrar`` recibe cada batch en cuanto queda confirmado (ID, título,
-    páginas y contenido), sin esperar a las cargas que faltan. Lo que no se
-    hace en paralelo es subir: con dos archivos en vuelo AirVault los junta.
-    Indexar un batch ya confirmado no crea batches ni toca la cola, así que
-    puede avanzar mientras el siguiente archivo sube. Esperar a todas las
-    cargas dejaba una ejecución de ocho partes sin una sola página escrita
-    durante horas.
+    páginas y contenido), sin esperar a las cargas que faltan, y antes de
+    mandar el archivo siguiente: el recorrido es Subida > Indexado, batch por
+    batch y en el mismo hilo. Esperar a todas las cargas dejaba una ejecución
+    de ocho partes sin una sola página escrita durante horas, e indexar en
+    otro hilo mientras subía el siguiente archivo compartía la sesión de
+    AirVault con la carga en vuelo.
 
     Las cargas van de una en una y cada una se cierra antes de empezar la
     siguiente: se sube, se espera a que AirVault la publique y se le pone su
@@ -2821,6 +2953,12 @@ def subir_partes(
             )
             if avisar:
                 avisar(detalle, 0, 0)
+            # Lo que ya esta confirmado se indexa igual. Antes se volvia de
+            # aqui sin entregarlo, y una sola carga pendiente de confirmar
+            # dejaba sin indexar a todas las que ya estaban en AirVault.
+            for parte in estados:
+                if parte.batch_id:
+                    publicar(parte.trabajo)
             return [(trabajo, detalle) for trabajo in por_subir]
         procesandose = sum(
             parte.estado in (BUSCANDO, PROCESANDO) for parte in estados
@@ -4549,8 +4687,17 @@ def _estado_de(
             f"no se identificó tras {intentos} revisiones; empezó la espera "
             "antes de permitir otra subida",
         )
-    if not subida_rastreable:
-        manifiesto.etapa("subir").marcar(EstadoEtapa.HECHA, "confirmado en AirVault")
+    subida_actual = manifiesto.etapa("subir")
+    if subida_actual.estado not in (EstadoEtapa.HECHA, EstadoEtapa.OMITIDA):
+        # Tambien la que quedo «en curso»: el batch esta en AirVault, asi que
+        # la carga llego aunque FinishUpload no alcanzara a contestarlo.
+        momento = (
+            subida_actual.actualizada
+            if subida_actual.estado is EstadoEtapa.EN_CURSO else None
+        )
+        subida_actual.marcar(EstadoEtapa.HECHA, "confirmado en AirVault")
+        if momento:
+            subida_actual.actualizada = momento
         trabajo.guardar()
     cantidades_compatibles = manifiesto.cantidades_paginas_compatibles()
     if lote.paginas not in cantidades_compatibles:
@@ -4780,27 +4927,55 @@ def comprobar_partes(
     ]
 
 
-def _nada_en_verde(trabajo: "Trabajo", cliente) -> bool:
-    """Si el mapa del batch dice que ninguna pagina esta en verde.
+def _mapa_del_lote(trabajo: "Trabajo", cliente) -> Optional[list]:
+    """Las paginas no borradas del batch segun su mapa, o ``None``.
 
     Es una sola peticion. Solo vale para el batch automatico: REVISAR da por
-    buenas paginas en amarillo, asi que ahi el mapa no basta. Si el mapa no
-    se puede leer se hace la lectura completa, como siempre.
+    buenas paginas en amarillo, asi que ahi el mapa no basta. ``None`` si no
+    aplica o el mapa no se puede leer, y entonces se hace la lectura
+    completa, como siempre.
     """
     from app.airvault.indexer import FALLOS_DE_CAMINO
 
     batch_id = str(trabajo.manifiesto.batch_id or "").strip()
     leer_mapa = getattr(cliente, "paginas_del_lote", None)
     if trabajo.manifiesto.solo_subir or not batch_id or not callable(leer_mapa):
-        return False
+        return None
     try:
-        paginas = [p for p in leer_mapa(batch_id) if not p.borrada]
+        return [p for p in leer_mapa(batch_id) if not p.borrada]
     except FALLOS_DE_CAMINO:
         raise
     except Exception as exc:  # noqa: BLE001 - se cae a la lectura completa
         logger.debug("No se pudo leer el mapa del batch {}: {}", batch_id, exc)
-        return False
+        return None
+
+
+def _nada_en_verde(trabajo: "Trabajo", cliente) -> bool:
+    """Si el mapa del batch dice que ninguna pagina esta en verde."""
+    paginas = _mapa_del_lote(trabajo, cliente)
     return bool(paginas) and not any(p.valida for p in paginas)
+
+
+def _sigue_sin_terminar(trabajo: "Trabajo", cliente) -> bool:
+    """Si el mapa dice que alguna bitacora sigue fuera de verde.
+
+    Es para un batch que ya quedo incompleto en una verificacion anterior:
+    releerlo pagina por pagina solo repetiria el mismo resultado, y la
+    comprobacion periodica lo hacia con cada batch amarillo cada dos
+    minutos. Las divisorias no cuentan: nunca estan en verde y no se
+    verifican.
+    """
+    paginas = _mapa_del_lote(trabajo, cliente)
+    if not paginas:
+        return False
+    divisorias = {
+        registro.pagina_batch or registro.seq
+        for registro in trabajo.manifiesto.separadores()
+    }
+    return any(
+        not pagina.valida for pagina in paginas
+        if pagina.pagina not in divisorias
+    )
 
 
 def detectar_indexados(
@@ -4835,7 +5010,12 @@ def detectar_indexados(
                 0,
                 0,
             )
-        if _nada_en_verde(trabajo, cliente):
+        if parte.estado == INCOMPLETO and _sigue_sin_terminar(trabajo, cliente):
+            # Ya se verifico y quedo incompleto, y el mapa dice que sigue
+            # igual: una lectura en vez de una por pagina.
+            detectados.append(parte)
+            continue
+        if parte.estado != INCOMPLETO and _nada_en_verde(trabajo, cliente):
             # Recien publicado ninguna pagina esta en verde y releerlas una
             # por una solo confirmaria eso. Con varios batches de 500
             # paginas eran miles de lecturas en cada revision periodica.

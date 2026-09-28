@@ -345,6 +345,132 @@ def test_descubre_el_empty_batch_que_no_estaba_antes(tmp_path):
     assert trabajo.manifiesto.nombre_batch == "DP | BIT PRUEBA"
 
 
+def test_finishupload_sin_respuesta_queda_por_confirmar_sin_fallar(
+    tmp_path, monkeypatch
+):
+    """Los trozos llegaron; lo que no llego fue la respuesta del final.
+
+    Se levantaba como un fallo y cortaba la cadena de subidas sin mirar si
+    AirVault tenia la carga. Ahora queda «en curso» y quien sube la busca en
+    la cola con la foto previa.
+    """
+    from app.airvault import uploader
+    from app.airvault.uploader import ResultadoSubida
+
+    class SubidorSinRespuesta(SubidorFalso):
+        def subir(self, ruta, valores, avisar=None):
+            super().subir(ruta, valores, avisar)
+            return ResultadoSubida(str(ruta), True, "no contesto", confirmada=False)
+
+    csv = corrida(tmp_path)
+    monkeypatch.setattr(uploader, "SubidorQuickUpload", SubidorSinRespuesta())
+    trabajo = Trabajo.preparar(AirVaultConfig(), tmp_path / "job", csv)
+
+    trabajo.subir(object())
+
+    subida = trabajo.manifiesto.etapa("subir")
+    assert subida.estado is EstadoEtapa.EN_CURSO
+    assert "FinishUpload no contesto" in subida.detalle
+    assert not trabajo.manifiesto.etapa_hecha("subir")
+
+
+def test_encontrar_el_batch_da_por_hecha_la_subida_en_curso(tmp_path):
+    """El batch en AirVault prueba que la carga llego, contestara o no."""
+    csv = corrida(tmp_path)
+    trabajo = Trabajo.preparar(AirVaultConfig(), tmp_path / "job", csv,
+                               "DP | BIT 18 AUG 2026 05 42")
+    subida = trabajo.manifiesto.etapa("subir")
+    subida.marcar(EstadoEtapa.EN_CURSO, "FinishUpload no contesto")
+    subida.actualizada = "2026-09-27T10:00:00"
+    trabajo.guardar()
+
+    trabajo.descubrir(cliente_con_lote(), esperar=False)
+
+    assert trabajo.manifiesto.etapa_hecha("subir")
+    # La hora de la carga se conserva: es la que ordena las partes.
+    assert trabajo.manifiesto.etapa("subir").actualizada == "2026-09-27T10:00:00"
+
+
+def test_descubrir_espera_a_que_airvault_termine_de_armar_el_batch(tmp_path):
+    """El nombre aparece antes que las paginas: se espera, no se falla.
+
+    La espera anterior se contentaba con ver el nombre y la identificacion,
+    que exige las paginas exactas, fallaba enseguida. Eso cortaba la cadena
+    de subidas y dejaba el batch sin indexar.
+    """
+    csv = corrida(tmp_path)
+    trabajo = Trabajo.preparar(AirVaultConfig(), tmp_path / "job", csv,
+                               "DP | BIT 18 AUG 2026 05 42")
+    nombre = trabajo.manifiesto.nombre_batch
+    esperas: list[float] = []
+
+    class ColaQueSeLlena(ClienteFalso):
+        def listar_lotes(self, filtro=""):
+            paginas = 1 if len(esperas) < 2 else 2
+            return [lote("003SRO", nombre, paginas)]
+
+    avisos: list[str] = []
+    batch_id = trabajo.descubrir(
+        ColaQueSeLlena(page_count=2), esperar=True, dormir=esperas.append,
+        avisar=lambda texto, _h, _t: avisos.append(texto),
+    )
+
+    assert batch_id == "003SRO"
+    assert esperas == [20.0, 20.0]
+    assert any("1 de 2 páginas" in texto for texto in avisos)
+    assert trabajo.manifiesto.etapa_hecha("descubrir")
+
+
+def test_descubrir_vuelve_a_leer_el_nombre_interno_que_aun_no_estaba(tmp_path):
+    """Una primera pagina sin procesar no deja el Batch Name por vacio."""
+    from app.airvault.config import CAMPO_BATCH_NAME
+
+    csv = corrida(tmp_path)
+    trabajo = Trabajo.preparar(AirVaultConfig(), tmp_path / "job", csv,
+                               "DP | BIT 18 AUG 2026 05 42")
+    trabajo.manifiesto.lotes_previos = ["003VIEJO"]
+    trabajo.guardar()
+    esperas: list[float] = []
+
+    class PrimeraPaginaTardia(ClienteFalso):
+        def leer_pagina(self, batch_id, numero):
+            if not esperas:
+                raise RuntimeError("todavia sin procesar")
+            return super().leer_pagina(batch_id, numero)
+
+    cliente = PrimeraPaginaTardia(
+        paginas={1: pagina(1, valores={
+            CAMPO_BATCH_NAME: trabajo.manifiesto.nombre_batch,
+        })},
+        lotes=[lote("003VIEJO", "Empty-Batch", 2),
+               lote("003NUEVO", "Empty-Batch", 2)],
+        page_count=2,
+    )
+
+    assert trabajo.descubrir(
+        cliente, esperar=True, dormir=esperas.append
+    ) == "003NUEVO"
+    assert esperas == [20.0]
+    assert cliente.renombrados == [("003NUEVO", trabajo.manifiesto.nombre_batch)]
+
+
+def test_descubrir_se_rinde_al_agotar_la_espera_maxima(tmp_path):
+    csv = corrida(tmp_path)
+    config = AirVaultConfig(espera_descubrimiento_s=20, espera_maxima_s=60)
+    trabajo = Trabajo.preparar(config, tmp_path / "job", csv,
+                               "DP | BIT 18 AUG 2026 05 42")
+    esperas: list[float] = []
+
+    class SiempreAMedias(ClienteFalso):
+        def listar_lotes(self, filtro=""):
+            return [lote("003SRO", trabajo.manifiesto.nombre_batch, 1)]
+
+    with pytest.raises(ErrorDeCorrida):
+        trabajo.descubrir(SiempreAMedias(), esperar=True, dormir=esperas.append)
+    assert esperas == [20.0, 20.0, 20.0]
+    assert trabajo.manifiesto.batch_id is None
+
+
 def test_la_subida_a_mano_se_puede_dar_por_hecha(tmp_path):
     csv = corrida(tmp_path)
     trabajo = Trabajo.preparar(AirVaultConfig(), tmp_path / "job", csv)

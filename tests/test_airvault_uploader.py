@@ -105,6 +105,42 @@ def test_el_nombre_del_batch_tambien_viaja_en_batch_username():
     assert nombres[CAMPO_BATCH_USERNAME]["Dirty"] is True
 
 
+def test_finishupload_se_manda_una_sola_vez_si_no_contesta(tmp_path):
+    """Sin respuesta no se sabe si AirVault creo el batch: se busca en la cola."""
+    from app.airvault.session import RespuestaPerdida
+    from app.airvault.uploader import SubidorQuickUpload
+
+    class Sesion:
+        def __init__(self):
+            self.rutas = []
+            self.opciones = []
+
+        def post(self, ruta, **extra):
+            self.rutas.append(ruta)
+            self.opciones.append({
+                clave: extra[clave]
+                for clave in ("repetir_sin_respuesta", "tiempo_limite")
+                if clave in extra
+            })
+            if ruta.endswith("FinishUpload"):
+                raise RespuestaPerdida("no contesto")
+
+    archivo = tmp_path / "entrega.pdf"
+    archivo.write_bytes(b"%PDF-1.4\n")
+    sesion = Sesion()
+
+    resultado = SubidorQuickUpload(sesion, 3209).subir(archivo, {})
+
+    assert resultado.ok and not resultado.confirmada
+    assert sesion.rutas == [
+        "/quickuploadex/Home/Upload/", "/quickuploadex/Home/FinishUpload",
+    ]
+    # Los trozos se pueden repetir; el cierre de la carga no.
+    assert sesion.opciones[0] == {}
+    assert sesion.opciones[1]["repetir_sin_respuesta"] is False
+    assert sesion.opciones[1]["tiempo_limite"] >= 600
+
+
 def test_un_batch_username_propio_no_se_pisa():
     enviados = valores_quick_upload({
         CAMPO_BATCH_NAME: "BITS 28 AUG 2026",

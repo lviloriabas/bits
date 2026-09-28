@@ -328,13 +328,15 @@ Código: `app/reports/outputs.py`, `csv_reporter.py`, `json_reporter.py`, `organ
 |---|---|
 | Sesión | Edge obtiene la autenticación federada y conserva el perfil en `portable/edge-airvault/`. Python reutiliza cookies y tokens antifalsificación. |
 | Preparar | Relaciona CSV, PDF e índice de páginas; divide las cargas y separa revisión. La compresión opcional crea copias a 200 DPI. |
-| Subir | Envía un PDF por vez a Quick Upload. Registra la aceptación antes de buscar el batch remoto. |
-| Revisar | Identifica la carga por nombre, cantidad y contenido. Una aceptación sin descubrimiento no autoriza reenvío automático. |
+| Subir | Envía un PDF por vez a Quick Upload. Registra la aceptación antes de buscar el batch remoto. `FinishUpload`, que crea el batch, no se repite si su respuesta se pierde: la carga queda `en_curso` y se confirma en la cola. |
+| Revisar | Identifica la carga por nombre, cantidad y contenido, esperando a que AirVault la tenga entera (`espera_descubrimiento_s` entre vueltas, hasta `espera_maxima_s`). Encontrarla da la subida por hecha. Una aceptación sin descubrimiento no autoriza reenvío automático. |
 | Planear | Mapea páginas y campos; comprueba obligatorios, duplicados, valores remotos y matrícula del libro. Una diferencia de cantidad bloquea el batch. |
 | Indexar | Escribe las páginas permitidas, relee los valores y actualiza el manifiesto. Conserva páginas válidas, omite conflictos y retira separadores del flujo normal. |
 | Completar | Completa solo batches válidos para Web Search. **REVISAR** conserva separadores y no se publica automáticamente. |
 
 Cada batch es un `Trabajo` (`flujo.py`) con su `Manifiesto` (`model.py`). Cada etapa guarda `pendiente`, `en_curso`, `hecha`, `error` u `omitida`, y cada página (`Registro`) guarda si quedó `escrita`, `omitida` o con `error`. Ese estado es lo que permite cerrar la ventana y retomar con **Continuar pendiente**.
+
+La subida y el indexado van en un solo hilo y con una sola sesión, batch por batch: `subir_partes` sube un PDF, lo confirma y lo entrega a `al_encontrar`, que en la ventana lo planifica, escribe, verifica y completa antes de que salga el archivo siguiente. Los batches de la ejecución que ya estaban confirmados se indexan antes de la primera carga. No se indexa en un hilo aparte: una copia de la sesión lleva la misma cookie de AirVault, que atiende de una en una las peticiones de una sesión, y una carga larga dejaba al indexado sin respuesta. Un batch listo tampoco espera a que terminen las demás cargas. La revisión periódica vuelve a escribir un batch incompleto solo mientras le queden comprobaciones (`RECONFIRMACIONES_TRAS_INDEXAR`); después se sigue vigilando con el mapa del batch, una petición en vez de una por página.
 
 ```mermaid
 stateDiagram-v2

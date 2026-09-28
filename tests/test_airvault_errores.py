@@ -243,6 +243,63 @@ def test_la_subida_reintenta_cada_trozo():
     assert [m for m, _u in s.http.pedidas] == ["POST", "POST"]
 
 
+def test_lo_que_crea_el_batch_no_se_repite_si_la_respuesta_se_pierde():
+    """Repetir FinishUpload a ciegas es pedir un segundo batch del archivo.
+
+    Con un PDF grande la respuesta tardaba mas que el minuto de espera, y la
+    sesion lo volvia a mandar dos veces mas.
+    """
+    from app.airvault.session import RespuestaPerdida
+
+    for corte in (requests.exceptions.ReadTimeout("nada"),
+                  requests.ConnectionError("se corto esperando")):
+        s = sesion([corte, RespuestaFalsa()])
+        with pytest.raises(RespuestaPerdida):
+            s.post("/quickuploadex/Home/FinishUpload", json={},
+                   repetir_sin_respuesta=False)
+        assert len(s.http.pedidas) == 1
+    # Sigue siendo un fallo del camino para quien no lo distingue.
+    assert issubclass(RespuestaPerdida, ErrorDeConexion)
+
+
+def test_lo_que_no_llego_a_salir_si_se_repite():
+    """Sin conexion abierta la peticion no salio: repetirla es seguro."""
+    s = sesion([
+        requests.exceptions.ConnectTimeout("no abrio"),
+        RespuestaFalsa(),
+    ])
+    respuesta = s.post("/quickuploadex/Home/FinishUpload", json={},
+                       repetir_sin_respuesta=False)
+    assert respuesta.status_code == 200
+    assert len(s.http.pedidas) == 2
+
+
+def test_un_rechazo_de_lo_que_crea_el_batch_si_se_repite():
+    """Un 500 contesta que no se hizo; es el caso del token caducado."""
+    s = sesion([
+        RespuestaFalsa(status_code=500, text="<html>Client Error</html>"),
+        RespuestaFalsa(),
+    ])
+    s.post("/quickuploadex/Home/FinishUpload", json={},
+           repetir_sin_respuesta=False)
+    assert len(s.http.pedidas) == 2
+
+
+def test_una_peticion_larga_lleva_su_propio_tiempo_limite():
+    s = sesion([RespuestaFalsa(), RespuestaFalsa()])
+    tiempos = []
+    pedir = s.http.request
+
+    def request(metodo, url, **extra):
+        tiempos.append(extra.get("timeout"))
+        return pedir(metodo, url, **extra)
+
+    s.http.request = request
+    s.post("/quickuploadex/Home/FinishUpload", json={}, tiempo_limite=600)
+    s.get("/x")
+    assert tiempos == [600.0, s.config.timeout_s]
+
+
 # ── paginas que no cargan ──────────────────────────────────────────
 
 def manifiesto(paginas=3):

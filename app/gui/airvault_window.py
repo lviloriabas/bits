@@ -17,17 +17,17 @@ El trabajo va en tres tiempos, separados porque duran cosas muy distintas:
 1. **Subir a AirVault** manda los PDF de uno en uno: cada carga se
    identifica y se renombra antes de empezar la siguiente.
 2. **Revisar** asigna el ID apenas aparece y confirma si ya está entero.
-3. **Indexar** empieza con cada batch en cuanto queda confirmado, mientras
-   el siguiente archivo sube; las subidas siguen yendo de una en una. Se
-   puede desactivar en «Automatización…», el menú que dice hasta dónde
-   llega la cadena y que es el mismo que el de la ventana principal.
+3. **Indexar** escribe cada batch en cuanto queda confirmado y antes de
+   mandar el archivo siguiente: Subida > Indexado, batch por batch, en un
+   solo hilo y con una sola sesión. Se puede desactivar en
+   «Automatización…», el menú que dice hasta dónde llega la cadena y que es
+   el mismo que el de la ventana principal.
 """
 
 from __future__ import annotations
 
 import json
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, Optional, Sequence
 
@@ -615,36 +615,35 @@ class TrabajoAirVaultWorker(QThread):
         self._enviar(trabajos, cliente)
 
     def _enviar(self, por_subir, cliente) -> None:
-        """Manda a Quick Upload lo que falte y encadena lo que se encuentre.
+        """Manda a Quick Upload lo que falte e indexa cada batch confirmado.
 
         Es el mismo camino para la subida inicial y para la reanudación
         automática: la lista de archivos cambia, pero no lo que se hace con
-        ellos ni el carril paralelo que indexa cada batch en cuanto AirVault
-        le asigna un ID.
+        ellos. El recorrido es Subida > Indexado, batch por batch y en este
+        mismo hilo: se sube un archivo, se espera a que AirVault lo tenga
+        entero, se escribe, se verifica y, si procede, se completa; solo
+        entonces sale el archivo siguiente.
+
+        Antes el indexado corría en un segundo hilo con una copia de la
+        sesión mientras el siguiente archivo subía. Las dos copias llevaban
+        la misma cookie de sesión de AirVault, que atiende de una en una las
+        peticiones de una misma sesión: una carga larga dejaba al indexado
+        esperando hasta agotar sus intentos, y el batch quedaba sin escribir.
         """
-        from app.airvault.flujo import subir_partes
+        from app.airvault.flujo import (BUSCANDO, SOLO_REVISAR, estado_local,
+                                        subir_partes)
 
         estado = self.estado
         raiz = Path(estado["raiz"])
         trabajos = list(estado.get("trabajos") or por_subir)
         self._notificar_subidas(trabajos)
-        futuros: list[Future] = []
         en_cola: set[str] = set()
-        ejecutor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="airvault-indexado"
-        )
-        cliente_indice = self._cliente_paralelo(cliente)
         fallos_indexado: list[tuple[str, str]] = []
 
         def indexar_sin_cortar(trabajo) -> None:
-            """Un batch que no se deja indexar no cancela a los que esperan.
-
-            El error quedaba guardado en su ``Future`` hasta el final de las
-            subidas y, al levantarse, el cierre del ejecutor cancelaba los
-            batches que seguían en cola.
-            """
+            """Un batch que no se deja indexar no frena a los siguientes."""
             try:
-                self._indexar_batch_encontrado(trabajo, cliente_indice, raiz)
+                self._indexar_batch_encontrado(trabajo, cliente, raiz)
             except (TrabajoCancelado, SesionCancelada):
                 raise
             except Exception as exc:  # noqa: BLE001 - se informa y siguen
@@ -655,7 +654,7 @@ class TrabajoAirVaultWorker(QThread):
                 fallos_indexado.append((trabajo.manifiesto.nombre_batch, str(exc)))
 
         def al_encontrar(trabajo, _todos) -> None:
-            """Publica el ID y pone el batch listo en el carril de escritura.
+            """Publica el ID e indexa el batch antes de subir el siguiente.
 
             La tabla se repinta con la ejecucion entera, no con la lista
             reducida que se acaba de enviar: al reanudar solo lo pendiente,
@@ -677,28 +676,37 @@ class TrabajoAirVaultWorker(QThread):
             ):
                 return
             en_cola.add(clave)
-            futuros.append(ejecutor.submit(indexar_sin_cortar, trabajo))
+            indexar_sin_cortar(trabajo)
 
-        fallos: list[tuple[object, str]] = []
-        try:
-            # ``or []``: la suite sustituye subir_partes por dobles que no
-            # devuelven nada, y esto no es motivo para tumbar una subida.
-            fallos = subir_partes(
-                list(por_subir), estado["sesion"], avisar=self._avisar,
-                cliente=cliente, dormir=self._dormir,
-                al_finalizar_subidas=self._notificar_subidas,
-                al_encontrar=al_encontrar,
-                en_la_ejecucion=trabajos,
-                forzados=estado.get("forzados") or (),
-                buscador=estado.get("buscador"),
-            ) or []
-            # La escritura puede correr mientras este hilo busca las partes
-            # siguientes, pero subir_partes retiene los hallazgos hasta que
-            # hayan terminado todos los intentos de subida.
-            for futuro in futuros:
-                futuro.result()
-        finally:
-            ejecutor.shutdown(wait=True, cancel_futures=True)
+        # Los batches de la ejecución que ya están en AirVault y todavía no se
+        # indexaron, y no vienen en esta tanda (la reanudación solo manda lo
+        # que falta subir), se indexan primero, igual que los confirmados de
+        # la tanda: antes esperaban a otra vuelta del reloj, que tampoco los
+        # indexaba mientras quedaran cargas. Un incompleto no entra aquí: lo
+        # retoma la revisión periódica con su tope de comprobaciones. La
+        # orden a mano sobre filas concretas («resubir») no toca otros.
+        if estado.get("indexar_al_encontrar") and not estado.get("forzados"):
+            enviados = {str(trabajo.carpeta) for trabajo in por_subir}
+            for trabajo in trabajos:
+                if (
+                    str(trabajo.carpeta) in enviados
+                    or not trabajo.manifiesto.batch_id
+                    or estado_local(trabajo).estado
+                    not in (BUSCANDO, SOLO_REVISAR)
+                ):
+                    continue
+                al_encontrar(trabajo, trabajos)
+        # ``or []``: la suite sustituye subir_partes por dobles que no
+        # devuelven nada, y esto no es motivo para tumbar una subida.
+        fallos = subir_partes(
+            list(por_subir), estado["sesion"], avisar=self._avisar,
+            cliente=cliente, dormir=self._dormir,
+            al_finalizar_subidas=self._notificar_subidas,
+            al_encontrar=al_encontrar,
+            en_la_ejecucion=trabajos,
+            forzados=estado.get("forzados") or (),
+            buscador=estado.get("buscador"),
+        ) or []
         self.subido.emit({
             "trabajos": estado["trabajos"], "cliente": cliente,
             "sesion": estado.get("sesion"),
@@ -712,20 +720,8 @@ class TrabajoAirVaultWorker(QThread):
             "fallos_indexado": fallos_indexado,
         })
 
-    def _cliente_paralelo(self, cliente):
-        """Cliente independiente para indexar sin compartir Session con Upload."""
-        from app.airvault.client import ClienteHttp
-
-        sesion = self.estado.get("sesion")
-        clonar = getattr(sesion, "clonar", None)
-        if not callable(clonar):
-            # Clientes falsos y adaptadores antiguos ya son objetos aislados
-            # en sus pruebas; conservarlos mantiene ese contrato.
-            return cliente
-        return ClienteHttp(clonar(), self.estado["config"])
-
     def _indexar_batch_encontrado(self, trabajo, cliente, raiz: Path) -> dict:
-        """Planifica e indexa un batch mientras se buscan los siguientes."""
+        """Planifica, escribe, verifica y cierra un batch recién confirmado."""
         from app.airvault.flujo import comprobar_memoria_de_libros
         from app.airvault.mapping import FLOTA_CACHE_FILENAME, ResolutorFlota
 
@@ -3641,6 +3637,28 @@ class AirVaultWindow(QDialog):
             if parte.se_puede_indexar and str(parte.trabajo.carpeta) in planes
         ]
 
+    def _listos_automaticos(self) -> list:
+        """Los listos que la cadena automática vuelve a escribir sola.
+
+        Se deja fuera el batch incompleto que ya gastó sus comprobaciones
+        (`RECONFIRMACIONES_TRAS_INDEXAR`): se sigue vigilando por si alguien
+        lo arregla en AirVault, pero no se reescribe cada vuelta del reloj.
+        Antes cada revisión lo replanificaba y lo reescribía entero, toda la
+        tarde, por una página que necesitaba una mano. «Indexar» y el menú de
+        la fila lo siguen escribiendo cuando alguien lo pide.
+        """
+        from app.airvault.flujo import INCOMPLETO
+
+        agotados = {
+            str(parte.trabajo.carpeta) for parte in self._partes_en_cola()
+            if parte.estado == INCOMPLETO
+            and self._reconfirmaciones.get(str(parte.trabajo.carpeta)) == 0
+        }
+        return [
+            trabajo for trabajo in self._listos()
+            if str(trabajo.carpeta) not in agotados
+        ]
+
     def _por_completar(self) -> list:
         """Batches verificados que pueden cerrarse sin volver a escribir."""
         from app.airvault.flujo import INDEXADO
@@ -4009,19 +4027,22 @@ class AirVaultWindow(QDialog):
         estado.pop("comprobar_trabajos", None)
         self._lanzar("comprobar", estado)
 
-    def _indexar(self) -> None:
+    def _indexar(self, automatico: bool = False) -> None:
         self._estado.pop("indexar_acotado", None)
         self._estado.pop("completar_acotado", None)
-        # Una ejecucion parcial no puede adelantarse: aunque ya haya un batch
-        # listo, primero se terminan todas las cargas. Este es tambien el
-        # camino de recuperacion para trabajos que quedaron a medias.
-        if any(
+        listos = self._listos_automaticos() if automatico else self._listos()
+        # Un batch confirmado se indexa ya, aunque otras partes sigan sin
+        # subir: Subida > Indexado va batch por batch. Antes se exigían todas
+        # las cargas terminadas, y una sola subida atascada (o que se quedó
+        # «en curso» porque FinishUpload no contestó) dejaba la ejecución
+        # entera sin indexar, revisando una y otra vez sin escribir nada. Lo
+        # que falta por subir sale después, en la revisión que sigue.
+        if not listos and any(
             not trabajo.manifiesto.etapa_hecha("subir")
             for trabajo in self._filtrar_trabajos(self._trabajos)
         ):
             self._continuar_pendiente()
             return
-        listos = self._listos()
         if not listos:
             por_completar = self._por_completar()
             if self.completar_check.isChecked() and por_completar:
@@ -4451,7 +4472,7 @@ class AirVaultWindow(QDialog):
         )
         self._limpiar_progreso()
         if not acotado and self._opciones.indexar and (
-            self._listos()
+            self._listos_automaticos()
             or (
                 self.completar_check.isChecked()
                 and self._por_completar()
@@ -4668,10 +4689,10 @@ class AirVaultWindow(QDialog):
                 return
         if getattr(self, "_indexar_al_terminar", False):
             self._indexar_al_terminar = False
-            if self._listos() or (
+            if self._listos_automaticos() or (
                 self.completar_check.isChecked() and self._por_completar()
             ):
-                self._indexar()
+                self._indexar(automatico=True)
                 return
         self._publicar_avance()
         # Lo que se pidió desde la tabla mientras esto trabajaba entra ahora,

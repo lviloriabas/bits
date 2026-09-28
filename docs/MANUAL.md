@@ -173,7 +173,7 @@ flowchart LR
 
 La cola muestra azul durante el indexado y mientras el batch esté indexado o incompleto. Solo muestra verde al completar. Una página que conserve el estado 3 no convierte el batch en completado. Los mensajes inferiores ocupan una línea; coloque el puntero encima para leer el texto completo.
 
-Los PDF se suben de uno en uno. La cola identifica cada carga y sigue con los demás batches. Para entrar en AirVault, BITS usa el enlace SSO en Edge y reutiliza su sesión.
+Con **Indexar páginas** activo, el recorrido es **Subida > Indexado**, batch por batch: se sube un PDF, se espera a que AirVault lo tenga entero e identificado, se indexa (y se completa, si corresponde) y solo entonces sale el siguiente. Nunca hay dos cargas en vuelo, porque AirVault las junta. Si un batch tarda más que la espera máxima en aparecer, la cadena se detiene ahí; lo ya confirmado se indexa igual y la revisión periódica retoma el resto. Para entrar en AirVault, BITS usa el enlace SSO en Edge y reutiliza su sesión.
 
 #### Opciones de AirVault
 

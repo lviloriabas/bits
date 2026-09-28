@@ -41,6 +41,11 @@ CAMPOS_QUICK_UPLOAD = {
 TROZO_BYTES = 1024 * 1024
 _TURNO_CARGA = RLock()
 
+# Cuanto se espera la respuesta de ``FinishUpload``. Es la peticion que arma
+# el archivo con los trozos ya enviados y crea el batch, y con un PDF de
+# cientos de megas tarda mas que el minuto de las demas.
+ESPERA_FINISH_UPLOAD_S = 600.0
+
 
 def serializar_cargas(funcion):
     """Una sola carga de la aplicacion puede estar en vuelo, entre ventanas."""
@@ -67,6 +72,10 @@ class ResultadoSubida:
     archivo: str
     ok: bool
     detalle: str = ""
+    # ``False`` cuando FinishUpload salio y su respuesta se perdio: AirVault
+    # pudo haber creado el batch, asi que no se repite y se confirma en la
+    # cola.
+    confirmada: bool = True
 
 
 def valores_quick_upload(valores: Mapping[int, str]) -> List[Dict[str, Any]]:
@@ -144,14 +153,33 @@ class SubidorQuickUpload:
                 files={"file": (archivo.name, datos,
                                 "application/octet-stream")},
             )
-        self.sesion.post(
-            "/quickuploadex/Home/FinishUpload",
-            json={"model": {
-                "RepoId": self.repo_id,
-                "FileName": archivo.name,
-                "InputValues": valores_quick_upload(valores),
-            }},
-        )
+        from app.airvault.session import RespuestaPerdida
+
+        if avisar is not None:
+            avisar(f"AirVault está recibiendo {archivo.name}", 0, 0)
+        try:
+            # Una sola vez si la respuesta no llega. Repetir FinishUpload a
+            # ciegas, como se hacia al agotar el minuto de espera, es pedirle
+            # a AirVault un segundo batch con el mismo archivo o que junte
+            # los dos. Un rechazo del servidor si se repite: ese dice que no
+            # se hizo.
+            self.sesion.post(
+                "/quickuploadex/Home/FinishUpload",
+                json={"model": {
+                    "RepoId": self.repo_id,
+                    "FileName": archivo.name,
+                    "InputValues": valores_quick_upload(valores),
+                }},
+                repetir_sin_respuesta=False,
+                tiempo_limite=ESPERA_FINISH_UPLOAD_S,
+            )
+        except RespuestaPerdida as exc:
+            logger.warning(
+                "FinishUpload de {} no contesto ({}); no se repite y se "
+                "confirma en la cola de AirVault",
+                archivo.name, exc,
+            )
+            return ResultadoSubida(archivo.name, True, str(exc), confirmada=False)
         logger.info("Subido {}", archivo.name)
         return ResultadoSubida(archivo.name, True)
 
