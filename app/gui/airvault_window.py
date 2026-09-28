@@ -1229,6 +1229,11 @@ class AirVaultWindow(QDialog):
         # sin esta marca comprobar y subir se llamarían el uno al otro sin
         # parar. Se vacía en cada vuelta del reloj y en cada acción manual.
         self._subidas_del_ciclo: set[str] = set()
+        # La cadena en curso la pidió alguien con un botón («Revisar en
+        # AirVault», «Subir», «Continuar pendiente»). Entonces se sube lo que
+        # falte aunque la revisión periódica esté apagada: la orden es
+        # terminar lo pendiente. El reloj lo apaga en cada vuelta.
+        self._cadena_manual = False
         # Acciones pedidas desde la tabla mientras habia algo en vuelo.
         # Se van lanzando en orden segun el hilo queda libre.
         self._cola_de_acciones: list[tuple[str, list]] = []
@@ -2815,10 +2820,11 @@ class AirVaultWindow(QDialog):
         self.boton_revisar = QPushButton("Revisar en AirVault")
         self.boton_revisar.setEnabled(False)
         self.boton_revisar.setToolTip(
-            "Comprueba en AirVault el nombre y las páginas de cada batch. "
-            "Solo los confirmados se pueden indexar."
+            "Comprueba en AirVault cada batch y termina lo que falte: sube "
+            "los que no se subieron, indexa los confirmados y, con «Completar "
+            "batch», los completa."
         )
-        self.boton_revisar.clicked.connect(self._comprobar)
+        self.boton_revisar.clicked.connect(self._revisar_a_mano)
         # Conserva el nombre interno que usa la comprobación automática y
         # el código que habilita los controles mientras trabaja el hilo.
         self.boton_comprobar = self.boton_revisar
@@ -3725,15 +3731,19 @@ class AirVaultWindow(QDialog):
         ]
 
     def _sin_subir_todavia(self) -> list:
-        """Batches que la comprobación periódica va a mandar sola.
+        """Batches que la comprobación va a mandar sola.
 
         Solo los que nunca llegaron a Quick Upload. Una carga que AirVault
         aceptó y no publicó no vuelve a salir sola por mucho que tarde: se
         avisa y la manda quien mire Web Index.
+
+        Los manda la revisión periódica y también la cadena que alguien
+        pidió con un botón, aunque la periódica esté apagada: «Revisar en
+        AirVault» termina lo pendiente, subida incluida.
         """
         from app.airvault.flujo import partes_por_subir
 
-        if not self.auto_check.isChecked():
+        if not self.auto_check.isChecked() and not self._cadena_manual:
             return []
         return [
             trabajo for trabajo in partes_por_subir(self._partes_en_cola())
@@ -3910,6 +3920,7 @@ class AirVaultWindow(QDialog):
         """Lo que dispara el reloj. Se salta el turno si hay algo en vuelo."""
         if self.hilo() is not None:
             return
+        self._cadena_manual = False
         # Cada vuelta del reloj vuelve a dar permiso de subida: lo que no
         # se pudo subir hace cinco minutos se intenta otra vez ahora.
         self._subidas_del_ciclo.clear()
@@ -4011,6 +4022,7 @@ class AirVaultWindow(QDialog):
             self._quitar_sospecha(sospechosos)
             return
         self._recuperar_pendientes = True
+        self._cadena_manual = True
         self._subir()
 
     def _subir(self) -> None:
@@ -4027,27 +4039,42 @@ class AirVaultWindow(QDialog):
         estado.pop("comprobar_trabajos", None)
         self._lanzar("comprobar", estado)
 
+    def _revisar_a_mano(self) -> None:
+        """«Revisar en AirVault»: pregunta y termina todo lo que falte.
+
+        La revisión encadena lo que haga falta según lo que encuentre:
+        sube los que nunca salieron, indexa los confirmados y, con
+        «Completar batch», los completa. Antes solo subía si además estaba
+        marcada la revisión periódica, así que con ella apagada el botón
+        miraba la cola y no terminaba nada.
+        """
+        self._cadena_manual = True
+        self._subidas_del_ciclo.clear()
+        self._comprobar()
+
     def _indexar(self, automatico: bool = False) -> None:
         self._estado.pop("indexar_acotado", None)
         self._estado.pop("completar_acotado", None)
         listos = self._listos_automaticos() if automatico else self._listos()
-        # Un batch confirmado se indexa ya, aunque otras partes sigan sin
-        # subir: Subida > Indexado va batch por batch. Antes se exigían todas
-        # las cargas terminadas, y una sola subida atascada (o que se quedó
-        # «en curso» porque FinishUpload no contestó) dejaba la ejecución
-        # entera sin indexar, revisando una y otra vez sin escribir nada. Lo
-        # que falta por subir sale después, en la revisión que sigue.
-        if not listos and any(
-            not trabajo.manifiesto.etapa_hecha("subir")
-            for trabajo in self._filtrar_trabajos(self._trabajos)
-        ):
-            self._continuar_pendiente()
-            return
         if not listos:
+            # Cerrar lo verificado va antes que reintentar subidas: si no,
+            # una carga que no sale dejaba sin completar a los batches ya
+            # indexados, reintentándola una y otra vez.
             por_completar = self._por_completar()
             if self.completar_check.isChecked() and por_completar:
                 self._estado["por_completar"] = por_completar
                 self._lanzar("completar", self._estado)
+                return
+            # Un batch confirmado se indexa ya, aunque otras partes sigan sin
+            # subir: Subida > Indexado va batch por batch. Antes se exigían
+            # todas las cargas terminadas, y una sola subida atascada dejaba
+            # la ejecución entera sin indexar. Sin nada que escribir, lo que
+            # toca es subir lo que falta.
+            if any(
+                not trabajo.manifiesto.etapa_hecha("subir")
+                for trabajo in self._filtrar_trabajos(self._trabajos)
+            ):
+                self._continuar_pendiente()
                 return
             if self._corrida.strip():
                 # Conecta y detecta tambien batches que esta aplicacion subio
@@ -4068,6 +4095,7 @@ class AirVaultWindow(QDialog):
         from app.airvault.model import EstadoEtapa
 
         self._subidas_del_ciclo.clear()
+        self._cadena_manual = True
         estado = self._base_del_estado()
         if estado is None:
             return
@@ -4694,6 +4722,9 @@ class AirVaultWindow(QDialog):
             ):
                 self._indexar(automatico=True)
                 return
+        # La cadena que alguien pidió termina aquí; lo que venga después lo
+        # arranca el reloj o un botón nuevo.
+        self._cadena_manual = False
         self._publicar_avance()
         # Lo que se pidió desde la tabla mientras esto trabajaba entra ahora,
         # que es lo que hace de la tabla una cola y no una lista de avisos.

@@ -163,6 +163,111 @@ class ClienteFalso:
         ]
 
 
+class AirVaultSimulado(ClienteFalso):
+    """AirVault con cola, paginas por batch y cargas que tardan en armarse.
+
+    Cada carga publicada aparece en la cola con cero paginas hasta que
+    pasan ``vueltas`` llamadas a :meth:`avanzar`, que es lo que hace el
+    ``dormir`` de las pruebas: el tiempo que AirVault tarda en armar lo
+    recibido. Guarda en ``eventos`` lo que se sube y lo que se escribe, en
+    orden, para poder afirmar el recorrido entero.
+    """
+
+    def __init__(self, picklist: Optional[List[str]] = None):
+        super().__init__(picklist=picklist or ["HP-1848CMP"])
+        self.por_lote: Dict[str, Dict[int, PaginaIndexada]] = {}
+        self.faltan_vueltas: Dict[str, int] = {}
+        self.eventos: List[tuple[str, str]] = []
+
+    def publicar(self, nombre: str, paginas: int, vueltas: int = 2) -> str:
+        batch_id = f"003B{len(self.lotes) + 1}"
+        self.lotes.append(lote(batch_id, nombre, paginas))
+        self.por_lote[batch_id] = {}
+        self.faltan_vueltas[batch_id] = vueltas
+        self.eventos.append(("subir", nombre))
+        return batch_id
+
+    def avanzar(self, _segundos: float = 0) -> None:
+        for batch_id, faltan in self.faltan_vueltas.items():
+            self.faltan_vueltas[batch_id] = max(0, faltan - 1)
+
+    def terminar_de_armar(self) -> None:
+        self.faltan_vueltas = {batch_id: 0 for batch_id in self.faltan_vueltas}
+
+    def listar_lotes(self, filtro: str = "") -> List[ResumenLote]:
+        self.filtros.append(filtro)
+        visibles = [
+            replace(l, paginas=0) if self.faltan_vueltas.get(l.batch_id) else l
+            for l in self.lotes
+        ]
+        if not filtro:
+            return visibles
+        return [l for l in visibles if filtro.lower() in l.nombre.lower()]
+
+    def abrir_lote(self, batch_id: str) -> Mapping[str, object]:
+        self.abiertos.append(batch_id)
+        actual = next(l for l in self.lotes if l.batch_id == batch_id)
+        return {"pageCount": actual.paginas, "batchId": batch_id}
+
+    def leer_pagina(self, batch_id: str, pagina: int) -> PaginaIndexada:
+        self.lecturas.append(pagina)
+        return self.por_lote[batch_id].get(
+            pagina,
+            PaginaIndexada(pagina=pagina, estado=3, valores={}, columnas={}),
+        )
+
+    def guardar_pagina(self, batch_id, pagina, valores, estado,
+                       pagina_siguiente=None):
+        self.eventos.append(("escribir", batch_id))
+        self.escrituras.append((pagina, dict(valores), estado))
+        self.por_lote[batch_id][pagina] = PaginaIndexada(
+            pagina=pagina, estado=estado, valores=dict(valores), columnas={}
+        )
+        return {"ok": True}
+
+    def paginas_del_lote(self, batch_id: str) -> List[PaginaDelLote]:
+        actual = next(l for l in self.lotes if l.batch_id == batch_id)
+        propias = self.por_lote[batch_id]
+        return [
+            PaginaDelLote(
+                pagina=n,
+                estado=propias[n].estado if n in propias else 3,
+                inicio_documento=n,
+            )
+            for n in range(1, actual.paginas + 1)
+        ]
+
+    def completar_lote(self, batch_id: str) -> Mapping[str, object]:
+        self.eventos.append(("completar", batch_id))
+        return super().completar_lote(batch_id)
+
+
+def subida_simulada(simulado: AirVaultSimulado, vueltas=2):
+    """``Trabajo.subir`` contra el AirVault simulado.
+
+    Hace lo que la subida de verdad deja hecho: la foto de la cola previa,
+    la etapa en «hecha» y la carga publicada en la cola, que tarda
+    ``vueltas`` en armarse. ``vueltas`` puede ser un numero o un
+    diccionario por nombre de batch.
+    """
+    from app.airvault.model import EstadoEtapa
+
+    def subir(self, sesion, pdf="", avisar=None, cliente=None):
+        self.manifiesto.lotes_previos = [
+            actual.batch_id for actual in simulado.listar_lotes()
+        ]
+        self.manifiesto.etapa("subir").marcar(EstadoEtapa.HECHA, "ok")
+        self.guardar()
+        nombre = self.manifiesto.nombre_batch
+        simulado.publicar(
+            nombre,
+            len(self.manifiesto.registros),
+            vueltas.get(nombre, 2) if isinstance(vueltas, dict) else vueltas,
+        )
+
+    return subir
+
+
 def pagina(numero: int, estado: int = 3,
            valores: Optional[Mapping[int, str]] = None) -> PaginaIndexada:
     """Pagina tal como la devolveria AirVault.

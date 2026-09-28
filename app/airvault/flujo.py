@@ -1291,6 +1291,7 @@ class Trabajo:
         dormir: Callable[[float], None] = time.sleep,
         avisar: Optional[Aviso] = None,
         cache: Optional[dict[str, str]] = None,
+        excluir: Collection[str] = (),
     ) -> str:
         """Ubica el batch en AirVault por su nombre y lo deja anotado.
 
@@ -1298,13 +1299,16 @@ class Trabajo:
         asi que no aparecer todavía no es un error hasta que vence el limite
         de espera. Con ``esperar`` la espera dura hasta que AirVault lo tiene
         entero y se puede identificar; ver :meth:`_esperar_confirmacion`.
+        ``excluir`` son IDs que ya tienen otras partes de la ejecucion.
         """
         esperadas = len(self.manifiesto.registros)
         nombre = self.manifiesto.nombre_batch
         if avisar is not None:
             avisar(f"Buscando el batch {nombre} en AirVault", 0, 0)
         if esperar:
-            return self._esperar_confirmacion(cliente, dormir, avisar, cache)
+            return self._esperar_confirmacion(
+                cliente, dormir, avisar, cache, excluir
+            )
         error_busqueda: Optional[Exception] = None
         lote = None
         try:
@@ -1330,6 +1334,7 @@ class Trabajo:
             lotes_actuales,
             avisar=avisar,
             cache=nombres_embebidos,
+            excluir_ids=set(excluir),
         )
         if lote is None:
             if (
@@ -1350,6 +1355,7 @@ class Trabajo:
         dormir: Callable[[float], None],
         avisar: Optional[Aviso],
         cache: Optional[dict[str, str]],
+        excluir: Collection[str] = (),
     ) -> str:
         """Espera a que AirVault tenga la carga entera y la identifica.
 
@@ -1385,6 +1391,7 @@ class Trabajo:
                 lotes_actuales,
                 avisar=avisar,
                 cache=nombres_embebidos,
+                excluir_ids=set(excluir),
             )
             if lote is not None:
                 return self.anotar_lote(cliente, lote, avisar)
@@ -2907,6 +2914,7 @@ def subir_partes(
         if al_encontrar is not None:
             al_encontrar(trabajo, trabajos)
 
+    nombres_embebidos: dict[str, str] = {}
     if cliente is not None:
         # Lo que se mando subir a mano ni se consulta: se sube. Preguntar
         # otra vez por un batch que la persona acaba de buscar en AirVault
@@ -2916,20 +2924,34 @@ def subir_partes(
             trabajo for trabajo in trabajos
             if str(trabajo.carpeta) not in claves_forzadas
         ]
+        # Las cargas de la ejecucion que no vienen en esta tanda y siguen
+        # sin confirmar tambien cuentan: la reanudacion solo manda lo que
+        # falta subir, y sin mirarlas subia otro archivo con una carga
+        # todavia en vuelo, que es como AirVault las junta.
+        propias = {str(trabajo.carpeta) for trabajo in trabajos}
+        en_vuelo_fuera = [
+            trabajo for trabajo in ejecucion
+            if str(trabajo.carpeta) not in propias
+            and not trabajo.manifiesto.batch_id
+            and not trabajo.manifiesto.cancelado
+            and _pendiente_de_busqueda(trabajo)
+            and _subida_rastreable(trabajo)
+        ]
+        a_revisar = a_confirmar + en_vuelo_fuera
         estados = (
             detectar_indexados(
-                comprobar_partes(a_confirmar, cliente, avisar=avisar),
+                comprobar_partes(a_revisar, cliente, avisar=avisar),
                 cliente,
                 avisar=avisar,
             )
-            if a_confirmar
+            if a_revisar
             else []
         )
         if any(p.estado == DESCUADRADO or p.trabajo.manifiesto.mezcla_pendiente for p in estados):
             from app.airvault.mezclas import recuperar_mezclas
 
-            if recuperar_mezclas(a_confirmar, cliente, avisar):
-                estados = comprobar_partes(a_confirmar, cliente, avisar=avisar)
+            if recuperar_mezclas(a_revisar, cliente, avisar):
+                estados = comprobar_partes(a_revisar, cliente, avisar=avisar)
         claves_por_subir = claves_forzadas | {
             str(parte.trabajo.carpeta)
             for parte in estados
@@ -2941,27 +2963,26 @@ def subir_partes(
             trabajo for trabajo in trabajos
             if str(trabajo.carpeta) in claves_por_subir
         ]
-        sin_confirmar = [
-            parte for parte in estados
-            if parte.estado in (BUSCANDO, PROCESANDO, DESCUADRADO)
-            and _subida_rastreable(parte.trabajo)
-        ]
-        if sin_confirmar and por_subir:
-            detalle = (
-                "No se inicia otra carga hasta confirmar la anterior: "
-                + ", ".join(parte.nombre for parte in sin_confirmar)
+        # Lo que ya esta confirmado se indexa antes de cualquier carga.
+        for parte in estados:
+            if parte.batch_id:
+                publicar(parte.trabajo)
+        if por_subir:
+            bloqueo = _esperar_cargas_en_vuelo(
+                estados, ejecucion, cliente, dormir, avisar, publicar,
+                nombres_embebidos,
             )
-            if avisar:
-                avisar(detalle, 0, 0)
-            # Lo que ya esta confirmado se indexa igual. Antes se volvia de
-            # aqui sin entregarlo, y una sola carga pendiente de confirmar
-            # dejaba sin indexar a todas las que ya estaban en AirVault.
-            for parte in estados:
-                if parte.batch_id:
-                    publicar(parte.trabajo)
-            return [(trabajo, detalle) for trabajo in por_subir]
+            if bloqueo:
+                if avisar:
+                    avisar(bloqueo, 0, 0)
+                return [(trabajo, bloqueo) for trabajo in por_subir]
+        estados = [
+            parte for parte in estados if str(parte.trabajo.carpeta) in propias
+        ]
         procesandose = sum(
-            parte.estado in (BUSCANDO, PROCESANDO) for parte in estados
+            parte.estado in (BUSCANDO, PROCESANDO)
+            and not parte.trabajo.manifiesto.batch_id
+            for parte in estados
         )
         encontrados = len(a_confirmar) - procesandose - sum(
             parte.estado == SIN_SUBIR for parte in estados
@@ -2995,12 +3016,8 @@ def subir_partes(
                 0,
                 0,
             )
-        for parte in estados:
-            if parte.batch_id:
-                publicar(parte.trabajo)
 
     fallos: List[Tuple["Trabajo", str]] = []
-    nombres_embebidos: dict[str, str] = {}
     for trabajo in por_subir:
         cabeza = _prefijo(trabajo)
         clave = str(trabajo.carpeta)
@@ -3194,6 +3211,84 @@ def subir_partes(
             al_finalizar_subidas(trabajos)
 
     return fallos
+
+
+def _esperar_cargas_en_vuelo(
+    estados: Sequence[EstadoParte],
+    ejecucion: Sequence["Trabajo"],
+    cliente,
+    dormir: Callable[[float], None],
+    avisar: Optional[Aviso],
+    publicar: Callable[["Trabajo"], None],
+    cache: dict[str, str],
+) -> str:
+    """Espera a que se confirme la carga anterior antes de mandar otra.
+
+    AirVault junta las cargas que llegan mientras otra sigue en vuelo, asi
+    que no se sube nada con una sin confirmar. Antes eso era rendirse: la
+    subida volvia sin mandar los archivos que faltaban y habia que esperar
+    a otra vuelta del reloj, o a otro clic. Ahora se espera a que AirVault
+    la tenga entera, igual que tras subirla, se indexa y se sigue.
+
+    Una carga que ya se da por perdida (ver :func:`subida_perdida`) no esta
+    en vuelo y no detiene nada: se avisa de ella y la vuelve a mandar quien
+    mire Web Index. Un batch descuadrado si detiene: no se arregla
+    esperando.
+
+    Devuelve el motivo por el que no se puede subir todavia, o cadena vacia.
+    """
+    en_vuelo = [
+        parte for parte in estados
+        if parte.estado in (BUSCANDO, PROCESANDO, DESCUADRADO)
+        and not parte.trabajo.manifiesto.batch_id
+        and _subida_rastreable(parte.trabajo)
+        and not subida_perdida(parte, ejecucion)
+    ]
+    ocupados = {
+        str(trabajo.manifiesto.batch_id).strip().upper()
+        for trabajo in ejecucion if trabajo.manifiesto.batch_id
+    }
+    for parte in en_vuelo:
+        trabajo = parte.trabajo
+        cabeza = _prefijo(trabajo)
+        if parte.estado == DESCUADRADO:
+            return (
+                "No se inicia otra carga hasta resolver la anterior: "
+                f"{parte.nombre} ({parte.detalle})"
+            )
+        if avisar is not None:
+            avisar(
+                f"{cabeza}Esperando a que AirVault confirme esta carga antes "
+                "de subir la siguiente",
+                0,
+                0,
+            )
+
+        def propio(texto: str, hechas: int, total: int, cabeza: str = cabeza) -> None:
+            if avisar is not None:
+                avisar(f"{cabeza}{texto}", hechas, total)
+
+        try:
+            trabajo.descubrir(
+                cliente,
+                esperar=True,
+                dormir=dormir,
+                avisar=propio if avisar else None,
+                cache=cache,
+                excluir=ocupados,
+            )
+        except Exception as exc:  # noqa: BLE001 - se informa y se espera
+            logger.info(
+                "La carga {} sigue sin confirmar: {}",
+                trabajo.manifiesto.nombre_batch, exc,
+            )
+            return (
+                "No se inicia otra carga hasta confirmar la anterior: "
+                f"{parte.nombre}"
+            )
+        ocupados.add(str(trabajo.manifiesto.batch_id).strip().upper())
+        publicar(trabajo)
+    return ""
 
 
 def ya_esta_en_airvault(trabajo: "Trabajo", cliente):
