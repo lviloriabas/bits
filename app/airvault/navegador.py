@@ -786,12 +786,12 @@ class SesionDeNavegador:
             *_ARGUMENTOS,
         ]
         if not self.visible:
-            if cierre_diferido_activo():
-                # Debe poder mostrarse mas tarde sin derribarlo y perder sus
-                # pestanas. Arranca como Edge normal, pero fuera del camino.
-                orden.append("--start-minimized")
-            else:
-                orden.append("--headless=new")
+            # El trabajo corre en segundo plano, tambien en la GUI: un Edge
+            # minimizado igual aparece en la barra de tareas y la persona lo
+            # ve abrirse. Si despues hace falta una ventana (entrar con el
+            # segundo factor, mirar una busqueda), ``_aprovechar`` quita de
+            # en medio a este y lanza uno con ventana.
+            orden.append("--headless=new")
         orden.append(url)
         # La salida de error de Edge se guarda: es lo unico que dice por que
         # no arranco (perfil tomado, bandera rechazada, politica de la

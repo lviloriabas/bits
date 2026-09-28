@@ -381,8 +381,8 @@ def test_la_gui_conserva_edge_y_cierra_todo_junto_al_salir(
         assert puerto in vivos
         assert "Browser.close" not in ws.pedidos
         assert "Target.closeTarget" not in ws.pedidos
-        assert "--start-minimized" in lanzados[0]
-        assert "--headless=new" not in lanzados[0]
+        assert "--headless=new" in lanzados[0]
+        assert "--start-minimized" not in lanzados[0]
 
         navegador.cerrar_navegadores_al_salir()
 
