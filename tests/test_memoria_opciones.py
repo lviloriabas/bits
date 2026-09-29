@@ -247,13 +247,11 @@ def test_airvault_recuerda_sus_casillas_y_el_intervalo(app, tmp_path):
 
     opciones = OpcionesAutomatizacion(tmp_path)
     primera = AirVaultWindow(tmp_path, opciones)
-    primera.compresion_check.setChecked(True)
     primera.solo_ejecucion_check.setChecked(True)
     primera.auto_check.setChecked(False)
     primera.minutos_spin.setValue(7)
 
     otra = AirVaultWindow(tmp_path, opciones)
-    assert otra.compresion_check.isChecked()
     assert otra.solo_ejecucion_check.isChecked()
     assert not otra.auto_check.isChecked()
     assert otra.minutos_spin.value() == 7

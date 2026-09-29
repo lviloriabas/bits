@@ -594,7 +594,6 @@ class TrabajoAirVaultWorker(QThread):
             estado["nombre_lote"], resolutor=resolutor,
             paginas_por_batch=estado["paginas_por_batch"],
             avisar=self._avisar,
-            compresion=estado.get("compresion", False),
             fin_de_mes=estado.get("fin_de_mes", False),
         )
         estado["trabajos"] = trabajos
@@ -1459,16 +1458,6 @@ class AirVaultWindow(QDialog):
         self.limite_batch_control.setMaximumWidth(180)
         grid.addWidget(self.limite_batch_control, 1, 1)
 
-        self.compresion_check = QCheckBox("Compresión")
-        self.compresion_check.setToolTip(
-            "Envía los PDF a AirVault a 200 DPI. No cambia los PDF "
-            "exportados."
-        )
-        # Depende de la conexión de cada instalación, no de la entrega: en
-        # un enlace lento se deja marcada y así tiene que volver a abrir.
-        recordar(AIRVAULT, "compresion", self.compresion_check)
-        grid.addWidget(self.compresion_check, 1, 2)
-
         # La misma elección que en la ventana principal, vista desde aquí:
         # con qué fecha se escribe cada bitácora. Una ejecución exportada
         # con el día exacto todavía puede indexarse a fin de mes; al revés
@@ -1715,7 +1704,6 @@ class AirVaultWindow(QDialog):
                     self._raiz / FLOTA_CACHE_FILENAME
                 ),
                 paginas_por_batch=self.limite_batch_spin.value(),
-                compresion=self.compresion_check.isChecked(),
                 fin_de_mes=self.fin_de_mes(),
             )
         except (ErrorDeCorrida, OSError, ValueError) as error:
@@ -3148,9 +3136,6 @@ class AirVaultWindow(QDialog):
         self._trabajos.sort(
             key=lambda trabajo: estado_local(trabajo).estado != SIN_SUBIR
         )
-        compresiones = {t.manifiesto.compresion for t in trabajos_de_corrida}
-        if len(compresiones) == 1:
-            self.compresion_check.setChecked(compresiones.pop())
         fechas = {t.manifiesto.fin_de_mes for t in trabajos_de_corrida}
         if len(fechas) == 1:
             indice = self.fecha_combo.findData(fechas.pop())
@@ -3160,7 +3145,6 @@ class AirVaultWindow(QDialog):
         # Se pueden cambiar aunque la ejecucion ya tenga batches: lo que ya
         # esta en AirVault se conserva y solo se reparte lo que falta.
         self.limite_batch_spin.setEnabled(self.hilo() is None)
-        self.compresion_check.setEnabled(self.hilo() is None)
         self.fecha_combo.setEnabled(self.hilo() is None)
         # La conexion sobrevive al cambio de ejecucion: es el mismo
         # servidor, y volver a abrirla es volver a arrancar el navegador.
@@ -3988,7 +3972,6 @@ class AirVaultWindow(QDialog):
             "nombre_lote": self.lote_edit.text().strip(),
             "cookie": self.cookie_edit.text(),
             "paginas_por_batch": self.limite_batch_spin.value(),
-            "compresion": self.compresion_check.isChecked(),
             "fin_de_mes": self.fin_de_mes(),
             "indexar_al_encontrar": self._opciones.indexar,
             "completar": self.completar_check.isChecked(),
@@ -4222,7 +4205,6 @@ class AirVaultWindow(QDialog):
         self.lote_edit.setEnabled(activo)
         self.cookie_edit.setEnabled(activo)
         self.limite_batch_spin.setEnabled(activo)
-        self.compresion_check.setEnabled(activo)
         self.fecha_combo.setEnabled(activo)
         self.boton_comprobar.setEnabled(activo and bool(self._trabajos))
         # La vista previa solo lee el disco, pero mientras el hilo reparte

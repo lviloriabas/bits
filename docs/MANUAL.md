@@ -182,7 +182,6 @@ Si la ejecución quedó a medias, **Subir a AirVault**, **Revisar en AirVault** 
 | Opción                                     | Función                                                                                                                 |
 | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
 | **Máximo por batch**                       | Limita cada carga, incluidos sus separadores. Conserva los batches ya subidos.                                          |
-| **Compresión**                             | Envía copias a 200 DPI; conserva los PDF exportados.                                                                    |
 | **Fecha**                                  | Permite fin de mes o día exacto, si la ejecución leyó el día.                                                           |
 | **Revisar cada**                           | Consulta la disponibilidad cada 1 a 60 minutos mientras la ventana sigue abierta. Apagado, use **Revisar en AirVault**. |
 | **Automatización**                         | Elige hasta dónde continúa el trabajo sin nuevos clics.                                                                 |
