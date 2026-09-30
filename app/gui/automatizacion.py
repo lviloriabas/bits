@@ -135,8 +135,8 @@ AYUDAS = {
         "los demás. También borra las páginas separadoras."
     ),
     COMPLETAR: (
-        "Al terminar de escribir, da el batch por terminado y lo manda a Web "
-        "Search."
+        "Al terminar de escribir, cierra el batch con «Complete» y lo manda a "
+        "Web Search."
     ),
 }
 

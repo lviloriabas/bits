@@ -681,20 +681,28 @@ CANCELADO = "cancelado"
 # alguien mire AirVault y quite la marca.
 POSIBLE_DUPLICADO = "posible_duplicado"
 
+# Lo que dice la columna Estado de la cola. Son rótulos cortos y fijos: el
+# detalle de cada batch (cuántas páginas, por qué se detuvo) va aparte, en
+# la ayuda de la celda. Pegado al rótulo alargaba la fila hasta no caber y
+# el estado real quedaba escondido detrás de un párrafo.
+#
+# «Completado» es el cierre con «Complete» en AirVault, lo haga el programa
+# o una persona. REVISAR listo para escribir se nombra como los demás: su
+# propio nombre de batch ya dice que es REVISAR.
 NOMBRE_ESTADO_PARTE = {
     SIN_SUBIR: "Sin subir",
     POSIBLE_DUPLICADO: "Posible duplicado",
-    BUSCANDO: "Subido pendiente confirmación",
-    PROCESANDO: "Procesándose en AirVault",
-    DESCUADRADO: "Cantidad de páginas incorrecta",
+    BUSCANDO: "Subido",
+    PROCESANDO: "Procesando en AirVault",
+    DESCUADRADO: "Páginas no coinciden",
     LISTO: "Listo para indexar",
     INCOMPLETO: "Indexado incompleto",
     TOMADO: "Abierto por otra persona",
-    SOLO_REVISAR: "Indexar lo disponible y revisar",
+    SOLO_REVISAR: "Listo para indexar",
     INDEXADO: "Indexado",
-    COMPLETADO: "Terminado",
-    AUTOCOMPLETADO: "Terminado por el programa",
-    CANCELADO: "Cancelado en la cola",
+    COMPLETADO: "Completado",
+    AUTOCOMPLETADO: "Completado",
+    CANCELADO: "Cancelado",
 }
 
 
@@ -757,17 +765,18 @@ class EstadoParte:
             DESCUADRADO, INDEXADO, COMPLETADO, AUTOCOMPLETADO, CANCELADO,
         )
 
+    @property
+    def titulo(self) -> str:
+        """El rótulo corto del estado, el que va en la columna de la cola."""
+        return NOMBRE_ESTADO_PARTE.get(self.estado, self.estado)
+
     def __str__(self) -> str:
-        titulo = NOMBRE_ESTADO_PARTE.get(self.estado, self.estado)
-        if self.lote is not None:
-            # Solo se puede afirmar que la subida quedo confirmada cuando
-            # AirVault devolvio el batch en el indice. El ID guardado en el
-            # manifiesto no basta: puede venir de una subida anterior o de
-            # una carga que Quick Upload acepto pero aun no publico.
-            titulo = f"Subido confirmado; {titulo}"
-        texto = f"{titulo}: {self.detalle}" if self.detalle else titulo
+        # Sin el «Subido confirmado» de antes: lo que viene después de
+        # «Subido» ya solo puede ser un batch que AirVault devolvió, así que
+        # repetirlo delante de cada estado solo alargaba la línea.
+        texto = f"{self.titulo}: {self.detalle}" if self.detalle else self.titulo
         if es_posible_duplicado(self.trabajo) and not duplicado_bloquea(self.trabajo):
-            texto += "; aviso de posibles duplicados (sin detener)"
+            texto += "; posible duplicado, se continúa"
         return texto
 
 
@@ -2268,7 +2277,9 @@ def _previsto_de_trabajo(trabajo: "Trabajo") -> BatchPrevisto:
         pdf=Path(manifiesto.pdf_origen or ""),
         registros=list(manifiesto.registros),
         batch_id=manifiesto.batch_id or "",
-        estado=str(parte),
+        # El mismo rótulo corto que la cola: la vista previa es una lista de
+        # un vistazo y el detalle ya lo cuenta la ventana de AirVault.
+        estado=parte.titulo,
         subido=trabajo_comprometido(trabajo),
         existe=True,
         completado=parte.estado in (COMPLETADO, AUTOCOMPLETADO),
@@ -3063,7 +3074,7 @@ def subir_partes(
         if cliente is not None and not forzado:
             if avisar is not None:
                 avisar(
-                    f"{cabeza}Confirmando el nombre antes de subir",
+                    f"{cabeza}Comprobando si ya está en AirVault",
                     0,
                     0,
                 )
@@ -3078,7 +3089,7 @@ def subir_partes(
                     publicar(trabajo)
                 if avisar is not None:
                     avisar(
-                        f"{cabeza}Encontrado en AirVault; no se vuelve a subir",
+                        f"{cabeza}Ya está en AirVault; no se sube otra vez",
                         0,
                         0,
                     )
@@ -3169,7 +3180,7 @@ def subir_partes(
             publicar(trabajo)
             continue
         if avisar is not None:
-            avisar(f"{cabeza}Subido; buscando el batch en AirVault", 0, 0)
+            avisar(f"{cabeza}Subido; esperando a que AirVault lo detecte", 0, 0)
         try:
             trabajo.descubrir(
                 cliente,
@@ -3258,7 +3269,7 @@ def _esperar_cargas_en_vuelo(
             )
         if avisar is not None:
             avisar(
-                f"{cabeza}Esperando a que AirVault confirme esta carga antes "
+                f"{cabeza}Esperando a que AirVault detecte esta carga antes "
                 "de subir la siguiente",
                 0,
                 0,

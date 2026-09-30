@@ -162,16 +162,18 @@ Así avanza cada batch de la cola. Cada paso queda anotado en el equipo, por eso
 
 ```mermaid
 flowchart LR
-    A["Preparado"] --> B["Subido"]
-    B --> C["Confirmado en AirVault<br/>Revisar en AirVault"]
-    C --> D["Indexado<br/>azul"]
+    A["Sin subir"] --> B["Subido<br/>espera a que se detecte"]
+    B --> C["Listo para indexar<br/>detectado en AirVault"]
+    C --> D["Indexando, Indexado<br/>azul"]
     D --> E["Completado<br/>verde, en Web Search"]
     D --> F["REVISAR o páginas amarillas<br/>espera corrección humana"]
     B -. "posible duplicado" .-> X["Detenido<br/>revise en AirVault"]
     C -. "cantidad de páginas distinta<br/>o conflicto de matrícula" .-> X
 ```
 
-La cola muestra azul durante el indexado y mientras el batch esté indexado o incompleto. Solo muestra verde al completar. Una página que conserve el estado 3 no convierte el batch en completado. Los mensajes inferiores ocupan una línea; coloque el puntero encima para leer el texto completo.
+La columna **Estado** usa rótulos cortos. El **?** junto a **Cola de AirVault** explica cada uno con su color, y el detalle de un batch aparece al posar el puntero sobre su estado. La cola muestra azul mientras se indexa (**Indexando**) y mientras el batch esté indexado o incompleto. Solo muestra verde al completar, es decir, al cerrarlo con **Complete**. Una página que conserve el estado 3 no convierte el batch en completado.
+
+La barra de avance cuenta la cola entera, desde subir el primer batch hasta completar el último. Mientras hay trabajo, la última línea de la bitácora dice **En curso** y gira; entre revisiones dice **En espera** y cuánto falta para la siguiente. Si no aparece ninguna de las dos, el proceso está detenido. Los mensajes inferiores ocupan una línea; coloque el puntero encima para leer el texto completo.
 
 Con **Indexar páginas** activo, el recorrido es **Subida > Indexado**, batch por batch: se sube un PDF, se espera a que AirVault lo tenga entero e identificado, se indexa (y se completa, si corresponde) y solo entonces sale el siguiente. Nunca hay dos cargas en vuelo, porque AirVault las junta. Si un batch tarda más que la espera máxima en aparecer, la cadena se detiene ahí; lo ya confirmado se indexa igual y la revisión periódica retoma el resto.
 

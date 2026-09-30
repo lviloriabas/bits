@@ -38,6 +38,7 @@ from app.gui.airvault_window import (
     ANCHO_MAXIMO_NOMBRE_BATCH,
     ANCHO_MINIMO_NOMBRE_BATCH,
     color_indexado,
+    conteo_de_estados,
     AirVaultWindow,
     TrabajoAirVaultWorker,
     csv_de_corrida,
@@ -818,7 +819,8 @@ def test_subir_no_indexa_nada_y_dice_que_falta_esperar(ventana):
     ventana._al_subir({"trabajos": [TrabajoFalso()], "cliente": object()})
     texto = ventana.resumen.text()
     assert "Subida terminada" in texto
-    assert "procesar" in texto
+    # Cuenta en qué quedó la cola, no lo que se supone que falta.
+    assert conteo_de_estados(ventana._partes_en_cola()) in texto
     assert not ventana.boton_indexar.isEnabled()
 
 
@@ -828,12 +830,11 @@ def test_la_tabla_marca_subido_antes_de_que_airvault_devuelva_el_id(ventana):
     ventana._al_actualizar_subidas({"trabajos": [trabajo]})
 
     assert ventana.lotes.item(0, 0).text() == ""
-    assert "Subido pendiente confirmación" in (
-        ventana.lotes.item(0, 3).text()
-    )
+    assert ventana.lotes.item(0, 3).text() == "Subido"
 
 
-def test_la_tabla_dice_subido_confirmado_al_encontrar_el_batch(ventana):
+def test_la_tabla_dice_listo_al_encontrar_el_batch(ventana):
+    """La celda dice el estado en pocas palabras; el detalle, en su ayuda."""
     from app.airvault.client import ResumenLote
     from app.airvault.flujo import LISTO
 
@@ -842,13 +843,13 @@ def test_la_tabla_dice_subido_confirmado_al_encontrar_el_batch(ventana):
         repositorio="MXDocs", paso="Web Index", bloqueado_por="",
         recibido="",
     )
-    ventana._estados = [parte(LISTO, lote=confirmado)]
+    ventana._estados = [parte(LISTO, detalle="5 paginas", lote=confirmado)]
 
     ventana._pintar_lotes()
 
-    texto = ventana.lotes.item(0, 3).text()
-    assert "Subido confirmado" in texto
-    assert "Listo para indexar" in texto
+    celda = ventana.lotes.item(0, 3)
+    assert celda.text() == "Listo para indexar"
+    assert celda.toolTip() == "Listo para indexar: 5 paginas"
 
 
 def test_cada_click_en_subir_confirma_los_batches_en_airvault(
@@ -866,7 +867,7 @@ def test_cada_click_en_subir_confirma_los_batches_en_airvault(
     ventana._al_terminar()
 
     assert comprobaciones == [True]
-    assert "confirma cada batch" in ventana.bitacora.item(
+    assert "Subida terminada" in ventana.bitacora.item(
         ventana.bitacora.count() - 1
     ).text()
 
@@ -884,8 +885,9 @@ def test_la_lista_dice_en_que_va_cada_lote(ventana):
     assert ventana.lotes.item(0, 0).text() == "003SRO"
     assert ventana.lotes.item(0, 1).text() == "DP | BITS"
     assert ventana.lotes.item(0, 2).text() == "5"
-    assert "Listo para indexar" in ventana.lotes.item(0, 3).text()
-    assert "Procesándose" in ventana.lotes.item(1, 3).text()
+    assert ventana.lotes.item(0, 3).text() == "Listo para indexar"
+    assert ventana.lotes.item(1, 3).text() == "Procesando en AirVault"
+    assert "2 de 5 paginas" in ventana.lotes.item(1, 3).toolTip()
 
 
 def test_el_id_solo_aparece_cuando_airvault_lo_encuentra(ventana):
@@ -1029,7 +1031,7 @@ def test_un_lote_listo_se_puede_indexar_y_dice_cuanto_escribiria(ventana):
     })
     texto = ventana.resumen.text()
     assert "5 páginas" in texto and "2 se escribirían" in texto
-    assert "Nada se ha escrito todavía" in texto
+    assert texto.startswith("Listo para indexar")
     assert ventana.boton_indexar.isEnabled()
 
 
@@ -1069,15 +1071,15 @@ class ResultadoFalso:
 def test_al_indexar_cuenta_como_quedo_el_lote(ventana):
     ventana._al_indexar({"resultado": ResultadoFalso(), "validas": 2, "total": 3})
     texto = ventana.resumen.text()
-    assert "Escritas 2" in texto and "2 de 3 páginas revisadas" in texto
+    assert "2 de 3 páginas en verde" in texto and "2 escritas" in texto
 
 
 def test_revisar_distingue_fin_del_guardado_y_revision_humana(ventana):
     ventana._al_indexar({"resultado": ResultadoFalso(), "validas": 3,
                          "total": 3, "incluye_revision": True})
     assert ventana.estado_label.text() == "Indexado terminado"
-    assert "El guardado de REVISAR terminó" in ventana.resumen.text()
-    assert "revisión humana" in ventana.resumen.text()
+    assert "REVISAR guardado" in ventana.resumen.text()
+    assert "revisión manual" in ventana.resumen.text()
 
 
 def test_un_indexado_cortado_dice_que_lo_que_falta_se_retoma(ventana):
@@ -1087,7 +1089,7 @@ def test_un_indexado_cortado_dice_que_lo_que_falta_se_retoma(ventana):
 
     ventana._al_indexar({"resultado": Cortado(), "validas": 2, "total": 5})
     texto = ventana.resumen.text()
-    assert "se cortó" in texto and "caduco" in texto
+    assert "Indexado cortado" in texto and "caduco" in texto
     assert "sin repetir lo escrito" in texto
 
 
@@ -1124,7 +1126,7 @@ def test_un_indexado_sin_confirmar_se_vuelve_a_comprobar_solo(ventana):
     ventana._al_indexar(dict(incompleto))
 
     assert ventana._vigilante.isActive()
-    assert "Se vuelve a revisar solo" in ventana.resumen.text()
+    assert "se vuelve a revisar solo" in ventana.resumen.text()
 
     for _ in range(RECONFIRMACIONES_TRAS_INDEXAR - 1):
         ventana._al_comprobar({
@@ -1269,7 +1271,7 @@ def test_una_carga_perdida_se_sigue_mirando_en_la_cola(ventana):
     })
 
     assert ventana._vigilante is not None and ventana._vigilante.isActive()
-    assert "Se sigue mirando la cola" in ventana.resumen.text()
+    assert "se sigue mirando la cola" in ventana.resumen.text()
 
 
 def test_un_archivo_sin_subir_no_se_queda_esperando(ventana):
@@ -1414,8 +1416,8 @@ def test_si_el_lote_se_cerro_se_dice(ventana):
         "resultado": ResultadoFalso(), "validas": 2, "total": 2, "lotes": 1,
         "cierres": [(TrabajoFalso(), Cierre(True))],
     })
-    assert "completó en AirVault" in ventana.resumen.text()
-    assert "se mandó a Web Search" in ventana.resumen.text()
+    assert "Batch completado" in ventana.resumen.text()
+    assert "pasó a Web Search" in ventana.resumen.text()
 
 
 def test_si_airvault_no_deja_cerrarlo_se_dice_por_que(ventana):
@@ -1427,7 +1429,7 @@ def test_si_airvault_no_deja_cerrarlo_se_dice_por_que(ventana):
         ))],
     })
     texto = ventana.resumen.text()
-    assert "no se pudo completar" in texto
+    assert "No se pudo completar" in texto
     assert "no estan en verde" in texto
 
 
@@ -1438,7 +1440,7 @@ def test_si_hubo_que_quitar_separadores_se_dice(ventana):
         "cierres": [(TrabajoFalso(), Cierre(True, quitadas=[1, 4, 6]))],
     })
     texto = ventana.resumen.text()
-    assert "completó en AirVault" in texto
+    assert "Batch completado" in texto
     assert "3 páginas separadoras" in texto
 
 
@@ -1455,12 +1457,59 @@ def test_el_fallo_se_cuenta_donde_se_lee(ventana):
     assert "caduco" in ventana.resumen.text()
 
 
-def test_el_avance_sale_por_la_barra_de_la_ventana(ventana):
-    """La ventana dibuja su propio avance: ya no cuelga de la principal."""
-    ventana._mostrar_paso("Escribiendo en AirVault", 30, 120)
-    assert ventana.estado_label.text() == "Escribiendo en AirVault"
-    assert ventana.progreso.maximum() == 120
-    assert ventana.progreso.value() == 30
+def test_la_barra_cuenta_la_cola_entera_y_no_el_paso(ventana):
+    """Un batch completado de dos es la mitad del proceso, pase lo que pase.
+
+    Antes la barra se llenaba y vaciaba en cada paso (subir un archivo,
+    escribir un batch) y no decía cuánto faltaba para acabar.
+    """
+    from app.airvault.flujo import COMPLETADO, SIN_SUBIR
+
+    ventana.completar_check.setChecked(True)
+    ventana._estados = [
+        parte(COMPLETADO, "DP | BITS -1", carpeta="job-1"),
+        parte(SIN_SUBIR, "DP | BITS -2", carpeta="job-2"),
+    ]
+    ventana._pintar_lotes()
+    assert (ventana.progreso.minimum(), ventana.progreso.maximum()) == (0, 100)
+    assert ventana.progreso.value() == 50
+
+    # Un paso sin cuenta no la pone a girar ni la vacía.
+    ventana._mostrar_paso("Entrando a AirVault", 0, 0)
+    assert ventana.progreso.maximum() == 100
+    assert ventana.progreso.value() == 50
+
+
+def test_la_escritura_de_un_batch_mueve_la_barra_sin_volver_atras(ventana):
+    from app.airvault.flujo import LISTO
+
+    ventana.completar_check.setChecked(True)
+    ventana._estados = [parte(LISTO)]
+    ventana._pintar_lotes()
+    assert ventana.progreso.value() == 40
+
+    ventana._al_batch_indexando(ventana._estados[0].trabajo, True)
+    ventana._mostrar_paso("Batch 003SRO: Escribiendo en AirVault", 60, 120)
+    assert ventana.progreso.value() == 60
+    assert ventana.estado_label.text() == (
+        "Batch 003SRO: Escribiendo en AirVault"
+    )
+
+    # Un reintento vuelve a contar desde cero; la barra no retrocede.
+    ventana._mostrar_paso("Batch 003SRO: Escribiendo en AirVault", 1, 120)
+    assert ventana.progreso.value() == 60
+
+
+def test_sin_completar_batch_la_meta_es_quedar_indexado(ventana):
+    from app.airvault.flujo import INDEXADO
+
+    ventana.completar_check.setChecked(False)
+    ventana._estados = [parte(INDEXADO)]
+    ventana._pintar_lotes()
+    assert ventana.progreso.value() == 100
+
+    ventana.completar_check.setChecked(True)
+    assert ventana.progreso.value() == 90
 
 
 # ── mientras escribe ───────────────────────────────────────────────
@@ -1573,11 +1622,44 @@ def test_cancelar_le_pide_al_hilo_que_pare_sin_esperarlo(ventana):
         ventana._worker = None
 
 
-def test_una_etapa_sin_cuenta_deja_la_barra_en_marcha(ventana):
-    """Parada en cero se lee como que no está pasando nada."""
-    ventana._mostrar_paso("Entrando a AirVault", 0, 0)
-    assert ventana.progreso.maximum() == 0
-    assert ventana.progreso.minimum() == 0
+def test_la_bitacora_dice_que_el_proceso_sigue_en_curso(ventana):
+    """Una espera larga no se distinguía de un proceso ya parado."""
+    ventana._anotar("Entrando a AirVault")
+    hilo = HiloFalso()
+    ventana._worker = hilo
+    try:
+        ventana._actualizar_latido()
+        viva = ventana.bitacora.item(ventana.bitacora.count() - 1)
+        assert viva.text().startswith("En curso")
+        # No es algo que haya pasado: ni se elige ni se copia.
+        assert not viva.flags() & Qt.ItemFlag.ItemIsSelectable
+        assert not viva.icon().isNull()
+
+        # Lo que pasa se escribe por encima, como en una terminal.
+        ventana._anotar("Subiendo entrega.pdf")
+        assert ventana.bitacora.item(ventana.bitacora.count() - 1) is viva
+        assert "Subiendo entrega.pdf" in ventana.bitacora.item(
+            ventana.bitacora.count() - 2
+        ).text()
+    finally:
+        ventana._worker = None
+    ventana._actualizar_latido()
+    assert ventana.bitacora.count() == 2
+    assert "Subiendo" in ventana.bitacora.item(1).text()
+
+
+def test_entre_revisiones_la_bitacora_cuenta_lo_que_falta(ventana):
+    from app.airvault.flujo import PROCESANDO
+
+    ventana.auto_check.setChecked(True)
+    ventana._estados = [parte(PROCESANDO)]
+    ventana._ajustar_vigilancia()
+    try:
+        viva = ventana.bitacora.item(ventana.bitacora.count() - 1)
+        assert viva.text().startswith("En espera: se revisa AirVault en")
+    finally:
+        ventana._parar_vigilancia()
+    assert ventana.bitacora.count() == 0
 
 
 def test_la_bitacora_cuenta_los_pasos_y_no_repite_el_mismo(ventana):
@@ -1866,7 +1948,7 @@ def test_una_carga_que_rebasaron_las_siguientes_se_da_por_perdida(ventana):
     assert not ventana._subir_al_terminar
 
 
-def test_un_batch_que_cerro_el_programa_se_pinta_como_terminado(ventana):
+def test_un_batch_que_cerro_el_programa_se_pinta_como_completado(ventana):
     """El autocompletado es un final, no algo que quede por hacer."""
     from app.airvault.flujo import AUTOCOMPLETADO
 
@@ -1877,8 +1959,40 @@ def test_un_batch_que_cerro_el_programa_se_pinta_como_terminado(ventana):
 
     assert fila.se_acabo
     assert not ventana._falta_esperar()
-    assert ventana.lotes.item(0, 3).text().startswith("Terminado por el programa")
+    assert ventana.lotes.item(0, 3).text() == "Completado"
+    assert "lo cerro el programa" in ventana.lotes.item(0, 3).toolTip()
     assert ventana.lotes.item(0, 0).foreground().color() == QColor(color_indexado())
+
+
+def test_el_batch_que_se_escribe_dice_indexando(ventana):
+    from app.airvault.flujo import LISTO
+
+    fila = parte(LISTO)
+    ventana._estados = [fila]
+    ventana._al_batch_indexando(fila.trabajo, True)
+    assert ventana.lotes.item(0, 3).text() == "Indexando"
+    ventana._al_batch_indexando(fila.trabajo, False)
+    assert ventana.lotes.item(0, 3).text() == "Listo para indexar"
+
+
+def test_la_leyenda_explica_cada_estado_con_el_color_de_la_cola(ventana):
+    """El «?» junto al título de la cola: cada rótulo, su color y qué es."""
+    from app.airvault.flujo import NOMBRE_ESTADO_PARTE
+    from app.gui.airvault_window import (leyenda_de_estados,
+                                         leyenda_de_estados_html)
+    from app.gui.tokens import link_text_color, paleta
+
+    rotulos = {rotulo for rotulo, _papel, _texto in leyenda_de_estados()}
+    assert rotulos == set(NOMBRE_ESTADO_PARTE.values()) | {"Indexando"}
+
+    html = leyenda_de_estados_html()
+    assert ventana.leyenda_estados.texto() == html
+    tonos = paleta()
+    assert f"color: {tonos.STATUS_OK};" in html.split("Completado")[0]
+    assert f"color: {tonos.TEXT_TERTIARY};" in html.split("Sin subir")[0]
+    assert f"color: {link_text_color()};" in html.split("Indexando")[0]
+    assert "«Complete»" in html
+    assert "Terminado" not in html
 
 
 def _acciones(ventana, *filas):
@@ -2141,7 +2255,7 @@ def test_la_espera_dice_que_se_puede_subir_sin_esperarla(ventana):
 
     texto = ventana.resumen.text()
     assert "Subir a AirVault ahora" in texto
-    assert "no espere" in texto
+    assert "no está en AirVault" in texto
 
 
 # ── páginas amarillas: se pregunta, no se prohíbe ──────────────────

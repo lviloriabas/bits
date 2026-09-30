@@ -8,10 +8,12 @@ from PySide6.QtCore import QEvent, QObject, QRectF, QSize, Qt
 from PySide6.QtGui import (
     QBrush,
     QColor,
+    QFont,
     QIcon,
     QPainter,
     QPainterPath,
     QPalette,
+    QPen,
     QRegion,
 )
 from PySide6.QtWidgets import (
@@ -32,6 +34,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QToolButton,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -1656,3 +1659,75 @@ class ElidedLabel(QLabel):
             self,
             self.fontMetrics().elidedText(self._full_text, self._elide_mode, width),
         )
+
+
+class IconoAyuda(QWidget):
+    """Círculo con «?» que explica algo al posar el puntero encima.
+
+    ``contenido`` es la función que arma el texto, no el texto: la ayuda
+    lleva colores del tema y, armada de antemano, se quedaba con los del
+    arranque. El dibujo pide su gris al pintarse por lo mismo, y el cambio de
+    tema solo tiene que volver a pintarlo.
+
+    Sale en cuanto entra el puntero, sin la espera de un tooltip normal: es
+    lo único que hace el icono, y con la espera parecía que no hacía nada.
+    """
+
+    # Grosor del círculo. Con uno entero el trazo se pierde en pantallas al
+    # 100 % y con dos pesa más que la letra que rodea.
+    _TRAZO = 1.2
+
+    def __init__(self, contenido, nombre: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._contenido = contenido
+        # Al alto de una línea de texto: acompaña a un rótulo, no es un botón.
+        lado = self.fontMetrics().height()
+        self.setFixedSize(lado, lado)
+        self.setAccessibleName(nombre)
+        self.setCursor(Qt.CursorShape.WhatsThisCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover)
+        al_cambiar_tema(self, self.update)
+
+    def texto(self) -> str:
+        """Lo que enseña ahora mismo, con los colores del tema puesto."""
+        return self._contenido()
+
+    def _mostrar(self) -> None:
+        # Anclado al icono y no al puntero: así no salta de sitio entre la
+        # entrada y el aviso de tooltip que Qt manda después.
+        QToolTip.showText(
+            self.mapToGlobal(self.rect().center()), self.texto(), self, self.rect()
+        )
+
+    def enterEvent(self, event) -> None:  # noqa: N802 - API Qt
+        super().enterEvent(event)
+        self._mostrar()
+        self.update()
+
+    def leaveEvent(self, event) -> None:  # noqa: N802 - API Qt
+        super().leaveEvent(event)
+        QToolTip.hideText()
+        self.update()
+
+    def event(self, event) -> bool:  # noqa: D102 - API Qt
+        if event.type() == QEvent.Type.ToolTip:
+            self._mostrar()
+            return True
+        return super().event(event)
+
+    def paintEvent(self, _event) -> None:  # noqa: N802 - API Qt
+        tonos = paleta()
+        color = QColor(tonos.TEXT if self.underMouse() else tonos.TEXT_SECONDARY)
+        pintor = QPainter(self)
+        pintor.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pluma = QPen(color)
+        pluma.setWidthF(self._TRAZO)
+        pintor.setPen(pluma)
+        borde = self._TRAZO
+        pintor.drawEllipse(QRectF(self.rect()).adjusted(borde, borde, -borde, -borde))
+        fuente = QFont(self.font())
+        fuente.setPointSizeF(FONT_CAPTION_PT)
+        fuente.setWeight(QFont.Weight(WEIGHT_STRONG))
+        pintor.setFont(fuente)
+        pintor.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "?")
+        pintor.end()

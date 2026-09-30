@@ -262,7 +262,7 @@ def test_desmarcada_advierte_y_sube_aunque_web_search_detecte_duplicados(tmp_pat
     assert not fallos
     assert es_posible_duplicado(trabajo)
     assert any("duplicado" in aviso and "continúa" in aviso for aviso in avisos)
-    assert "sin detener" in str(estado_local(trabajo))
+    assert "posible duplicado, se continúa" in str(estado_local(trabajo))
 
 
 def test_desmarcada_no_impide_completar_y_conserva_la_alerta(tmp_path, monkeypatch):
