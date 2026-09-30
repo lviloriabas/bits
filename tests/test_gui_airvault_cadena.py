@@ -85,6 +85,19 @@ def cadena(app, tmp_path, monkeypatch):
         Trabajo, "subir",
         subida_simulada(cliente, {f"DP | {NOMBRE} -2": 10_000}),
     )
+    # Lo que AirVault seguía armando cada vez que salió una carga. Tiene que
+    # estar siempre vacío: con dos en vuelo, AirVault las junta.
+    cliente.en_vuelo_al_subir = []
+    publicar = cliente.publicar
+
+    def publicar_anotando(nombre, paginas, vueltas=2):
+        cliente.en_vuelo_al_subir.append([
+            batch_id for batch_id, faltan in cliente.faltan_vueltas.items()
+            if faltan
+        ])
+        return publicar(nombre, paginas, vueltas)
+
+    cliente.publicar = publicar_anotando
     ventana = AirVaultWindow(tmp_path, OpcionesAutomatizacion(tmp_path))
     ventana.completar_check.setChecked(True)
     ventana.fijar_corrida(corrida(tmp_path))
@@ -162,9 +175,15 @@ def _todo_terminado(cliente, trabajos, fallos):
         assert manifiesto.etapa_hecha("verificar")
         assert manifiesto.etapa_hecha("completar")
     assert cliente.completados == ["003B1", "003B2", "003B3"]
-    # Subida > Indexado: el tercero no salió antes de indexar el segundo.
-    assert cliente.eventos.index(("escribir", "003B2")) < cliente.eventos.index(
-        ("subir", f"DP | {NOMBRE} -3")
+    # Ninguna carga salió con otra todavía armándose en AirVault.
+    assert all(en_vuelo == [] for en_vuelo in cliente.en_vuelo_al_subir)
+    # El segundo se escribió mientras AirVault armaba el tercero, no al
+    # terminar todas las cargas.
+    eventos = cliente.eventos
+    assert (
+        eventos.index(("subir", f"DP | {NOMBRE} -3"))
+        < eventos.index(("escribir", "003B2"))
+        < eventos.index(("escribir", "003B3"))
     )
 
 

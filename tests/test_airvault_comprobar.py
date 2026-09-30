@@ -1845,14 +1845,14 @@ def test_subir_confirma_todos_y_carga_solo_la_division_pendiente(
     )
 
     assert subidas == ["DP | BIT -2"]
-    # Los ya confirmados pasan al indexado antes de la carga pendiente.
-    assert eventos.index(("encontrado", "DP | BIT")) < eventos.index(
-        ("subir", "DP | BIT -2")
-    )
-    assert eventos.index(("encontrado", "DP | BIT REVISAR")) < eventos.index(
-        ("subir", "DP | BIT -2")
-    )
-    assert eventos[-1] == ("encontrado", "DP | BIT -2")
+    # La carga pendiente sale primero, para que AirVault empiece a armarla,
+    # y los ya confirmados se indexan mientras tanto.
+    assert eventos == [
+        ("subir", "DP | BIT -2"),
+        ("encontrado", "DP | BIT"),
+        ("encontrado", "DP | BIT REVISAR"),
+        ("encontrado", "DP | BIT -2"),
+    ]
     assert trabajos[0].manifiesto.batch_id == "003PRI"
     assert trabajos[2].manifiesto.batch_id == "003REV"
 
@@ -1908,13 +1908,21 @@ def test_subir_otra_vez_espera_la_carga_en_vuelo_y_sube_las_que_faltan(
     """Pulsar «Subir» con una parte ya subida retoma las que faltan.
 
     La parte subida seguia armandose en AirVault y la subida se rendia al
-    instante sin mandar las demas. Ahora espera a que se confirme, la
-    indexa y sigue.
+    instante sin mandar las demas. Ahora espera a que se confirme, manda la
+    siguiente y la indexa mientras AirVault arma esa otra.
     """
     primera, segunda = _dos_partes(tmp_path)
     cliente = AirVaultSimulado()
     monkeypatch.setattr(Trabajo, "subir", subida_simulada(cliente))
     primera.subir(SesionFalsa(), cliente=cliente)
+    confirmada_antes: list[bool] = []
+    original = cliente.publicar
+
+    def publicar(nombre, paginas, vueltas=2):
+        confirmada_antes.append(bool(primera.manifiesto.batch_id))
+        return original(nombre, paginas, vueltas)
+
+    cliente.publicar = publicar
 
     def encontrado(trabajo, _todos):
         cliente.eventos.append(("indexar", trabajo.manifiesto.nombre_batch))
@@ -1925,10 +1933,12 @@ def test_subir_otra_vez_espera_la_carga_en_vuelo_y_sube_las_que_faltan(
     )
 
     assert fallos == []
+    # La segunda no sale con la primera todavia armandose.
+    assert confirmada_antes == [True]
     assert cliente.eventos == [
         ("subir", "DP | BIT -1"),
-        ("indexar", "DP | BIT -1"),
         ("subir", "DP | BIT -2"),
+        ("indexar", "DP | BIT -1"),
         ("indexar", "DP | BIT -2"),
     ]
     assert [t.manifiesto.batch_id for t in (primera, segunda)] == [
@@ -1967,10 +1977,13 @@ def test_la_reanudacion_tambien_espera_la_carga_en_vuelo_de_la_ejecucion(
     )
 
     assert confirmada_antes == [True]
-    assert ("indexar", "DP | BIT -1") in cliente.eventos
-    assert cliente.eventos.index(("indexar", "DP | BIT -1")) < (
-        cliente.eventos.index(("subir", "DP | BIT -2"))
-    )
+    # Se indexa mientras AirVault arma la carga nueva, no despues de todo.
+    assert cliente.eventos == [
+        ("subir", "DP | BIT -1"),
+        ("subir", "DP | BIT -2"),
+        ("indexar", "DP | BIT -1"),
+        ("indexar", "DP | BIT -2"),
+    ]
 
 
 def test_una_carga_perdida_no_detiene_las_demas(tmp_path, monkeypatch):
@@ -2038,8 +2051,8 @@ def test_reanudar_la_subida_indexa_tambien_los_ya_confirmados(
 
     Antes el batch ya confirmado de la misma ejecucion no entraba en esa
     tanda y esperaba a otra vuelta del reloj, que tampoco lo indexaba
-    mientras quedaran cargas pendientes. Como lo confirmado en la tanda, se
-    indexa antes de la carga siguiente.
+    mientras quedaran cargas pendientes. Ahora entra en la cola del
+    indexado de la subida, como lo confirmado en la tanda.
     """
     from app.gui.airvault_window import TrabajoAirVaultWorker
 
@@ -2064,10 +2077,15 @@ def test_reanudar_la_subida_indexa_tambien_los_ya_confirmados(
         ],
     )
 
-    def subir_falso(lotes, _sesion, al_encontrar=None, **_kwargs):
+    def subir_falso(lotes, _sesion, al_encontrar=None, ya_confirmados=(),
+                    **_kwargs):
+        # Como la subida de verdad: sube, indexa lo confirmado mientras
+        # AirVault arma la carga y al final lo recien subido.
         for trabajo in lotes:
             eventos.append(("subir", trabajo.manifiesto.nombre_batch))
             trabajo.manifiesto.batch_id = "003DOS"
+            for otro in ya_confirmados:
+                al_encontrar(otro, lotes)
             al_encontrar(trabajo, lotes)
         return []
 
@@ -2090,8 +2108,8 @@ def test_reanudar_la_subida_indexa_tambien_los_ya_confirmados(
     worker._subir_pendientes()
 
     assert eventos == [
-        ("indexar", "DP | BIT"),
         ("subir", "DP | BIT -2"),
+        ("indexar", "DP | BIT"),
         ("indexar", "DP | BIT -2"),
     ]
 
@@ -2107,9 +2125,10 @@ def test_la_subida_indexa_cada_batch_de_punta_a_punta(tmp_path, monkeypatch):
     """El recorrido entero del boton «Subir», contra un AirVault simulado.
 
     Cada archivo sube, AirVault tarda en armarlo (el nombre aparece antes
-    que las paginas), se identifica, se escribe y se verifica antes de que
-    salga el siguiente. Es justo lo que no pasaba: el primer batch aparecia
-    a medias, la confirmacion fallaba, la cadena se cortaba y nada llegaba a
+    que las paginas) y se identifica antes de que salga el siguiente; cada
+    batch confirmado se escribe y se verifica mientras AirVault arma el
+    siguiente. Es justo lo que no pasaba: el primer batch aparecia a
+    medias, la confirmacion fallaba, la cadena se cortaba y nada llegaba a
     escribirse.
     """
     from app.gui.airvault_window import TrabajoAirVaultWorker
@@ -2119,6 +2138,14 @@ def test_la_subida_indexa_cada_batch_de_punta_a_punta(tmp_path, monkeypatch):
     assert [len(t.manifiesto.registros) for t in trabajos] == [1, 1]
     cliente = AirVaultSimulado()
     eventos = cliente.eventos
+    ids_al_subir: list[list] = []
+    original = cliente.publicar
+
+    def publicar(nombre, paginas, vueltas=2):
+        ids_al_subir.append([t.manifiesto.batch_id for t in trabajos])
+        return original(nombre, paginas, vueltas)
+
+    cliente.publicar = publicar
 
     monkeypatch.setattr(Trabajo, "subir", subida_simulada(cliente))
     monkeypatch.setattr(
@@ -2143,14 +2170,15 @@ def test_la_subida_indexa_cada_batch_de_punta_a_punta(tmp_path, monkeypatch):
 
     worker._subir()
 
-    assert [evento for evento in eventos if evento[0] == "subir"] == [
+    # El primero se escribe y se completa mientras AirVault arma el segundo,
+    # y el segundo al final.
+    assert eventos == [
         ("subir", "DP | BIT -1"), ("subir", "DP | BIT -2"),
+        ("escribir", "003B1"), ("completar", "003B1"),
+        ("escribir", "003B2"), ("completar", "003B2"),
     ]
-    # Cada batch se escribe entero antes de que salga el archivo siguiente.
-    assert eventos.index(("escribir", "003B1")) < eventos.index(
-        ("subir", "DP | BIT -2")
-    )
-    assert ("escribir", "003B2") in eventos
+    # El segundo no salio hasta tener al primero confirmado.
+    assert ids_al_subir == [[None, None], ["003B1", None]]
     assert [t.manifiesto.batch_id for t in trabajos] == ["003B1", "003B2"]
     assert all(t.manifiesto.etapa_hecha("verificar") for t in trabajos)
     assert cliente.completados == ["003B1", "003B2"]
@@ -2479,10 +2507,16 @@ def test_varios_empty_batch_del_mismo_tamano_conservan_su_id(
     assert cliente.lecturas == [1, 1, 1]
 
 
-def test_cada_hallazgo_se_publica_antes_de_subir_el_siguiente(
+def test_cada_hallazgo_se_indexa_mientras_airvault_arma_la_carga_siguiente(
     tmp_path, monkeypatch
 ):
-    """El indexado de un batch confirmado no espera a las cargas restantes."""
+    """El indexado de un batch confirmado no espera a las cargas restantes.
+
+    Cada carga sale en cuanto la anterior queda confirmada, y el rato que
+    AirVault tarda en armarla es para indexar la anterior: el indexado va
+    como mucho un batch por detras de las subidas, aunque AirVault confirme
+    al instante.
+    """
     trabajos = _trabajos_principal_division_y_revisar(tmp_path)
     cliente = ClienteFalso()
     eventos: list[tuple[str, str]] = []
@@ -2510,10 +2544,10 @@ def test_cada_hallazgo_se_publica_antes_de_subir_el_siguiente(
 
     assert eventos == [
         ("subir", "DP | BIT"),
-        ("id", "DP | BIT"),
         ("subir", "DP | BIT -2"),
-        ("id", "DP | BIT -2"),
+        ("id", "DP | BIT"),
         ("subir", "DP | BIT REVISAR"),
+        ("id", "DP | BIT -2"),
         ("id", "DP | BIT REVISAR"),
     ]
 
@@ -3166,3 +3200,144 @@ def test_una_carga_recien_subida_no_se_reenvia_por_no_estar_todavia(
     assert not subida_perdida(estados[-1], [trabajo])
     subir_partes([trabajo], SesionFalsa(), cliente=cliente)
     assert subidas == []
+
+
+# ── detectar sin tomar el batch ────────────────────────────────────
+
+
+def test_un_batch_ya_confirmado_no_se_toma_en_cada_revision(tmp_path):
+    """Identificarlo otra vez lo abria en AirVault en cada vuelta del reloj.
+
+    Con el mismo ID, su titulo completo y sus paginas basta con leer unas
+    pocas sin tomarlo y ver que no dicen otra cosa.
+    """
+    trabajo, cliente = trabajo_subido(tmp_path)
+    cliente.paginas = paginas_ocr(trabajo, trabajo.manifiesto.nombre_batch)
+    trabajo.fijar_lote("003SRO")
+
+    parte, = comprobar_partes([trabajo], cliente)
+
+    assert parte.estado == LISTO
+    assert trabajo.manifiesto.batch_id == "003SRO"
+    assert cliente.abiertos == []
+    assert len(cliente.lecturas) <= 4
+
+
+def test_un_batch_confirmado_que_dice_ser_otro_vuelve_a_identificarse(
+    tmp_path,
+):
+    """El titulo puesto al batch equivocado se descubre leyendo sin tomar."""
+    trabajo, cliente = trabajo_subido(tmp_path)
+    cliente.paginas = paginas_ocr(trabajo, "DP | OTRA CARGA")
+    trabajo.fijar_lote("003SRO")
+
+    parte, = comprobar_partes([trabajo], cliente)
+
+    # La identificacion completa lo rechaza: su Batch Name es de otra carga.
+    assert parte.estado != LISTO
+    assert trabajo.manifiesto.batch_id is None
+
+
+def test_un_batch_tomado_por_otra_persona_no_cuelga_la_revision(tmp_path):
+    """Abrirlo dejaba la peticion colgada minutos: ni se abre ni se lee."""
+    trabajo, cliente = trabajo_subido(tmp_path)
+    trabajo.fijar_lote("003SRO")
+    cliente.lotes = [
+        lote("003SRO", trabajo.manifiesto.nombre_batch, 2,
+             bloqueado_por="revisora@copaair.com"),
+    ]
+
+    parte, = comprobar_partes([trabajo], cliente)
+
+    assert parte.estado == TOMADO
+    assert trabajo.manifiesto.batch_id == "003SRO"
+    assert cliente.abiertos == []
+    assert cliente.lecturas == []
+
+
+def test_la_identificacion_no_abre_un_candidato_tomado(tmp_path):
+    trabajo, _ = trabajo_subido(tmp_path)
+    cliente = ClienteFalso(
+        lotes=[
+            lote("003VIEJO", "DP | LO DE ANTES", 9),
+            lote("003VACIO", "Empty-Batch", 2,
+                 bloqueado_por="revisora@copaair.com"),
+        ],
+        paginas_por_lote={"003VACIO": paginas_ocr(trabajo)},
+    )
+
+    comprobar_partes([trabajo], cliente)
+
+    assert cliente.abiertos == []
+    assert trabajo.manifiesto.batch_id is None
+
+
+def test_un_batch_que_no_se_deja_indexar_no_corta_las_cargas(
+    tmp_path, monkeypatch
+):
+    """El fallo del indexado es de ese batch; la carga siguiente sigue."""
+    primera, segunda = _dos_partes(tmp_path)
+    cliente = AirVaultSimulado()
+    monkeypatch.setattr(Trabajo, "subir", subida_simulada(cliente))
+
+    def encontrado(trabajo, _todos):
+        if trabajo is primera:
+            raise RuntimeError("AirVault rechazo el batch")
+        cliente.eventos.append(("indexar", trabajo.manifiesto.nombre_batch))
+
+    fallos = subir_partes(
+        [primera, segunda], SesionFalsa(), cliente=cliente,
+        dormir=cliente.avanzar, al_encontrar=encontrado,
+    )
+
+    assert fallos == []
+    assert [t.manifiesto.batch_id for t in (primera, segunda)] == [
+        "003B1", "003B2",
+    ]
+    assert cliente.eventos[-1] == ("indexar", "DP | BIT -2")
+
+
+def test_la_espera_a_airvault_indexa_lo_confirmado_y_duerme_lo_que_sobre(
+    tmp_path, monkeypatch
+):
+    """Indexar gasta la espera: solo se duerme lo que quede de la vuelta."""
+    from app.airvault import flujo
+
+    primera, segunda = _dos_partes(tmp_path)
+    cliente = AirVaultSimulado()
+    monkeypatch.setattr(Trabajo, "subir", subida_simulada(cliente))
+    # La primera sigue armandose en AirVault y hay otro batch ya confirmado.
+    primera.subir(SesionFalsa(), cliente=cliente)
+    otro = SimpleNamespace(
+        carpeta=tmp_path / "otro",
+        manifiesto=SimpleNamespace(nombre_batch="DP | OTRO"),
+    )
+    reloj = [0.0]
+    monkeypatch.setattr(flujo.time, "monotonic", lambda: reloj[0])
+    esperas: list[float] = []
+
+    def dormir(segundos):
+        esperas.append(segundos)
+        cliente.avanzar()
+
+    def encontrado(trabajo, _todos):
+        reloj[0] += 5
+        cliente.eventos.append(("indexar", trabajo.manifiesto.nombre_batch))
+
+    subir_partes(
+        [segunda], SesionFalsa(), cliente=cliente, dormir=dormir,
+        al_encontrar=encontrado, en_la_ejecucion=[primera, segunda],
+        ya_confirmados=[otro],
+    )
+
+    espera = AirVaultConfig().espera_descubrimiento_s
+    # Mientras se esperaba a la primera se indexo el otro, y esa vuelta solo
+    # durmio lo que le quedaba.
+    assert esperas[0] == espera - 5
+    assert cliente.eventos == [
+        ("subir", "DP | BIT -1"),
+        ("indexar", "DP | OTRO"),
+        ("subir", "DP | BIT -2"),
+        ("indexar", "DP | BIT -1"),
+        ("indexar", "DP | BIT -2"),
+    ]

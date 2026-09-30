@@ -2851,6 +2851,7 @@ def subir_partes(
     en_la_ejecucion: Sequence["Trabajo"] = (),
     forzados: Collection[str] = (),
     buscador: Optional[websearch.Buscador] = None,
+    ya_confirmados: Sequence["Trabajo"] = (),
 ) -> List[Tuple["Trabajo", str]]:
     """Confirma todos los batches y sube solamente los que falten.
 
@@ -2874,13 +2875,20 @@ def subir_partes(
     aislado en su trabajo: no impide intentar las demas partes de la
     ejecucion.
 
-    ``al_encontrar`` recibe cada batch en cuanto queda confirmado (ID, título,
-    páginas y contenido), sin esperar a las cargas que faltan, y antes de
-    mandar el archivo siguiente: el recorrido es Subida > Indexado, batch por
-    batch y en el mismo hilo. Esperar a todas las cargas dejaba una ejecución
-    de ocho partes sin una sola página escrita durante horas, e indexar en
-    otro hilo mientras subía el siguiente archivo compartía la sesión de
-    AirVault con la carga en vuelo.
+    ``al_encontrar`` indexa cada batch confirmado (ID, título, páginas y
+    contenido) mientras AirVault arma la carga siguiente, en el mismo hilo y
+    con la misma sesión. Tras mandar un archivo, AirVault tarda minutos en
+    tenerlo entero, y antes ese rato se pasaba mirando la cola sin hacer
+    nada; ahora cada espera escribe, verifica y completa un batch ya
+    confirmado (ver ``dormir_indexando``) y solo duerme lo que sobre. Lo
+    que quede sin indexar al acabar las cargas se indexa antes de volver,
+    salga la subida como salga. Esperar a todas las cargas dejaba una
+    ejecución de ocho partes sin una sola página escrita durante horas, e
+    indexar en otro hilo mientras subía el siguiente archivo compartía la
+    sesión de AirVault con la carga en vuelo.
+
+    ``ya_confirmados`` son batches de la ejecución que ya estaban en AirVault
+    sin indexar y no vienen en ``trabajos``; entran en la misma cola.
 
     Las cargas van de una en una y cada una se cierra antes de empezar la
     siguiente: se sube, se espera a que AirVault la publique y se le pone su
@@ -2915,15 +2923,59 @@ def subir_partes(
     claves_forzadas = {str(clave) for clave in forzados or ()}
     por_subir = list(trabajos)
     confirmados: set[str] = set()
+    por_indexar: List["Trabajo"] = []
 
     def publicar(trabajo: "Trabajo") -> None:
-        """Entrega un batch confirmado al indexado, una sola vez."""
+        """Deja un batch confirmado en la cola del indexado, una sola vez."""
         clave = str(trabajo.carpeta)
         if clave in confirmados:
             return
         confirmados.add(clave)
         if al_encontrar is not None:
+            por_indexar.append(trabajo)
+
+    def indexar_uno() -> bool:
+        """Indexa el primer batch de la cola; ``False`` si no habia ninguno.
+
+        Un batch que no se deja indexar no corta la subida: su fallo es suyo
+        y lo retoma la revision siguiente. La cancelacion si sale.
+        """
+        if not por_indexar:
+            return False
+        trabajo = por_indexar.pop(0)
+        try:
             al_encontrar(trabajo, trabajos)
+        except Exception as exc:  # noqa: BLE001 - se anota y siguen las cargas
+            logger.opt(exception=exc).error(
+                "No se pudo indexar el batch {}: {}",
+                trabajo.manifiesto.nombre_batch, exc,
+            )
+        return True
+
+    def indexar_todo() -> None:
+        while indexar_uno():
+            pass
+
+    def dormir_indexando(segundos: float) -> None:
+        """La espera a AirVault, aprovechada para indexar un batch listo.
+
+        Solo duerme lo que la escritura no haya gastado ya: un batch tarda
+        mas que una vuelta de la espera, y al terminarlo se vuelve a mirar
+        la cola en el acto.
+        """
+        inicio = time.monotonic()
+        if por_indexar and avisar is not None:
+            avisar(
+                "Mientras AirVault arma la carga, se indexa un batch ya "
+                "confirmado", 0, 0,
+            )
+        indexar_uno()
+        restante = float(segundos) - (time.monotonic() - inicio)
+        if restante > 0:
+            dormir(restante)
+
+    for trabajo in ya_confirmados:
+        publicar(trabajo)
 
     nombres_embebidos: dict[str, str] = {}
     if cliente is not None:
@@ -2974,18 +3026,22 @@ def subir_partes(
             trabajo for trabajo in trabajos
             if str(trabajo.carpeta) in claves_por_subir
         ]
-        # Lo que ya esta confirmado se indexa antes de cualquier carga.
+        # Lo que ya esta confirmado entra en la cola del indexado: se escribe
+        # mientras AirVault arma la primera carga, o al final si no hay
+        # ninguna que esperar.
         for parte in estados:
             if parte.batch_id:
                 publicar(parte.trabajo)
         if por_subir:
             bloqueo = _esperar_cargas_en_vuelo(
-                estados, ejecucion, cliente, dormir, avisar, publicar,
-                nombres_embebidos,
+                estados, ejecucion, cliente, dormir_indexando, avisar,
+                publicar, nombres_embebidos,
             )
             if bloqueo:
                 if avisar:
                     avisar(bloqueo, 0, 0)
+                # Sin subir nada mas, lo confirmado se indexa igual.
+                indexar_todo()
                 return [(trabajo, bloqueo) for trabajo in por_subir]
         estados = [
             parte for parte in estados if str(parte.trabajo.carpeta) in propias
@@ -3173,19 +3229,23 @@ def subir_partes(
         # Este batch se deja identificado y con su titulo antes de mandar
         # el siguiente. Dos cargas seguidas llegan juntas a la cola y se
         # publican como dos ``Empty-Batch`` que ninguna instantanea separa;
-        # esperar aqui deja una sola carga sin nombre a la vez. En cuanto
-        # queda confirmado pasa al indexado, que avanza mientras sube el
-        # siguiente archivo.
+        # esperar aqui deja una sola carga sin nombre a la vez. Mientras
+        # AirVault la arma se indexa lo ya confirmado, y ella entra en la
+        # cola del indexado en cuanto queda confirmada.
         if trabajo.manifiesto.batch_id:
             publicar(trabajo)
             continue
+        # AirVault tarda en armar lo que acaba de recibir: ese rato es para
+        # el batch anterior. Asi el indexado nunca va mas de un batch por
+        # detras de las cargas, aunque AirVault confirme al instante.
+        indexar_uno()
         if avisar is not None:
             avisar(f"{cabeza}Subido; esperando a que AirVault lo detecte", 0, 0)
         try:
             trabajo.descubrir(
                 cliente,
                 esperar=True,
-                dormir=dormir,
+                dormir=dormir_indexando,
                 avisar=propio if avisar else None,
                 cache=nombres_embebidos,
             )
@@ -3206,6 +3266,10 @@ def subir_partes(
                 )
             break
         publicar(trabajo)
+
+    # Lo confirmado que no alcanzo a indexarse durante las esperas, que es
+    # como minimo la ultima carga.
+    indexar_todo()
 
     if cliente is not None and len(por_subir) > 1:
         from app.airvault.mezclas import recuperar_mezclas
@@ -4006,7 +4070,14 @@ def estado_local(trabajo: "Trabajo") -> EstadoParte:
 
 
 def _nombre_embebido_empty_batch(cliente, lote: ResumenLote) -> str:
-    """Lee el Batch Name que Quick Upload dejó dentro de la primera página."""
+    """Lee el Batch Name que Quick Upload dejó dentro de la primera página.
+
+    Un batch que alguien tiene abierto no se abre: AirVault no contesta
+    «ocupado», deja la petición colgada hasta agotar el tiempo y sus
+    reintentos, y cada revisión se quedaba minutos parada ahí.
+    """
+    if lote.bloqueado_por:
+        return ""
     abierto = False
     try:
         cliente.abrir_lote(lote.batch_id)
@@ -4066,7 +4137,9 @@ def _coincide_huella_ocr(
     solo log repetido en otra carga no autorice un renombrado.
     """
     muestras = _registros_de_huella(trabajo.manifiesto)
-    if not muestras:
+    if not muestras or lote.bloqueado_por:
+        # Tomado por alguien no se puede abrir sin colgar la petición; no
+        # cuenta ni a favor ni en contra.
         return False, 0, False
     abierto = False
     coincidencias = 0
@@ -4124,6 +4197,102 @@ def _coincide_huella_ocr(
     return suficiente, coincidencias * 100 + apoyos, False
 
 
+def _ya_confirmado(
+    trabajo: "Trabajo",
+    cliente,
+    lotes: Sequence[ResumenLote],
+    excluir_ids: Collection[str] = (),
+) -> Optional[ResumenLote]:
+    """El batch que este trabajo ya identifico, si la cola lo sigue mostrando.
+
+    La identificacion completa abre el batch (lo toma en AirVault) y lee su
+    Batch Name interno o siete paginas de su huella OCR. Hace falta la
+    primera vez, para saber cual de los batches nuevos es esta carga;
+    repetirla en cada revision con un batch ya identificado costaba varias
+    peticiones por batch, y con el batch abierto por alguien, minutos de
+    espera por cada apertura colgada. Mientras la cola devuelva el mismo ID
+    con el titulo completo de esta parte y una cantidad de paginas que le
+    cuadra, basta con leer unas pocas paginas sin tomarlo y comprobar que
+    no dicen otra cosa (ver :func:`_contradice_sin_abrir`): un titulo puesto
+    al batch equivocado se descubre ahi y vuelve a la identificacion
+    completa. La planificacion contrasta despues cada pagina antes de
+    escribir.
+    """
+    manifiesto = trabajo.manifiesto
+    batch_id = str(manifiesto.batch_id or "").strip().upper()
+    if not batch_id or not manifiesto.etapa_hecha("descubrir"):
+        return None
+    excluidos = {str(valor).strip().upper() for valor in excluir_ids or ()}
+    excluidos.update(
+        str(valor).strip().upper() for valor in manifiesto.batches_descartados
+    )
+    if batch_id in excluidos:
+        return None
+    compatibles = manifiesto.cantidades_paginas_compatibles()
+    for lote in lotes:
+        if (
+            lote.batch_id.strip().upper() == batch_id
+            and (not lote.repo_id or lote.repo_id == manifiesto.repo_id)
+            and lote.paginas in compatibles
+            and _nombre_visible_compatible(lote.nombre, manifiesto.nombre_batch)
+        ):
+            if lote.bloqueado_por:
+                # Abierto por alguien no se lee: la fila dira que esta
+                # tomado y nada se escribe hasta que lo suelte.
+                return lote
+            if _contradice_sin_abrir(trabajo, cliente, lote):
+                return None
+            return lote
+    return None
+
+
+def _contradice_sin_abrir(trabajo: "Trabajo", cliente, lote: ResumenLote) -> bool:
+    """Si unas pocas paginas del batch dicen que no es esta carga.
+
+    Se leen sin tomar el batch, como la verificacion: la primera, por su
+    Batch Name interno, y tres repartidas, por su Log Page Number. Un valor
+    vacio no cuenta en contra (AirVault no siempre coloca el OCR), y una
+    pagina que no se puede leer tampoco: la planificacion la volvera a
+    contrastar antes de escribir.
+    """
+    from app.airvault.indexer import FALLOS_DE_CAMINO
+
+    manifiesto = trabajo.manifiesto
+    esperado = normalizar_nombre(manifiesto.nombre_batch)
+    muestras = dict(_registros_de_huella(manifiesto, maximo=3))
+    for pagina in sorted({1, *muestras}):
+        try:
+            remota = cliente.leer_pagina(lote.batch_id, pagina)
+        except FALLOS_DE_CAMINO:
+            raise
+        except Exception as exc:  # noqa: BLE001 - no decide nada
+            logger.debug(
+                "No se pudo leer la pagina {} de {} al confirmarlo: {}",
+                pagina, lote.batch_id, exc,
+            )
+            continue
+        if pagina == 1:
+            interno = normalizar_nombre(
+                remota.valores.get(CAMPO_BATCH_NAME)
+                or remota.columnas.get("Batch Name")
+                or remota.columnas.get("C_BatchName")
+                or ""
+            )
+            if interno and interno != esperado:
+                return True
+        registro = muestras.get(pagina)
+        if registro is None:
+            continue
+        log_remoto = normalizar_log_number(
+            remota.valores.get(CAMPO_LOG_NUMBER, "")
+        )
+        if log_remoto and log_remoto != normalizar_log_number(
+            registro.log_number
+        ):
+            return True
+    return False
+
+
 def _lote_por_identidad_y_contenido(
     trabajo: "Trabajo",
     cliente,
@@ -4139,6 +4308,9 @@ def _lote_por_identidad_y_contenido(
     sobre un Log Page Number que contradice el manifiesto. Si AirVault no
     publicó ningún OCR, el nombre completo o el Batch Name interno sirven de
     respaldo junto con la cantidad exacta de páginas.
+
+    El batch que este trabajo ya identificó en una revisión anterior no se
+    vuelve a abrir (ver :func:`_ya_confirmado`).
     """
     manifiesto = trabajo.manifiesto
     compatibles = manifiesto.cantidades_paginas_compatibles()
@@ -4150,6 +4322,9 @@ def _lote_por_identidad_y_contenido(
     excluir_ids.update(str(valor).strip().upper() for valor in manifiesto.batches_descartados)
     cache = cache if cache is not None else {}
     esperado = normalizar_nombre(manifiesto.nombre_batch)
+    confirmado = _ya_confirmado(trabajo, cliente, lotes, excluir_ids)
+    if confirmado is not None:
+        return confirmado
     candidatos: List[tuple[int, ResumenLote, str]] = []
     for lote in lotes:
         clave = lote.batch_id.strip().upper()

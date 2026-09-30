@@ -175,6 +175,32 @@ class ClienteHttp:
         self.sesion = sesion
         self.config = config
 
+    # ── carriles paralelos ───────────────────────────────────────────
+
+    def carriles(self) -> int:
+        """Cuantas conexiones pueden leer o escribir paginas a la vez.
+
+        Una sola si la sesion no se puede clonar: sin su propia conexion,
+        dos hilos se pisarian la misma ``requests.Session``.
+        """
+        if not callable(getattr(self.sesion, "clonar", None)):
+            return 1
+        return max(1, int(getattr(self.config, "carriles_indexado", 1) or 1))
+
+    def carril(self) -> "ClienteHttp":
+        """Otro cliente con la misma autenticacion, para un hilo aparte.
+
+        No vuelve a entrar solo si AirVault lo rechaza: lo hace la sesion
+        principal, que es la unica que puede abrir Edge.
+        """
+        return ClienteHttp(self.sesion.clonar(renovable=False), self.config)
+
+    def cerrar_conexiones(self) -> None:
+        """Suelta las conexiones de un carril que ya no se usa."""
+        http = getattr(self.sesion, "http", None)
+        if http is not None:
+            http.close()
+
     # ── batches ──────────────────────────────────────────────────────
 
     def buscar_lotes(
@@ -184,7 +210,13 @@ class ClienteHttp:
 
         Solo se paraleliza el listado. Abrir, identificar y modificar batches
         sigue en el hilo del flujo, sin compartir una sesion HTTP entre hilos.
+
+        Una consulta que falla por la sesion o la red en su conexion aparte
+        se repite en la principal, que es la que puede volver a entrar.
         """
+        from app.airvault.session import (ErrorDeConexion, ErrorDeSesion,
+                                          SesionCancelada)
+
         nombres = list(dict.fromkeys(nombres))
         if len(nombres) < 2 or not callable(getattr(self.sesion, "clonar", None)):
             for nombre in nombres:
@@ -194,6 +226,10 @@ class ClienteHttp:
         def consultar(sesion, nombre):
             try:
                 return ClienteHttp(sesion, self.config).listar_lotes(nombre)
+            except SesionCancelada:
+                raise
+            except (ErrorDeSesion, ErrorDeConexion) as exc:
+                return exc
             finally:
                 sesion.http.close()
 
@@ -205,7 +241,7 @@ class ClienteHttp:
                 nombre = next(restantes, None)
                 if nombre is not None:
                     # Clonar ocurre en el hilo propietario de la sesion.
-                    sesion = self.sesion.clonar()
+                    sesion = self.sesion.clonar(renovable=False)
                     futuros[ejecutor.submit(consultar, sesion, nombre)] = nombre
 
             for _ in range(min(4, len(nombres))):
@@ -215,6 +251,10 @@ class ClienteHttp:
                 for futuro in terminados:
                     nombre = futuros.pop(futuro)
                     resultado = futuro.result()
+                    if isinstance(resultado, Exception):
+                        # El carril no puede volver a entrar; la sesion
+                        # principal si. Si tampoco puede, el error es suyo.
+                        resultado = self.listar_lotes(nombre)
                     enviar()
                     yield nombre, resultado
         finally:

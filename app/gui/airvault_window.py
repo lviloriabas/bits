@@ -260,17 +260,26 @@ ESPERAS_CONFIRMACION = ((5, 15), (30,), (60,))
 ESPERAS_CIERRE = (15, 45)
 
 # Comprobaciones periódicas que se le dan a un batch que acabó el indexado
-# sin confirmar. Cada una relee AirVault y, si hace falta, reescribe y
-# completa. Acotadas para que una página que de verdad necesita corrección
-# manual no deje el reloj preguntando toda la tarde.
+# sin confirmar. Cada una relee AirVault y, si hace falta, reescribe las
+# páginas amarillas y completa. Un intento que deja menos amarillas que el
+# anterior las devuelve enteras: mientras reescribir sirva, se sigue.
 RECONFIRMACIONES_TRAS_INDEXAR = 3
 
-# Fallos seguidos de la comprobación automática antes de parar el reloj.
-# Uno solo no significa nada: AirVault devuelve un 500 de vez en cuando y
-# la sesión se renueva sola, así que parar en el primero dejaba la ejecución
-# muerta hasta que alguien volviera a la ventana. Tres seguidos ya no son un
-# tropiezo, y repetir el mismo error toda la tarde no arregla nada.
-FALLOS_SEGUIDOS_ANTES_DE_PARAR = 3
+# Gastadas esas comprobaciones sin avanzar, el batch amarillo se sigue
+# reintentando solo, pero espaciado: suele ser AirVault, que tarda en
+# reflejar lo guardado o rechaza un rato. Con un tope, para que una página
+# que de verdad necesita una mano no haga releer el batch toda la noche.
+MINUTOS_ENTRE_REINTENTOS_AMARILLOS = 20
+REINTENTOS_AMARILLOS_ESPACIADOS = 6
+
+# Fallos seguidos de la comprobación automática antes de espaciarla. Uno
+# solo no significa nada: AirVault devuelve un 500 de vez en cuando y la
+# sesión se renueva sola. Tres seguidos ya no son un tropiezo, pero tampoco
+# motivo para parar: una red caída o un AirVault en mantenimiento vuelven,
+# y parar dejaba la ejecución sin indexar hasta que alguien volviera a la
+# ventana. Se sigue intentando cada `MINUTOS_TRAS_FALLOS`.
+FALLOS_SEGUIDOS_ANTES_DE_ESPACIAR = 3
+MINUTOS_TRAS_FALLOS = 15
 
 # Líneas que conserva la bitácora. Con la comprobación automática corriendo
 # toda una tarde, sin tope crecería sin fin.
@@ -788,16 +797,18 @@ class TrabajoAirVaultWorker(QThread):
 
         Es el mismo camino para la subida inicial y para la reanudación
         automática: la lista de archivos cambia, pero no lo que se hace con
-        ellos. El recorrido es Subida > Indexado, batch por batch y en este
-        mismo hilo: se sube un archivo, se espera a que AirVault lo tenga
-        entero, se escribe, se verifica y, si procede, se completa; solo
-        entonces sale el archivo siguiente.
+        ellos. Todo va en este mismo hilo: se sube un archivo y, mientras
+        AirVault lo arma, se escribe, verifica y completa un batch ya
+        confirmado; cuando el archivo queda confirmado sale el siguiente.
+        Las páginas de cada batch se leen y escriben repartidas entre varias
+        conexiones (ver :mod:`app.airvault.carriles`).
 
         Antes el indexado corría en un segundo hilo con una copia de la
         sesión mientras el siguiente archivo subía. Las dos copias llevaban
         la misma cookie de sesión de AirVault, que atiende de una en una las
         peticiones de una misma sesión: una carga larga dejaba al indexado
         esperando hasta agotar sus intentos, y el batch quedaba sin escribir.
+        Ahora nada se indexa mientras un archivo sube: solo en la espera.
         """
         from app.airvault.flujo import (BUSCANDO, SOLO_REVISAR, estado_local,
                                         subir_partes)
@@ -823,7 +834,7 @@ class TrabajoAirVaultWorker(QThread):
                 fallos_indexado.append((trabajo.manifiesto.nombre_batch, str(exc)))
 
         def al_encontrar(trabajo, _todos) -> None:
-            """Publica el ID e indexa el batch antes de subir el siguiente.
+            """Publica el ID e indexa el batch confirmado.
 
             La tabla se repinta con la ejecucion entera, no con la lista
             reducida que se acaba de enviar: al reanudar solo lo pendiente,
@@ -831,9 +842,21 @@ class TrabajoAirVaultWorker(QThread):
             """
             from app.airvault.flujo import comprobar_partes
 
-            remoto = comprobar_partes(
-                [trabajo], cliente, avisar=self._avisar
-            )[0]
+            try:
+                remoto = comprobar_partes(
+                    [trabajo], cliente, avisar=self._avisar
+                )[0]
+            except (TrabajoCancelado, SesionCancelada):
+                raise
+            except Exception as exc:  # noqa: BLE001 - se informa y siguen
+                logger.opt(exception=exc).error(
+                    "No se pudo revisar el batch {} antes de indexarlo: {}",
+                    trabajo.manifiesto.batch_id, exc,
+                )
+                fallos_indexado.append(
+                    (trabajo.manifiesto.nombre_batch, str(exc))
+                )
+                return
             self.batch_encontrado.emit({
                 "trabajos": list(trabajos), "estado": remoto,
             })
@@ -849,22 +872,21 @@ class TrabajoAirVaultWorker(QThread):
 
         # Los batches de la ejecución que ya están en AirVault y todavía no se
         # indexaron, y no vienen en esta tanda (la reanudación solo manda lo
-        # que falta subir), se indexan primero, igual que los confirmados de
-        # la tanda: antes esperaban a otra vuelta del reloj, que tampoco los
-        # indexaba mientras quedaran cargas. Un incompleto no entra aquí: lo
-        # retoma la revisión periódica con su tope de comprobaciones. La
+        # que falta subir), entran en la misma cola que los confirmados de
+        # la tanda: se indexan mientras AirVault arma la primera carga, o
+        # enseguida si no hay ninguna. Antes esperaban a otra vuelta del
+        # reloj, que tampoco los indexaba mientras quedaran cargas. Un
+        # incompleto no entra aquí: lo retoma la revisión periódica. La
         # orden a mano sobre filas concretas («resubir») no toca otros.
+        ya_confirmados = []
         if estado.get("indexar_al_encontrar") and not estado.get("forzados"):
             enviados = {str(trabajo.carpeta) for trabajo in por_subir}
-            for trabajo in trabajos:
-                if (
-                    str(trabajo.carpeta) in enviados
-                    or not trabajo.manifiesto.batch_id
-                    or estado_local(trabajo).estado
-                    not in (BUSCANDO, SOLO_REVISAR)
-                ):
-                    continue
-                al_encontrar(trabajo, trabajos)
+            ya_confirmados = [
+                trabajo for trabajo in trabajos
+                if str(trabajo.carpeta) not in enviados
+                and trabajo.manifiesto.batch_id
+                and estado_local(trabajo).estado in (BUSCANDO, SOLO_REVISAR)
+            ]
         # ``or []``: la suite sustituye subir_partes por dobles que no
         # devuelven nada, y esto no es motivo para tumbar una subida.
         fallos = subir_partes(
@@ -875,6 +897,7 @@ class TrabajoAirVaultWorker(QThread):
             en_la_ejecucion=trabajos,
             forzados=estado.get("forzados") or (),
             buscador=estado.get("buscador"),
+            ya_confirmados=ya_confirmados,
         ) or []
         self.subido.emit({
             "trabajos": estado["trabajos"], "cliente": cliente,
@@ -989,10 +1012,18 @@ class TrabajoAirVaultWorker(QThread):
             planes.pop(clave, None)
 
         resolutor = ResolutorFlota.load(raiz / FLOTA_CACHE_FILENAME)
+        # Los amarillos que el reloj no va a reescribir en esta vuelta no se
+        # planifican: planificar es leer el batch página por página, y se
+        # hacía en cada vuelta para nada. El mapa de detectar_indexados ya
+        # dijo si siguen amarillos.
+        en_espera = set(estado.pop("no_planificar", None) or ())
         nuevos = 0
         for parte in estados:
             clave = str(parte.trabajo.carpeta)
-            if clave in planes or not parte.se_puede_indexar:
+            if (
+                clave in planes or not parte.se_puede_indexar
+                or (parte.estado == INCOMPLETO and clave in en_espera)
+            ):
                 continue
             self._avisar(
                 f"Batch {parte.batch_id}: Preparando revisión", 0, 0
@@ -1049,7 +1080,7 @@ class TrabajoAirVaultWorker(QThread):
         datos: dict = {
             "resultado": Resultado(), "validas": 0, "total": 0,
             "lotes": len(trabajos), "cierres": [], "incompleto": False,
-            "incluye_revision": False, "carpetas": [],
+            "incluye_revision": False, "carpetas": [], "amarillas": {},
         }
         if tambien and bool(estado.get("completar")):
             try:
@@ -1085,6 +1116,7 @@ class TrabajoAirVaultWorker(QThread):
                 datos["incluye_revision"] or parte["incluye_revision"]
             )
             datos["carpetas"].extend(parte["carpetas"])
+            datos["amarillas"].update(parte.get("amarillas") or {})
             if suyo.interrumpido:
                 # Sin sesión o sin red los siguientes fallarían igual; lo
                 # que falta se retoma en la siguiente revisión.
@@ -1273,6 +1305,12 @@ class TrabajoAirVaultWorker(QThread):
             "incluye_revision": any(t.manifiesto.solo_subir for t in trabajos),
             "incompleto": validas != total,
             "carpetas": [str(t.carpeta) for t in trabajos],
+            # Lo que quedó sin confirmar en cada batch. Con esto la ventana
+            # sabe si volver a intentarlo está sirviendo.
+            "amarillas": {
+                clave: cuenta[1] - cuenta[0]
+                for clave, cuenta in por_batch.items()
+            },
         }
 
     def _completar(self) -> None:
@@ -1396,8 +1434,8 @@ class AirVaultWindow(QDialog):
         # El que pregunta solo por los batches cada tantos minutos.
         self._vigilante: Optional[QTimer] = None
         # Fallos seguidos sin ninguna comprobación buena por medio. Es lo
-        # que separa un tropiezo de AirVault de un problema que no se va a
-        # arreglar solo; ver `FALLOS_SEGUIDOS_ANTES_DE_PARAR`.
+        # que separa un tropiezo de AirVault de un problema que tarda en
+        # arreglarse; ver `FALLOS_SEGUIDOS_ANTES_DE_ESPACIAR`.
         self._fallos_seguidos = 0
         # Encadena una comprobacion en cuanto termine lo que esta en vuelo:
         # subir e indexar dejan la lista desactualizada.
@@ -1422,6 +1460,13 @@ class AirVaultWindow(QDialog):
         # el indexado sin confirmar. Mantienen vivo el reloj aunque no quede
         # nada más que esperar; ver `RECONFIRMACIONES_TRAS_INDEXAR`.
         self._reconfirmaciones: dict[str, int] = {}
+        # Páginas que quedaron sin confirmar en el último intento de cada
+        # batch, para saber si reintentar está sirviendo.
+        self._amarillas: dict[str, int] = {}
+        # Reintentos espaciados ya hechos de cada batch que gastó sus
+        # comprobaciones, y cuándo fue el último (``time.monotonic``); ver
+        # `MINUTOS_ENTRE_REINTENTOS_AMARILLOS`.
+        self._reintentos_espaciados: dict[str, tuple[int, float]] = {}
         # Solo «Subir a AirVault» recupera batches de ejecuciones
         # anteriores, y solo para la acción que lanza. Ver `_subir_a_mano`.
         self._recuperar_pendientes = False
@@ -3816,12 +3861,14 @@ class AirVaultWindow(QDialog):
     def _listos_automaticos(self) -> list:
         """Los listos que la cadena automática vuelve a escribir sola.
 
-        Se deja fuera el batch incompleto que ya gastó sus comprobaciones
-        (`RECONFIRMACIONES_TRAS_INDEXAR`): se sigue vigilando por si alguien
-        lo arregla en AirVault, pero no se reescribe cada vuelta del reloj.
-        Antes cada revisión lo replanificaba y lo reescribía entero, toda la
-        tarde, por una página que necesitaba una mano. «Indexar» y el menú de
-        la fila lo siguen escribiendo cuando alguien lo pide.
+        El batch incompleto que ya gastó sus comprobaciones
+        (`RECONFIRMACIONES_TRAS_INDEXAR`) no se reescribe en cada vuelta del
+        reloj: antes cada revisión lo replanificaba toda la tarde por una
+        página que necesitaba una mano. Pero tampoco se abandona: vuelve a
+        intentarse cada `MINUTOS_ENTRE_REINTENTOS_AMARILLOS`, hasta
+        `REINTENTOS_AMARILLOS_ESPACIADOS` veces, porque lo que deja páginas
+        amarillas suele ser AirVault tardando en reflejar lo guardado.
+        «Indexar» y el menú de la fila lo escriben cuando alguien lo pide.
         """
         from app.airvault.flujo import INCOMPLETO
 
@@ -3829,11 +3876,65 @@ class AirVaultWindow(QDialog):
             str(parte.trabajo.carpeta) for parte in self._partes_en_cola()
             if parte.estado == INCOMPLETO
             and self._reconfirmaciones.get(str(parte.trabajo.carpeta)) == 0
+            and not self._toca_reintento_espaciado(str(parte.trabajo.carpeta))
         }
         return [
             trabajo for trabajo in self._listos()
             if str(trabajo.carpeta) not in agotados
         ]
+
+    def _toca_reintento_espaciado(self, clave: str) -> bool:
+        """Si al batch amarillo ya le toca otro intento espaciado."""
+        hechos, ultimo = self._reintentos_espaciados.get(
+            clave, (0, time.monotonic())
+        )
+        return (
+            hechos < REINTENTOS_AMARILLOS_ESPACIADOS
+            and time.monotonic() - ultimo
+            >= MINUTOS_ENTRE_REINTENTOS_AMARILLOS * 60
+        )
+
+    def _gastar_reintentos_espaciados(self, trabajos) -> None:
+        """Cuenta el intento espaciado de los batches que se van a reescribir."""
+        from app.airvault.flujo import INCOMPLETO
+
+        incompletos = {
+            str(parte.trabajo.carpeta) for parte in self._partes_en_cola()
+            if parte.estado == INCOMPLETO
+        }
+        for trabajo in trabajos:
+            clave = str(trabajo.carpeta)
+            if (
+                clave not in incompletos
+                or self._reconfirmaciones.get(clave) != 0
+                or clave not in self._reintentos_espaciados
+            ):
+                continue
+            hechos, _ultimo = self._reintentos_espaciados[clave]
+            self._reintentos_espaciados[clave] = (hechos + 1, time.monotonic())
+
+    def _anotar_intentos(self, amarillas_por_batch) -> None:
+        """Lo que dejó cada intento de indexado, para decidir si reintentar.
+
+        Un intento que deja menos páginas sin confirmar que el anterior
+        devuelve las comprobaciones enteras y reinicia los reintentos
+        espaciados: reescribir está sirviendo. El batch confirmado sale de
+        todas las cuentas.
+        """
+        for clave, faltan in (amarillas_por_batch or {}).items():
+            clave = str(clave)
+            previas = self._amarillas.get(clave)
+            if not faltan:
+                for cuenta in (
+                    self._amarillas, self._reconfirmaciones,
+                    self._reintentos_espaciados,
+                ):
+                    cuenta.pop(clave, None)
+                continue
+            self._amarillas[clave] = faltan
+            if previas is not None and faltan < previas:
+                self._reconfirmaciones[clave] = RECONFIRMACIONES_TRAS_INDEXAR
+                self._reintentos_espaciados.pop(clave, None)
 
     def _por_completar(self) -> list:
         """Batches verificados que pueden cerrarse sin volver a escribir."""
@@ -3870,9 +3971,16 @@ class AirVaultWindow(QDialog):
         Un indexado incompleto sigue bajo vigilancia aunque agote las
         relecturas inmediatas. Un indexado confirmado también sigue si
         falta completar el batch y esa opción está activada.
+
+        Un batch listo para escribir también, si el indexado va solo: lo
+        escribe la cadena, y si esa escritura se corta (la sesión, la red,
+        un fallo de AirVault) es el reloj quien la retoma. Antes el reloj se
+        paraba al ver todo listo, y un indexado cortado dejaba la ejecución
+        quieta hasta que alguien volviera a pulsar.
         """
         from app.airvault.flujo import INDEXADO, INCOMPLETO, POSIBLE_DUPLICADO
 
+        indexa_solo = bool(self._opciones.indexar)
         return any(
             (not parte.se_acabo
              or (parte.estado == INDEXADO and self.completar_check.isChecked()
@@ -3880,6 +3988,7 @@ class AirVaultWindow(QDialog):
             and parte.estado != POSIBLE_DUPLICADO
             and (
                 not parte.se_puede_indexar
+                or indexa_solo
                 or parte.estado == INCOMPLETO
                 or self._reconfirmaciones.get(str(parte.trabajo.carpeta), 0) > 0
             )
@@ -4030,9 +4139,16 @@ class AirVaultWindow(QDialog):
         if self._vigilante is None:
             self._vigilante = QTimer(self)
             self._vigilante.timeout.connect(self._comprobar_solo)
-        self._vigilante.setInterval(self.minutos_spin.value() * 60_000)
+        self._vigilante.setInterval(self._minutos_de_vigilancia() * 60_000)
         self._vigilante.start()
         self._actualizar_latido()
+
+    def _minutos_de_vigilancia(self) -> int:
+        """Cada cuánto pregunta el reloj: más espaciado tras varios fallos."""
+        minutos = self.minutos_spin.value()
+        if self._fallos_seguidos >= FALLOS_SEGUIDOS_ANTES_DE_ESPACIAR:
+            return max(minutos, MINUTOS_TRAS_FALLOS)
+        return minutos
 
     def _parar_vigilancia(self) -> None:
         if self._vigilante is not None:
@@ -4059,12 +4175,20 @@ class AirVaultWindow(QDialog):
 
         for parte in revisados:
             clave = str(parte.trabajo.carpeta)
+            if parte.estado != INCOMPLETO:
+                self._reintentos_espaciados.pop(clave, None)
+                self._amarillas.pop(clave, None)
             if clave not in self._reconfirmaciones:
                 continue
             if parte.estado == INCOMPLETO:
                 self._reconfirmaciones[clave] = max(
                     0, self._reconfirmaciones[clave] - 1
                 )
+                if self._reconfirmaciones[clave] == 0:
+                    # Desde aquí corren los reintentos espaciados.
+                    self._reintentos_espaciados.setdefault(
+                        clave, (0, time.monotonic())
+                    )
             else:
                 del self._reconfirmaciones[clave]
 
@@ -4076,7 +4200,23 @@ class AirVaultWindow(QDialog):
         # Cada vuelta del reloj vuelve a dar permiso de subida: lo que no
         # se pudo subir hace cinco minutos se intenta otra vez ahora.
         self._subidas_del_ciclo.clear()
+        self._estado["no_planificar"] = self._amarillos_en_espera()
         self._comprobar()
+
+    def _amarillos_en_espera(self) -> set[str]:
+        """Batches amarillos que esta vuelta del reloj no va a reescribir.
+
+        Gastaron sus comprobaciones y aún no les toca el reintento
+        espaciado: se vigilan con el mapa del batch, sin planificarlos.
+        """
+        from app.airvault.flujo import INCOMPLETO
+
+        return {
+            str(parte.trabajo.carpeta) for parte in self._partes_en_cola()
+            if parte.estado == INCOMPLETO
+            and self._reconfirmaciones.get(str(parte.trabajo.carpeta)) == 0
+            and not self._toca_reintento_espaciado(str(parte.trabajo.carpeta))
+        }
 
     # ── acciones ───────────────────────────────────────────────────
 
@@ -4234,6 +4374,8 @@ class AirVaultWindow(QDialog):
                 self._indexar_al_terminar = True
                 self._comprobar()
             return
+        if automatico:
+            self._gastar_reintentos_espaciados(listos)
         self._estado["listos"] = listos
         self._estado["completar"] = self.completar_check.isChecked()
         self._estado["completar_tambien"] = (
@@ -4724,7 +4866,9 @@ class AirVaultWindow(QDialog):
         self._estados = [estado_local(t) for t in self._trabajos]
         if datos.get("incompleto"):
             self._programar_reconfirmaciones(datos.get("carpetas"))
-            self._ajustar_vigilancia()
+        self._anotar_intentos(datos.get("amarillas"))
+        # También si se cortó: lo que quede sin escribir lo retoma el reloj.
+        self._ajustar_vigilancia()
         self._pintar_lotes()
         # Se dice en qué quedó, que no es siempre «indexado»: con «Completar
         # batch» sale completado, y con páginas amarillas, incompleto.
@@ -4892,7 +5036,13 @@ class AirVaultWindow(QDialog):
                 f" No se pudieron borrar {separadores_pendientes} "
                 "separadoras."
             )
+        self._anotar_intentos(datos.get("amarillas"))
         if resultado.interrumpido:
+            if not acotado:
+                # Sin sesión o sin red no se puede seguir ahora, pero la
+                # ejecución no se queda quieta: la próxima vuelta del reloj
+                # lo retoma desde donde quedó.
+                self._ajustar_vigilancia()
             self.resumen.setText(
                 f"Indexado cortado: {resultado.interrumpido} {cuenta} Se "
                 "retoma al revisar, sin repetir lo escrito."
@@ -4988,22 +5138,22 @@ class AirVaultWindow(QDialog):
             self._trabajos = list(preparados)
             self._estados = [estado_local(t) for t in self._trabajos]
             self._pintar_lotes()
-        # Un fallo suelto no para nada: AirVault devuelve un error de vez en
-        # cuando y la sesión se renueva sola, así que el siguiente intervalo
-        # tiene todas las papeletas de salir bien, y nadie está delante para
-        # volver a pulsar. Lo que no tiene sentido es repetir el mismo error
-        # toda la tarde, y para eso está el tope.
+        # Un fallo no para nada: AirVault devuelve un error de vez en cuando
+        # y la sesión se renueva sola, así que el siguiente intervalo tiene
+        # todas las papeletas de salir bien, y nadie está delante para volver
+        # a pulsar. Tampoco una racha: la red o AirVault vuelven, y la
+        # ejecución tiene que acabar indexada. Tras varios fallos seguidos
+        # solo se pregunta más espaciado.
         self._fallos_seguidos += 1
-        sigue = (
+        if not self._cerrar_al_terminar:
+            self._ajustar_vigilancia()
+        sigue = bool(
             self.auto_check.isChecked()
             and self._vigilante is not None
             and self._vigilante.isActive()
-            and self._fallos_seguidos < FALLOS_SEGUIDOS_ANTES_DE_PARAR
         )
         if sigue:
-            mensaje += f" Se reintenta en {self.minutos_spin.value()} min."
-        else:
-            self._parar_vigilancia()
+            mensaje += f" Se reintenta en {self._minutos_de_vigilancia()} min."
         self.resumen.setText(mensaje)
         self.estado_label.setText("El indexado no pudo continuar")
         # El mensaje entero queda en el resumen, que se lee de una vez.

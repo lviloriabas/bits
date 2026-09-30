@@ -175,7 +175,7 @@ La columna **Estado** usa rótulos cortos. El **?** junto a **Cola de AirVault**
 
 La barra de avance cuenta la cola entera, desde subir el primer batch hasta completar el último. Mientras hay trabajo, la última línea de la bitácora dice **En curso** y gira; entre revisiones dice **En espera** y cuánto falta para la siguiente. Si no aparece ninguna de las dos, el proceso está detenido. Los mensajes inferiores ocupan una línea; coloque el puntero encima para leer el texto completo.
 
-Con **Indexar páginas** activo, el recorrido es **Subida > Indexado**, batch por batch: se sube un PDF, se espera a que AirVault lo tenga entero e identificado, se indexa (y se completa, si corresponde) y solo entonces sale el siguiente. Nunca hay dos cargas en vuelo, porque AirVault las junta. Si un batch tarda más que la espera máxima en aparecer, la cadena se detiene ahí; lo ya confirmado se indexa igual y la revisión periódica retoma el resto.
+Con **Indexar páginas** activo, las subidas van de una en una y el indexado avanza mientras tanto: se sube un PDF y, mientras AirVault lo arma, se indexa (y se completa, si corresponde) el batch anterior ya confirmado; cuando AirVault confirma el nuevo, sale el siguiente. Nunca hay dos cargas en vuelo, porque AirVault las junta. Las páginas de cada batch se leen y escriben por varias conexiones a la vez; si AirVault no lo aprovecha, BITS vuelve solo a una. Si un batch tarda más que la espera máxima en aparecer, la cadena se detiene ahí; lo ya confirmado se indexa igual y la revisión periódica retoma el resto.
 
 Si la ejecución quedó a medias, **Subir a AirVault**, **Revisar en AirVault** y **Continuar pendiente** retoman todo lo que falte: esperan a que AirVault confirme la carga que siga armándose, la indexan, suben los batches que faltan, los indexan y, con **Completar batch**, los completan. Lo ya hecho no se repite. **Revisar en AirVault** lo hace aunque **Revisar cada** esté apagado. Para entrar en AirVault, BITS usa el enlace SSO en Edge y reutiliza su sesión.
 
@@ -200,7 +200,7 @@ Con clic derecho sobre un batch puede subirlo, revisarlo, indexarlo, completarlo
 
 La comprobación de duplicados sigue generando avisos con la casilla desmarcada. La alerta queda guardada en el manifiesto y visible en la cola. Esto no vuelve a subir automáticamente una carga ya aceptada: primero se identifica el batch existente.
 
-Mientras **Revisar cada** esté activo, la cola sigue consultando los batches incompletos. Si **Completar batch** está marcado, también sigue pendiente de los indexados que todavía no se han completado. Los batches completados salen de la espera; **REVISAR** sigue reservado para corrección humana. Puede cancelar o desactivar la revisión periódica en cualquier momento.
+Mientras **Revisar cada** esté activo, la cola sigue consultando hasta que todo quede indexado: los batches por armar, los listos cuyo indexado se cortó y los incompletos. Las páginas amarillas se reintentan solas: seguido mientras cada intento deje menos, y después cada 20 minutos, hasta seis veces. Si AirVault falla varias veces seguidas, la revisión no se apaga: pregunta cada 15 minutos hasta que vuelva. Si **Completar batch** está marcado, también sigue pendiente de los indexados que todavía no se han completado. Los batches completados salen de la espera; **REVISAR** sigue reservado para corrección humana. Puede cancelar o desactivar la revisión periódica en cualquier momento.
 
 ### 9. Corregir excepciones con Web Reports
 

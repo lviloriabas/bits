@@ -4,6 +4,10 @@ El indexador es deliberadamente aburrido. Antes de tocar nada verifica el
 batch completo; despues escribe pagina por pagina guardando el manifiesto
 tras cada una, de modo que una interrupcion no obliga a repetir trabajo ni
 deja dudas sobre que se alcanzo a escribir.
+
+Las peticiones de cada pagina se reparten entre varias conexiones (ver
+:mod:`app.airvault.carriles`), pero lo que devuelven se anota aqui, en el
+hilo que llama y de una en una: el manifiesto no lo toca ningun otro hilo.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ from typing import Callable, Dict, List, Mapping, Optional, Sequence
 
 from loguru import logger
 
+from app.airvault.carriles import repartir
 from app.airvault.config import (
     CAMPO_END_DATE,
     CAMPOS_OBLIGATORIOS,
@@ -228,33 +233,47 @@ class Indexador:
         # Primero se lee todo el batch y se aprende la flota que AirVault ya
         # tiene resuelta; asi los registros cuya flota veniamos infiriendo se
         # corrigen antes de construir los valores que se van a escribir.
-        remotas: Dict[int, object] = {}
+        leidas: Dict[int, object] = {}
         ilegibles: Dict[int, str] = {}
-        for indice, registro in enumerate(registros, start=1):
-            if registro.es_separador:
-                # Una divisoria no se lee: no tiene indices que aprender ni
-                # con que contrastar, y son peticiones de mas contra el
-                # servidor.
-                continue
-            pagina = registro.pagina_batch or indice
-            try:
-                remotas[registro.seq] = self.cliente.leer_pagina(
-                    batch_id, pagina
-                )
-            except FALLOS_DE_CAMINO:
+        # Una divisoria no se lee: no tiene indices que aprender ni con que
+        # contrastar, y son peticiones de mas contra el servidor.
+        por_leer = [
+            (registro, registro.pagina_batch or indice)
+            for indice, registro in enumerate(registros, start=1)
+            if not registro.es_separador
+        ]
+
+        def leer(cliente, tarea):
+            return cliente.leer_pagina(batch_id, tarea[1])
+
+        def recibir(tarea, remota, error) -> bool:
+            registro, pagina = tarea
+            if error is None:
+                leidas[registro.seq] = remota
+                return True
+            if isinstance(error, FALLOS_DE_CAMINO):
                 # La sesion o la red se cayeron: leer las demas no va a ir
                 # mejor y el mensaje que importa es este.
-                raise
-            except Exception as exc:  # noqa: BLE001 - se anota y se sigue
-                # Una pagina que no carga bloquea solo a esa pagina. Sin
-                # poder leerla no se puede comprobar que el batch y el
-                # manifiesto hablan de la misma bitacora, asi que no se
-                # escribe; el resto del batch no tiene por que esperarla.
-                ilegibles[registro.seq] = str(exc)
-                logger.warning(
-                    "No se pudo leer la pagina {} del batch {}: {}",
-                    pagina, batch_id, exc,
-                )
+                raise error
+            # Una pagina que no carga bloquea solo a esa pagina. Sin poder
+            # leerla no se puede comprobar que el batch y el manifiesto
+            # hablan de la misma bitacora, asi que no se escribe; el resto
+            # del batch no tiene por que esperarla.
+            ilegibles[registro.seq] = str(error)
+            logger.warning(
+                "No se pudo leer la pagina {} del batch {}: {}",
+                pagina, batch_id, error,
+            )
+            return True
+
+        repartir(self.cliente, por_leer, leer, recibir)
+        # En el orden del batch, no en el que contestaron: aprender la flota
+        # y el avion de cada libro no puede depender de que carril llego
+        # antes.
+        remotas: Dict[int, object] = {
+            registro.seq: leidas[registro.seq]
+            for registro, _pagina in por_leer if registro.seq in leidas
+        }
         self.remotas = remotas
         self._aprender_flota(remotas.values())
         self._corregir_flota_inferida()
@@ -469,10 +488,17 @@ class Indexador:
         ``al_avanzar`` recibe cuantas paginas se llevan escritas de cuantas
         habia previstas, para que la interfaz pueda mover la barra sin que
         el indexador sepa que existe una interfaz.
+
+        Las paginas se escriben repartidas entre varias conexiones cuando
+        AirVault las atiende a la vez (ver :mod:`app.airvault.carriles`).
+        Cada una lleva sus propios valores y su numero de pagina, y la
+        verificacion posterior relee todas contra el manifiesto, asi que el
+        orden en que terminen no cambia lo que queda escrito.
         """
         resultado = Resultado()
 
         previstas = len(plan.escribibles)
+        por_escribir: List[tuple[PlanPagina, Dict[int, str], int]] = []
         for entrada in plan.paginas:
             registro = entrada.registro
             if registro.es_separador:
@@ -496,83 +522,88 @@ class Indexador:
                 registro.estado = EstadoRegistro.ESCRITA
                 resultado.omitidas += 1
                 continue
-            try:
-                valores = dict(entrada.valores)
-                # La marca identifica exclusivamente la escritura por API.
-                # Con vuelo va despues de el; sin vuelo es todo el contenido.
-                # No forma parte del CSV ni del plan/reporte local. Las
-                # bitacoras de REVISAR se terminan a mano, asi que no la
-                # llevan: su Description queda con el vuelo leido, y sin
-                # vuelo el campo ni se manda para no borrar lo escrito.
-                if not self.manifiesto.solo_subir:
-                    vuelo = registro.flight_number.strip()
-                    valores[CAMPO_DESCRIPCION] = (
-                        f"{vuelo} AUTO INDEX" if vuelo else "AUTO INDEX"
-                    )
-                # Work Location no se usa en este flujo. Se envia de forma
-                # explicita para limpiar cualquier valor que AirVault haya
-                # heredado o completado por su cuenta.
-                valores[CAMPO_WORK_LOCATION] = ""
-                estado = (
-                    ESTADO_NECESITA_CORRECCION
-                    if entrada.queda_incompleta or (
-                        self.manifiesto.solo_subir and (
-                            entrada.requiere_revision
-                            or registro.revision_pendiente is None
-                        )
-                    )
-                    else ESTADO_VALIDO
+            valores = dict(entrada.valores)
+            # La marca identifica exclusivamente la escritura por API. Con
+            # vuelo va despues de el; sin vuelo es todo el contenido. No
+            # forma parte del CSV ni del plan/reporte local. Las bitacoras
+            # de REVISAR se terminan a mano, asi que no la llevan: su
+            # Description queda con el vuelo leido, y sin vuelo el campo ni
+            # se manda para no borrar lo escrito.
+            if not self.manifiesto.solo_subir:
+                vuelo = registro.flight_number.strip()
+                valores[CAMPO_DESCRIPCION] = (
+                    f"{vuelo} AUTO INDEX" if vuelo else "AUTO INDEX"
                 )
-                self._escribir_con_reintentos(
-                    plan.batch_id, entrada, valores, estado
+            # Work Location no se usa en este flujo. Se envia de forma
+            # explicita para limpiar cualquier valor que AirVault haya
+            # heredado o completado por su cuenta.
+            valores[CAMPO_WORK_LOCATION] = ""
+            estado = (
+                ESTADO_NECESITA_CORRECCION
+                if entrada.queda_incompleta or (
+                    self.manifiesto.solo_subir and (
+                        entrada.requiere_revision
+                        or registro.revision_pendiente is None
+                    )
                 )
-            except FALLOS_DE_CAMINO as exc:
+                else ESTADO_VALIDO
+            )
+            por_escribir.append((entrada, valores, estado))
+
+        def escribir(cliente, tarea) -> None:
+            entrada, valores, estado = tarea
+            self._escribir_con_reintentos(
+                plan.batch_id, entrada, valores, estado, cliente
+            )
+
+        def recibir(tarea, _respuesta, error) -> bool:
+            entrada, _valores, _estado = tarea
+            registro = entrada.registro
+            if isinstance(error, FALLOS_DE_CAMINO):
                 # Se cayo la sesion o la red. Seguir escribiendo marcaria
                 # como fallidas paginas que nadie llego a intentar; se para
                 # y lo que queda sigue pendiente para retomarlo.
-                resultado.interrumpido = str(exc)
+                resultado.interrumpido = str(error)
                 resultado.detalles.append(
-                    f"pagina {entrada.pagina_batch}: {exc}"
+                    f"pagina {entrada.pagina_batch}: {error}"
                 )
                 logger.error(
                     "Se corto el indexado en la pagina {}: {}",
-                    entrada.pagina_batch, exc,
+                    entrada.pagina_batch, error,
                 )
                 self._persistir()
-                break
-            except ErrorDeAirVault as exc:
+                return False
+            if isinstance(error, ErrorDeAirVault):
                 # AirVault contesto y dijo que no acepta *esta* pagina. No
                 # es el camino: la siguiente puede escribirse sin problema,
                 # asi que se anota y se sigue aunque se haya pedido parar en
                 # el primer error. Una bitacora que el servidor rechaza no
                 # puede dejar sin indexar a las cuatrocientas de atras.
                 registro.estado = EstadoRegistro.ERROR
-                registro.avisos = [f"[rechazada] {exc}"]
+                registro.avisos = [f"[rechazada] {error}"]
                 resultado.fallidas += 1
                 resultado.detalles.append(
-                    f"pagina {entrada.pagina_batch}: {exc}"
+                    f"pagina {entrada.pagina_batch}: {error}"
                 )
                 logger.error(
                     "AirVault rechazo la pagina {}: {}",
-                    entrada.pagina_batch, exc,
+                    entrada.pagina_batch, error,
                 )
                 self._persistir()
-                continue
-            except Exception as exc:  # noqa: BLE001 - se anota y se sigue
+                return True
+            if error is not None:
                 registro.estado = EstadoRegistro.ERROR
-                registro.avisos = [f"[error_escritura] {exc}"]
+                registro.avisos = [f"[error_escritura] {error}"]
                 resultado.fallidas += 1
                 resultado.detalles.append(
-                    f"pagina {entrada.pagina_batch}: {exc}"
+                    f"pagina {entrada.pagina_batch}: {error}"
                 )
                 logger.error(
                     "Fallo al escribir la pagina {}: {}",
-                    entrada.pagina_batch, exc,
+                    entrada.pagina_batch, error,
                 )
                 self._persistir()
-                if detener_en_error:
-                    break
-                continue
+                return not detener_en_error
             registro.estado = EstadoRegistro.ESCRITA
             registro.pagina_batch = entrada.pagina_batch
             registro.avisos = (
@@ -583,6 +614,9 @@ class Indexador:
             self._persistir()
             if al_avanzar is not None:
                 al_avanzar(resultado.escritas, previstas)
+            return True
+
+        repartir(self.cliente, por_escribir, escribir, recibir)
 
         # Las divisorias conservaron hasta aqui la numeracion con la que se
         # leyeron y escribieron las bitacoras. Ya no son documentos utiles:
@@ -620,7 +654,7 @@ class Indexador:
 
     def _escribir_con_reintentos(
         self, batch_id: str, entrada: PlanPagina,
-        valores: Mapping[int, str], estado: int,
+        valores: Mapping[int, str], estado: int, cliente=None,
     ) -> None:
         """Guarda una pagina y, si AirVault no la acepta, la vuelve a intentar.
 
@@ -628,16 +662,21 @@ class Indexador:
         reintento y el camino entero esta cortado. Lo demas (un rechazo, un
         error del servidor, un guardado que no se conservo) es de AirVault y
         suele pasar solo.
+
+        ``cliente`` es la conexion del carril que escribe esta pagina; sin
+        el, la del indexador. No toca el manifiesto: puede correr en otro
+        hilo.
         """
+        cliente = cliente if cliente is not None else self.cliente
         pausas = (*ESPERAS_REINTENTO_PAGINA, None)
         for pausa in pausas:
             try:
-                self.cliente.guardar_pagina(
+                cliente.guardar_pagina(
                     batch_id, entrada.pagina_batch, valores, estado,
                     entrada.pagina_batch,
                 )
                 if self.manifiesto.solo_subir:
-                    self._verificar_guardado(entrada, valores, estado)
+                    self._verificar_guardado(entrada, valores, estado, cliente)
                 return
             except FALLOS_DE_CAMINO:
                 raise
@@ -661,9 +700,11 @@ class Indexador:
 
     def _verificar_guardado(
         self, entrada: PlanPagina, valores: Mapping[int, str], estado: int,
+        cliente=None,
     ) -> None:
         """Confirma que REVISAR conservo los datos antes de darla por escrita."""
-        remota = self.cliente.leer_pagina(
+        cliente = cliente if cliente is not None else self.cliente
+        remota = cliente.leer_pagina(
             self.manifiesto.batch_id, entrada.pagina_batch,
         )
         distintos = campos_distintos(valores, remota.valores)
@@ -735,24 +776,52 @@ def _con_relecturas(
     batch_id = manifiesto.batch_id or ""
     registros = list(manifiesto.bitacoras())
     dormir = dormir or time.sleep
-
-    def leer(registro: Registro) -> _Revision:
-        pagina = registro.pagina_batch or registro.seq
-        try:
-            remota = cliente.leer_pagina(batch_id, pagina)
-        except FALLOS_DE_CAMINO:
-            raise
-        except Exception as exc:  # noqa: BLE001 - se anota y se sigue
-            # Comprobar es leer: una pagina que no carga se cuenta como no
-            # comprobada, no como mal escrita.
-            return _Revision(False, [f"pagina {pagina}: no se pudo leer ({exc})"])
-        return revisar(registro, remota, pagina)
-
     revisiones: Dict[int, _Revision] = {}
-    for numero, registro in enumerate(registros):
-        if al_avanzar:
-            al_avanzar(numero, len(registros))
-        revisiones[registro.seq] = leer(registro)
+
+    def leer_todas(por_leer: Sequence[Registro], relectura: bool) -> None:
+        """Lee las paginas repartidas y las compara aqui, de una en una.
+
+        ``revisar`` puede anotar la pagina en el manifiesto, asi que corre
+        en este hilo aunque la lectura venga de otro carril. La barra solo
+        avanza en la primera lectura; las relecturas son de unas pocas.
+        """
+        hechas = 0
+
+        def leer(conexion, registro: Registro):
+            return conexion.leer_pagina(
+                batch_id, registro.pagina_batch or registro.seq
+            )
+
+        def recibir(registro: Registro, remota, error) -> bool:
+            nonlocal hechas
+            pagina = registro.pagina_batch or registro.seq
+            if isinstance(error, FALLOS_DE_CAMINO):
+                raise error
+            if error is not None:
+                # Comprobar es leer: una pagina que no carga se cuenta como
+                # no comprobada, no como mal escrita.
+                revision = _Revision(
+                    False, [f"pagina {pagina}: no se pudo leer ({error})"]
+                )
+            else:
+                revision = revisar(registro, remota, pagina)
+            revisiones[registro.seq] = revision
+            hechas += 1
+            if relectura:
+                if revision.valida:
+                    logger.info(
+                        "Batch {}: la pagina {} quedo confirmada al releerla",
+                        batch_id, pagina,
+                    )
+            elif al_avanzar and hechas < len(registros):
+                al_avanzar(hechas, len(registros))
+            return True
+
+        repartir(cliente, por_leer, leer, recibir)
+
+    if al_avanzar:
+        al_avanzar(0, len(registros))
+    leer_todas(registros, relectura=False)
     for ronda, espera in enumerate(esperas, start=1):
         dudosas = [
             registro for registro in registros
@@ -768,14 +837,7 @@ def _con_relecturas(
             espera, ronda, len(esperas),
         )
         dormir(espera)
-        for registro in dudosas:
-            revision = leer(registro)
-            revisiones[registro.seq] = revision
-            if revision.valida:
-                logger.info(
-                    "Batch {}: la pagina {} quedo confirmada al releerla",
-                    batch_id, registro.pagina_batch or registro.seq,
-                )
+        leer_todas(dudosas, relectura=True)
     if al_avanzar:
         al_avanzar(len(registros), len(registros))
     validas = sum(1 for revision in revisiones.values() if revision.valida)

@@ -62,8 +62,10 @@ def test_busqueda_paralela_acotada_con_sesiones_independientes():
             return []
 
     class Sesion:
-        def clonar(self):
+        def clonar(self, renovable=True):
             assert threading.get_ident() == creador
+            # Un carril no abre Edge por su cuenta.
+            assert renovable is False
             conexion = Conexion()
             sesiones.append(conexion)
             return conexion
@@ -80,7 +82,7 @@ def test_busqueda_paralela_propaga_error_y_cierra_conexiones():
     conexiones = []
 
     class Sesion:
-        def clonar(self):
+        def clonar(self, renovable=True):
             conexion = Sesion()
             conexion.cerrada = False
             conexion.http = SimpleNamespace(close=lambda: setattr(conexion, "cerrada", True))
@@ -95,6 +97,34 @@ def test_busqueda_paralela_propaga_error_y_cierra_conexiones():
         list(cli.buscar_lotes([f"Batch {n}" for n in range(20)]))
     assert len(conexiones) == 4
     assert all(conexion.cerrada for conexion in conexiones)
+
+
+def test_busqueda_paralela_repite_en_la_sesion_principal_lo_que_el_carril_no_pudo():
+    """Un carril con la sesion caducada no abre Edge: lo repite la principal."""
+    from app.airvault.session import ErrorDeSesion
+
+    principales: list[str] = []
+
+    class Carril:
+        http = SimpleNamespace(close=lambda: None)
+
+        def get(self, _ruta, params):
+            raise ErrorDeSesion("AirVault volvio a pedir acceso")
+
+    class Sesion:
+        def clonar(self, renovable=True):
+            return Carril()
+
+        def get(self, _ruta, params):
+            principales.append(params["encodedFilter"])
+            return [["003A", "Batch", 1, 3209, "", "", "", ""]]
+
+    cli = ClienteHttp(Sesion(), AirVaultConfig())
+    resultados = dict(cli.buscar_lotes(["Batch 1", "Batch 2"]))
+
+    assert set(resultados) == {"Batch 1", "Batch 2"}
+    assert all(len(lotes) == 1 for lotes in resultados.values())
+    assert len(principales) == 2
 
 
 def test_guardar_una_pagina_va_por_post():

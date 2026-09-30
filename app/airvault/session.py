@@ -310,6 +310,11 @@ class SesionAirVault:
         # Las sesiones clonadas comparten este mismo objeto: cancelar es una
         # decision del trabajo, no de un carril.
         self._cancelacion = threading.Event()
+        # Si esta sesion puede volver a entrar sola cuando AirVault la
+        # rechaza. Un carril paralelo no: varios hilos abriendo Edge a la vez
+        # serian varias ventanas de acceso. El carril levanta el rechazo y
+        # la peticion la repite la sesion principal, que si renueva.
+        self._renovable = True
         # Inyectable para que las pruebas no esperen de verdad.
         self.dormir = self.esperar
 
@@ -369,15 +374,20 @@ class SesionAirVault:
         """De donde salio la sesion, para poder decirlo sin adivinar."""
         return self._origen
 
-    def clonar(self) -> "SesionAirVault":
+    def clonar(self, renovable: bool = True) -> "SesionAirVault":
         """Crea una conexion HTTP independiente con la misma autenticacion.
 
-        ``requests.Session`` no es segura para dos hilos. La subida y el
-        indexado pueden avanzar a la vez sobre batches distintos, pero cada
-        carril necesita su propio pool de conexiones, cookies y tokens para
-        que una respuesta no altere la peticion que el otro esta armando.
+        ``requests.Session`` no es segura para dos hilos. Cada carril que
+        lee o escribe paginas en paralelo necesita su propio pool de
+        conexiones, cookies y tokens para que una respuesta no altere la
+        peticion que el otro esta armando.
+
+        ``renovable=False`` es para esos carriles: si AirVault pide entrar
+        otra vez, el carril no abre Edge por su cuenta, levanta el rechazo y
+        lo resuelve la sesion principal.
         """
         paralela = SesionAirVault(self.config)
+        paralela._renovable = bool(renovable)
         paralela.http.headers.clear()
         paralela.http.headers.update(dict(self.http.headers))
         for cookie in self.http.cookies:
@@ -853,7 +863,10 @@ class SesionAirVault:
         que hay que entrar, insistir seria abrir Edge en cada pagina de un
         batch. Devuelve si merece la pena repetir la peticion.
         """
-        if self._origen != ORIGEN_EDGE or self._renovando:
+        if (
+            self._origen != ORIGEN_EDGE or self._renovando
+            or not self._renovable
+        ):
             return False
         self._renovando = True
         try:

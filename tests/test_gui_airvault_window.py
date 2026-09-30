@@ -660,6 +660,68 @@ def test_la_cadena_no_reescribe_sola_un_incompleto_sin_comprobaciones(
     assert ventana._listos_automaticos() == [agotado.trabajo, nuevo.trabajo]
 
 
+def test_un_amarillo_agotado_se_reintenta_espaciado_y_con_tope(ventana):
+    """No se abandona, pero tampoco se relee cada dos minutos toda la noche."""
+    import time
+
+    from app.airvault.flujo import INCOMPLETO
+    from app.gui.airvault_window import (MINUTOS_ENTRE_REINTENTOS_AMARILLOS,
+                                         REINTENTOS_AMARILLOS_ESPACIADOS)
+
+    amarillo = parte(INCOMPLETO, "Amarillo", carpeta="amarillo")
+    ventana._trabajos = [amarillo.trabajo]
+    ventana._estados = [amarillo]
+    ventana._estado["planes"] = {"amarillo": (PlanFalso(), None)}
+    lanzados: list = []
+    ventana._lanzar = lambda modo, estado: lanzados.append(
+        (modo, list(estado["listos"]))
+    )
+
+    # La última comprobación se gasta y empieza a contar la espera.
+    ventana._reconfirmaciones = {"amarillo": 1}
+    ventana._descontar_reconfirmaciones([amarillo])
+    assert ventana._reconfirmaciones == {"amarillo": 0}
+    assert ventana._listos_automaticos() == []
+    # Mientras espera, el reloj no lo planifica en cada vuelta.
+    assert ventana._amarillos_en_espera() == {"amarillo"}
+
+    vencido = time.monotonic() - MINUTOS_ENTRE_REINTENTOS_AMARILLOS * 60 - 1
+    for intento in range(REINTENTOS_AMARILLOS_ESPACIADOS):
+        hechos, _ = ventana._reintentos_espaciados["amarillo"]
+        ventana._reintentos_espaciados["amarillo"] = (hechos, vencido)
+        assert ventana._listos_automaticos() == [amarillo.trabajo]
+        ventana._indexar(automatico=True)
+        assert lanzados[-1] == ("indexar", [amarillo.trabajo])
+        # Recién intentado, el siguiente espera otra vez.
+        assert ventana._listos_automaticos() == []
+
+    # Gastado el tope, se sigue vigilando pero ya no se reescribe solo.
+    hechos, _ = ventana._reintentos_espaciados["amarillo"]
+    ventana._reintentos_espaciados["amarillo"] = (hechos, vencido)
+    assert ventana._listos_automaticos() == []
+    assert ventana._falta_esperar()
+
+
+def test_mientras_reescribir_sirva_se_sigue_reintentando(ventana):
+    """Un intento que deja menos amarillas devuelve las comprobaciones."""
+    from app.gui.airvault_window import RECONFIRMACIONES_TRAS_INDEXAR
+
+    ventana._reconfirmaciones = {"job": 0}
+    ventana._reintentos_espaciados = {"job": (2, 0.0)}
+
+    ventana._anotar_intentos({"job": 40})
+    assert ventana._reconfirmaciones == {"job": 0}
+
+    ventana._anotar_intentos({"job": 12})
+    assert ventana._reconfirmaciones == {"job": RECONFIRMACIONES_TRAS_INDEXAR}
+    assert "job" not in ventana._reintentos_espaciados
+
+    # Confirmado entero, sale de todas las cuentas.
+    ventana._anotar_intentos({"job": 0})
+    assert ventana._reconfirmaciones == {}
+    assert ventana._amarillas == {}
+
+
 # ── lo que cuenta al terminar ──────────────────────────────────────
 
 class PlanFalso:
@@ -1093,8 +1155,13 @@ def test_un_indexado_cortado_dice_que_lo_que_falta_se_retoma(ventana):
     assert "sin repetir lo escrito" in texto
 
 
-def test_paginas_amarillas_agotan_sus_reintentos_y_el_proceso_termina(ventana):
-    """Lo que requiere correccion manual no mantiene vivo el vigilante."""
+def test_con_paginas_amarillas_el_proceso_sigue_vigilando(ventana):
+    """El proceso no se da por terminado mientras quede un batch sin indexar.
+
+    Antes, un indexado con páginas amarillas y sin comprobaciones pendientes
+    apagaba el reloj, y la ejecución se quedaba así hasta que alguien
+    volviera a pulsar.
+    """
     from app.airvault.flujo import LISTO
 
     ventana._estados = [parte(LISTO)]
@@ -1106,7 +1173,8 @@ def test_paginas_amarillas_agotan_sus_reintentos_y_el_proceso_termina(ventana):
     })
 
     assert ventana.estado_label.text() == "Indexado incompleto"
-    assert ventana._vigilante is None or not ventana._vigilante.isActive()
+    assert ventana._vigilante is not None and ventana._vigilante.isActive()
+    ventana.close()
 
 
 def test_un_indexado_sin_confirmar_se_vuelve_a_comprobar_solo(ventana):
@@ -1312,13 +1380,38 @@ def test_una_subida_fallida_no_se_reintenta_hasta_la_vuelta_siguiente(
 
 
 def test_cuando_no_queda_nada_que_esperar_deja_de_preguntar(ventana):
-    """Ya listo, AirVault no va a cambiarlo solo: preguntar sobra."""
+    """Listo y sin indexado automático, nada va a cambiar solo."""
+    from app.airvault.flujo import LISTO
+    from app.gui.automatizacion import INDEXAR
+
+    ventana._opciones.fijar(INDEXAR, False)
+    ventana._al_comprobar({
+        "estados": [parte(LISTO)], "planes": {}, "partes": [],
+    })
+    assert ventana._vigilante is None or not ventana._vigilante.isActive()
+
+
+def test_un_batch_listo_se_vigila_hasta_quedar_indexado(ventana):
+    """Si la escritura se corta, es el reloj quien la retoma.
+
+    Antes el reloj se paraba al ver todo listo para escribir, y un indexado
+    cortado por la sesión o la red dejaba la ejecución quieta.
+    """
     from app.airvault.flujo import LISTO
 
     ventana._al_comprobar({
         "estados": [parte(LISTO)], "planes": {}, "partes": [],
     })
-    assert ventana._vigilante is None or not ventana._vigilante.isActive()
+    assert ventana._vigilante is not None and ventana._vigilante.isActive()
+
+    class Cortado(ResultadoFalso):
+        interrumpido = "AirVault no contestó"
+
+    ventana._parar_vigilancia()
+    ventana._al_indexar({"resultado": Cortado(), "validas": 1, "total": 3})
+
+    assert ventana._vigilante.isActive()
+    ventana.close()
 
 
 def test_sin_la_comprobacion_automatica_no_pregunta_sola(ventana):
@@ -1371,17 +1464,31 @@ def test_un_fallo_suelto_no_para_la_comprobacion_automatica(ventana):
     assert ventana._fallos_seguidos == 1
 
 
-def test_fallar_siempre_acaba_parando_la_comprobacion_automatica(ventana):
-    """Repetir el mismo error toda la tarde no lo arregla."""
+def test_fallar_seguido_espacia_la_comprobacion_pero_no_la_para(ventana):
+    """Una red caída o AirVault en mantenimiento vuelven.
+
+    Parar tras tres fallos dejaba la ejecución sin indexar hasta que alguien
+    volviera a la ventana. Ahora se sigue intentando, más espaciado, y una
+    comprobación buena devuelve el intervalo elegido.
+    """
     from app.airvault.flujo import PROCESANDO
-    from app.gui.airvault_window import FALLOS_SEGUIDOS_ANTES_DE_PARAR
+    from app.gui.airvault_window import (FALLOS_SEGUIDOS_ANTES_DE_ESPACIAR,
+                                         MINUTOS_TRAS_FALLOS)
 
     ventana._estados = [parte(PROCESANDO)]
     ventana._ajustar_vigilancia()
-    for _ in range(FALLOS_SEGUIDOS_ANTES_DE_PARAR):
+    for _ in range(FALLOS_SEGUIDOS_ANTES_DE_ESPACIAR):
         ventana._al_fallar("La sesion de AirVault caduco.")
 
-    assert not ventana._vigilante.isActive()
+    assert ventana._vigilante.isActive()
+    assert ventana._vigilante.interval() == MINUTOS_TRAS_FALLOS * 60_000
+    assert f"Se reintenta en {MINUTOS_TRAS_FALLOS} min" in ventana.resumen.text()
+
+    ventana._al_comprobar({
+        "estados": [parte(PROCESANDO)], "planes": {}, "partes": [],
+    })
+    assert ventana._vigilante.interval() == 2 * 60_000
+    ventana.close()
 
 
 def test_una_comprobacion_buena_borra_la_racha_de_fallos(ventana):
