@@ -391,6 +391,13 @@ class _Pagina:
 
     def evaluar(self, expresion: str):
         self._comprobar_cancelacion()
+        return self._evaluar(expresion)
+
+    def evaluar_al_cerrar(self, expresion: str):
+        """Permite soltar cuadros abiertos aunque el trabajo se cancelara."""
+        return self._evaluar(expresion)
+
+    def _evaluar(self, expresion: str):
         if self.ws is None:
             raise RuntimeError("La pestaña de Log Page Audit ya no está abierta")
         respuesta = self.ws.pedir(
@@ -417,11 +424,11 @@ class _Pagina:
             self._dormir(cada)
         return False
 
-    def cerrar(self) -> None:
+    def cerrar(self, forzar: bool = False) -> None:
         if self.ws is not None:
             self.ws.cerrar()
             self.ws = None
-        if cierre_diferido_activo():
+        if cierre_diferido_activo() and not forzar:
             return
         try:
             navegador = _WebSocket(

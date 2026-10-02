@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock
 from typing import Optional
 from urllib.parse import parse_qs, urlsplit
 
@@ -244,6 +244,7 @@ class CorreccionWorker(_TrabajoEnEdge):
         self.mostrar_previas = False
         self.cache_previa = {}
         self._respuesta_previa = Event()
+        self._candado_revision = Lock()
         self._seleccion_previa = None
 
     def responder_previa(self, seleccion):
@@ -251,15 +252,25 @@ class CorreccionWorker(_TrabajoEnEdge):
         self._respuesta_previa.set()
 
     def _revisar(self, correccion, vistas, elegidas):
-        self._respuesta_previa.clear()
-        self._seleccion_previa = None
-        self.previa.emit(correccion, vistas, elegidas)
-        while not self._respuesta_previa.wait(.2):
+        # Cada diálogo conserva su respuesta aunque las imágenes de otros
+        # casos se estén descargando al mismo tiempo.
+        while not self._candado_revision.acquire(timeout=.2):
             if self._cancelado():
                 raise ConsultaCancelada()
-        if self._cancelado():
-            raise ConsultaCancelada()
-        return self._seleccion_previa
+        try:
+            if self._cancelado():
+                raise ConsultaCancelada()
+            self._respuesta_previa.clear()
+            self._seleccion_previa = None
+            self.previa.emit(correccion, vistas, elegidas)
+            while not self._respuesta_previa.wait(.2):
+                if self._cancelado():
+                    raise ConsultaCancelada()
+            if self._cancelado():
+                raise ConsultaCancelada()
+            return self._seleccion_previa
+        finally:
+            self._candado_revision.release()
 
     def _trabajar(self):
         # Sin ensayo porque a este hilo solo se llega después de que alguien

@@ -661,12 +661,22 @@ def test_la_correccion_sin_edge_visible_abre_uno_oculto(
             estados.append(("abrir", url, espera_s))
             return {"webSocketDebuggerUrl": "ws://oculto"}
 
-        def abrir_pestana(self, url, version):
-            estados.append(("pestaña", url, version))
-            return "temporal"
+        def abrir_pestana(self, *_args, **_kwargs):
+            raise AssertionError("no debe cerrar las pestañas de otros casos")
 
         def cerrar(self):
             estados.append("cerrar")
+
+    class _SocketFalso:
+        def __init__(self, _url):
+            pass
+
+        def pedir(self, metodo, **parametros):
+            estados.append((metodo, parametros))
+            return {"targetId": "temporal"}
+
+        def cerrar(self):
+            pass
 
     monkeypatch.setattr(
         modulo_correcciones, "_puerto_anotado", lambda _perfil: None
@@ -677,12 +687,16 @@ def test_la_correccion_sin_edge_visible_abre_uno_oculto(
     monkeypatch.setattr(
         modulo_correcciones, "SesionDeNavegador", _SesionFalsa
     )
+    monkeypatch.setattr(modulo_correcciones, "_WebSocket", _SocketFalso)
 
     with _NavegadorDeCorrecciones(tmp_path) as navegador:
         version = navegador.abrir("https://airvault", espera_s=30.0)
         navegador.abrir_pestana("https://airvault/busqueda", version)
 
     assert estados[0] == ("visible", False)
+    assert ("Target.createTarget", {
+        "url": "https://airvault/busqueda", "background": True,
+    }) in estados
     assert estados[-1] == "cerrar"
 
 

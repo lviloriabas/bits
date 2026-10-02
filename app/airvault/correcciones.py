@@ -44,10 +44,12 @@ from __future__ import annotations
 import base64
 import json
 import time
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from threading import Event, Lock
 from typing import Callable, Iterable, Mapping, Sequence
 
 from app.airvault.config import AirVaultConfig
@@ -72,11 +74,34 @@ from app.airvault.web_reports import (
     esperar_acceso,
     _Pagina,
 )
+from app.core import parallelism
 from app.utils.portable import app_root
 
 ACCION_BORRAR = "Borrar copias"
 ACCION_REINDEXAR = "Reindexar"
 ACCION_REVISAR = "Revisar a mano"
+
+# Presupuesto prudente por pestaña, incluida la carga de imágenes. No es una
+# medida del consumo de AirVault: se vuelve a consultar la RAM al repartir.
+_MEMORIA_PESTANA_MB = 768
+# La memoria manda, pero el servidor compartido no recibe más de cuatro casos.
+_MAX_CORRECCIONES = 4
+_CANDADO_AUDITORIA = Lock()
+
+
+def _paralelismo_correcciones(en_curso: int = 0) -> int:
+    """Casos que caben ahora, contando los que ya ocupan memoria."""
+    libre = parallelism.available_memory_mb()
+    if libre <= 0:
+        return 1
+    adicionales = (
+        max(0, libre - parallelism.reserved_memory_mb()) // _MEMORIA_PESTANA_MB
+    )
+    return max(1, min(
+        _MAX_CORRECCIONES,
+        parallelism.available_cpu_threads(),
+        en_curso + adicionales,
+    ))
 
 # Lo que dice el boton que cierra cada cuadro de AirVault. Se busca por
 # su texto porque los cuadros de jQuery UI no le ponen identificador a
@@ -115,7 +140,6 @@ class _NavegadorDeCorrecciones:
     def __init__(self, perfil: Path) -> None:
         self.perfil = Path(perfil)
         self._sesion: SesionDeNavegador | None = None
-        self._version_visible: dict | None = None
 
     def __enter__(self) -> "_NavegadorDeCorrecciones":
         return self
@@ -127,17 +151,13 @@ class _NavegadorDeCorrecciones:
     def abrir(self, url: str, espera_s: float) -> dict:
         version = self._edge_visible()
         if version is not None:
-            self._version_visible = version
             return version
         self._sesion = SesionDeNavegador(self.perfil, visible=False)
         return self._sesion.abrir(url, espera_s=espera_s)
 
     def abrir_pestana(self, url: str, version: dict) -> str:
-        if self._version_visible is None:
-            if self._sesion is None:
-                raise ErrorDeNavegador("No hay una sesión de Edge abierta")
-            return self._sesion.abrir_pestana(url, version=version)
-
+        # Crear directamente conserva las pestañas de otros casos también
+        # fuera de la GUI, donde abrir_pestana de la sesión limpia las demás.
         ws = _WebSocket(version["webSocketDebuggerUrl"])
         try:
             creada = ws.pedir(
@@ -151,6 +171,18 @@ class _NavegadorDeCorrecciones:
                 "Edge no abrió la pestaña temporal de corrección"
             )
         return target_id
+
+    @staticmethod
+    def cerrar_pestana(version: dict, target_id: str) -> None:
+        """Retira una pestaña cuyo controlador no llegó a abrirse."""
+        try:
+            ws = _WebSocket(version["webSocketDebuggerUrl"], timeout=5.0)
+            try:
+                ws.pedir("Target.closeTarget", targetId=target_id)
+            finally:
+                ws.cerrar()
+        except (KeyError, OSError, RuntimeError, ValueError):
+            pass
 
     def cookies(self, version: dict) -> dict:
         """Las cookies del perfil, sea propio el navegador o prestado."""
@@ -641,6 +673,7 @@ class CorrectorLogPageAudit:
         self.config = config
         self.revisar = None
         self.cache_previa: dict[tuple, bytes] = {}
+        self._candado_previa = Lock()
         self.auditoria = app_root() / "output" / "airvault" / "correcciones_auditoria.jsonl"
         # La misma tabla de matricula a flota con la que se indexa. Mover una
         # pagina de un avion a otro puede cambiarle la flota (las HP-99 son
@@ -706,21 +739,81 @@ class CorrectorLogPageAudit:
             )
             esperar_acceso(lambda: navegador.cookies(version), self.config)
             avanzar(0, len(pendientes))
-            for numero, correccion in enumerate(pendientes, start=1):
-                if esta_cancelado():
-                    raise ConsultaCancelada()
-                notificar(
-                    f"Bitácora {correccion.log_number} "
-                    f"({numero} de {len(pendientes)})"
-                )
-                resultados.append(
-                    self._un_caso(
-                        navegador, version, correccion,
-                        esta_cancelado, ensayo,
-                    )
-                )
-                avanzar(numero, len(pendientes))
+            notificar(
+                "Revisando bitácoras en AirVault" if ensayo
+                else "Corrigiendo bitácoras en AirVault"
+            )
+            resultados.extend(self._aplicar_pendientes(
+                navegador, version, pendientes, notificar,
+                esta_cancelado, ensayo, avanzar,
+            ))
         return resultados
+
+    def _aplicar_pendientes(
+        self,
+        navegador: _NavegadorDeCorrecciones,
+        version: dict,
+        pendientes: Sequence[Correccion],
+        notificar: Callable[[str], None],
+        esta_cancelado: Callable[[], bool],
+        ensayo: bool,
+        avanzar: Callable[[int, int], None],
+    ) -> list[Resultado]:
+        """Reparte casos completos y reduce nuevas aperturas si baja la RAM."""
+        sin_empezar = list(enumerate(pendientes))
+        terminadas: dict[int, Resultado] = {}
+        en_curso: dict[Future[Resultado], tuple[int, Correccion]] = {}
+        parar = Event()
+
+        def cancelado() -> bool:
+            return parar.is_set() or esta_cancelado()
+
+        def atender(correccion: Correccion) -> Resultado:
+            if cancelado():
+                raise ConsultaCancelada()
+            return self._un_caso(
+                navegador, version, correccion, cancelado, ensayo,
+            )
+
+        # La RAM de una pestaña tarda en ocuparse mientras carga. Conservar
+        # el techo inicial evita repartir otra vez ese mismo presupuesto.
+        techo = _paralelismo_correcciones(0)
+        with ThreadPoolExecutor(max_workers=techo) as pool:
+            try:
+                while sin_empezar or en_curso:
+                    if cancelado():
+                        raise ConsultaCancelada()
+                    limite = min(techo, _paralelismo_correcciones(len(en_curso)))
+                    ocupadas = {c.log_number for _i, c in en_curso.values()}
+                    for indice, correccion in list(sin_empezar):
+                        if len(en_curso) >= limite:
+                            break
+                        if correccion.log_number in ocupadas:
+                            continue
+                        if cancelado():
+                            raise ConsultaCancelada()
+                        futuro = pool.submit(atender, correccion)
+                        en_curso[futuro] = (indice, correccion)
+                        ocupadas.add(correccion.log_number)
+                        sin_empezar.remove((indice, correccion))
+                    listas, _ = wait(
+                        en_curso, timeout=0.2, return_when=FIRST_COMPLETED,
+                    )
+                    for futuro in sorted(listas, key=lambda f: en_curso[f][0]):
+                        indice, correccion = en_curso.pop(futuro)
+                        terminadas[indice] = futuro.result()
+                        hechas = len(terminadas)
+                        notificar(
+                            f"Bitácora {correccion.log_number} "
+                            f"({hechas} de {len(pendientes)})"
+                        )
+                        avanzar(hechas, len(pendientes))
+            finally:
+                # El navegador sigue vivo hasta que todos suelten sus casos.
+                parar.set()
+                for futuro in en_curso:
+                    futuro.cancel()
+        return [terminadas[indice] for indice in range(len(pendientes))]
 
     def _un_caso(
         self,
@@ -732,6 +825,7 @@ class CorrectorLogPageAudit:
     ) -> Resultado:
         """Un caso entero, con su pestana propia y sin dejarla abierta."""
         pagina: _Pagina | None = None
+        target_id: str | None = None
         try:
             target_id = navegador.abrir_pestana(
                 correccion.url_busqueda, version=version
@@ -757,7 +851,9 @@ class CorrectorLogPageAudit:
             )
         finally:
             if pagina is not None:
-                pagina.cerrar()
+                pagina.cerrar(forzar=True)
+            elif target_id is not None:
+                navegador.cerrar_pestana(version, target_id)
 
     @staticmethod
     def _rejilla(pagina: _Pagina) -> list[Mapping[str, object]]:
@@ -902,14 +998,16 @@ class CorrectorLogPageAudit:
                     "documento": copia.documento, "imagenes": copia.imagenes,
                     "tipo": copia.tipo, "matricula": copia.matricula,
                     "fecha_documento": copia.cuando.isoformat() if copia.cuando else None}
-        with self.auditoria.open("a", encoding="utf-8") as salida:
-            salida.write(json.dumps(registro, ensure_ascii=False) + "\n")
+        with _CANDADO_AUDITORIA:
+            with self.auditoria.open("a", encoding="utf-8") as salida:
+                salida.write(json.dumps(registro, ensure_ascii=False) + "\n")
 
     def _imagen_previa(self, pagina: _Pagina, copia: Copia) -> bytes:
         """Miniatura de la misma imagen PNG que abre el visor de AirVault."""
         clave = (copia.clave, copia.cuando, copia.imagenes)
-        if clave in self.cache_previa:
-            return self.cache_previa[clave]
+        with self._candado_previa:
+            if clave in self.cache_previa:
+                return self.cache_previa[clave]
         codificada = base64.b64encode(copia.clave.encode("utf-8")).decode("ascii")
         url = ("/zfp/Document/GetHiglightedPage/?docKey=" + codificada
                + "&searchId=0&pageNum=1&encodedHighlightSearchInputs=&encodedFullTextKeyWord="
@@ -936,9 +1034,10 @@ class CorrectorLogPageAudit:
         imagen = base64.b64decode(dato, validate=True)
         if not imagen.startswith(b"\x89PNG\r\n\x1a\n"):
             raise ControlNoEncontrado("La vista previa no es una imagen válida.")
-        if len(self.cache_previa) >= 64:
-            self.cache_previa.pop(next(iter(self.cache_previa)))
-        self.cache_previa[clave] = imagen
+        with self._candado_previa:
+            if len(self.cache_previa) >= 64:
+                self.cache_previa.pop(next(iter(self.cache_previa)))
+            self.cache_previa[clave] = imagen
         return imagen
 
     def _reindexar(
@@ -1062,7 +1161,10 @@ class CorrectorLogPageAudit:
             yield
         except Exception:
             try:
-                pagina.evaluar(_CANCELAR_CUADRO % json.dumps(cuadro))
+                # Cancelar también debe soltar un documento ya tomado; la
+                # evaluación normal rechaza cualquier orden al cancelar.
+                cerrar = getattr(pagina, "evaluar_al_cerrar", pagina.evaluar)
+                cerrar(_CANCELAR_CUADRO % json.dumps(cuadro))
             except Exception:  # noqa: BLE001 - el fallo de arriba manda
                 pass
             raise
