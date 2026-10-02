@@ -56,7 +56,7 @@ from app.gui.memoria import AIRVAULT, recordar
 from app.gui.responsive import available_area, fit_to_screen
 from app.gui.text_copy import CopyableListWidget
 from app.gui.theme import gestor_tema
-from app.gui.tokens import SPACE_L, SPACE_S, link_text_color, paleta
+from app.gui.tokens import SPACE_L, SPACE_M, SPACE_S, link_text_color, paleta
 from app.gui.widgets import (ElidedLabel, IconoAyuda, SpinBoxWithButtons,
                              align_vertical_scrollbar_to_header,
                              configure_combo_box, configure_menu_button,
@@ -1550,6 +1550,7 @@ class AirVaultWindow(QDialog):
         cuerpo.addWidget(self._lotes(), 1)
         cuerpo.addWidget(self._respuesta_de_la_busqueda())
         cuerpo.addLayout(self._fila_vigilancia())
+        cuerpo.addLayout(self._fila_politica_duplicados())
         cuerpo.addLayout(self._fila_avance())
         # La bitácora se queda con el alto que sobre: las dos tablas
         # tienen tope y ella es la que necesita sitio para los mensajes
@@ -1566,15 +1567,7 @@ class AirVaultWindow(QDialog):
         )
         cuerpo.addWidget(self.resumen)
 
-        botones = self._fila_botones()
-        politica = QHBoxLayout()
-        politica.setSpacing(SPACE_S)
-        politica.addWidget(self.detener_duplicados_check)
-        politica.addWidget(QLabel("Porcentaje para detener:"))
-        politica.addWidget(self.porcentaje_duplicados_control)
-        politica.addStretch()
-        cuerpo.addLayout(politica)
-        cuerpo.addLayout(botones)
+        cuerpo.addLayout(self._fila_botones())
 
     @staticmethod
     def _titulo(texto: str) -> QLabel:
@@ -3044,21 +3037,12 @@ class AirVaultWindow(QDialog):
         self.bitacora = lista
         return lista
 
-    def _fila_botones(self) -> QHBoxLayout:
+    def _fila_politica_duplicados(self) -> QHBoxLayout:
         fila = QHBoxLayout()
         fila.setContentsMargins(0, 0, 0, 0)
         fila.setSpacing(SPACE_S)
 
-        self.completar_check = QCheckBox("Completar batch")
-        self.completar_check.setChecked(self._opciones.completar)
-        self.completar_check.setToolTip(
-            "Al terminar de escribir, cierra el batch con «Complete» y lo "
-            "manda a Web Search. Solo se acepta con todas las páginas en "
-            "verde."
-        )
-        self.completar_check.toggled.connect(self._al_cambiar_completar)
-        fila.addWidget(self.completar_check)
-        self.detener_duplicados_check = QCheckBox("Verificar duplicados en AirVault antes de subir")
+        self.detener_duplicados_check = QCheckBox("Detener subida por duplicadas")
         self.detener_duplicados_check.setChecked(self._config.detener_por_duplicados)
         self.detener_duplicados_check.setToolTip(
             "Consulta las bitácoras en AirVault y detiene al alcanzar el porcentaje elegido. "
@@ -3078,6 +3062,27 @@ class AirVaultWindow(QDialog):
         self.porcentaje_duplicados_control = SpinBoxWithButtons(self.porcentaje_duplicados_spin)
         self.porcentaje_duplicados_control.setMaximumWidth(180)
         self.detener_duplicados_check.toggled.connect(self._guardar_politica_duplicados)
+        fila.addWidget(self.detener_duplicados_check)
+        fila.addSpacing(SPACE_M)
+        fila.addWidget(QLabel("Porcentaje de duplicadas permitidas:"))
+        fila.addWidget(self.porcentaje_duplicados_control)
+        fila.addStretch()
+        return fila
+
+    def _fila_botones(self) -> QHBoxLayout:
+        fila = QHBoxLayout()
+        fila.setContentsMargins(0, 0, 0, 0)
+        fila.setSpacing(SPACE_S)
+
+        self.completar_check = QCheckBox("Completar batch")
+        self.completar_check.setChecked(self._opciones.completar)
+        self.completar_check.setToolTip(
+            "Al terminar de escribir, cierra el batch con «Complete» y lo "
+            "manda a Web Search. Solo se acepta con todas las páginas en "
+            "verde."
+        )
+        self.completar_check.toggled.connect(self._al_cambiar_completar)
+        fila.addWidget(self.completar_check)
         fila.addStretch()
 
         self.boton_subir = QPushButton("Subir a AirVault")

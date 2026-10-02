@@ -374,8 +374,8 @@ cambia en una no se lleva a la otra.
 
 ### Evitar batches duplicados
 
-En **Indexar en AirVault**, active **Verificar duplicados en AirVault antes de subir**
-y elija **Porcentaje para detener** (1 a 100%). El porcentaje se calcula sobre todas
+En **Indexar en AirVault**, active **Detener subida por duplicadas**
+y elija **Porcentaje de duplicadas permitidas** (1 a 100%). El porcentaje se calcula sobre todas
 las bitacoras distintas del batch, sin separadores: 25 bitacoras ya presentes de
 100 alcanzan un limite de 25%. Se consulta el batch completo antes de subir.
 Ambas opciones se recuerdan al cerrar. La consulta incompleta detiene la carga
