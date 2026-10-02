@@ -2880,6 +2880,7 @@ def test_quitar_la_marca_autoriza_y_reenvia_la_fila(ventana, monkeypatch):
         ),
     )
 
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a: QMessageBox.StandardButton.Yes)
     ventana._quitar_sospecha([fila])
 
     assert not fila.trabajo.manifiesto.posible_duplicado
@@ -2899,6 +2900,7 @@ def test_reenviar_posible_duplicado_lo_deja_claro_en_la_bitacora(
     ventana._trabajos = [fila.trabajo]
     monkeypatch.setattr(ventana, "_ejecutar_accion", lambda *args: False)
 
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a: QMessageBox.StandardButton.Yes)
     ventana._quitar_sospecha([fila])
 
     assert "Reenvío autorizado tras revisar posible duplicado" in (
@@ -2924,3 +2926,47 @@ def test_volver_a_pulsar_subir_autoriza_los_posibles_duplicados(
     ventana._subir_a_mano()
 
     assert autorizadas == [fila]
+
+
+
+def test_porcentaje_de_duplicados_se_recuerda_al_cerrar(app, tmp_path):
+    ventana = AirVaultWindow(tmp_path, OpcionesAutomatizacion(tmp_path))
+    ventana.porcentaje_duplicados_spin.setValue(37)
+    ventana.close()
+    nueva = AirVaultWindow(tmp_path, OpcionesAutomatizacion(tmp_path))
+    assert nueva.porcentaje_duplicados_spin.value() == 37
+    assert nueva._config.porcentaje_duplicados == 37
+    nueva.close()
+
+
+def test_reenvio_cancelado_no_autoriza_ni_encola(ventana, monkeypatch):
+    from app.airvault.flujo import POSIBLE_DUPLICADO
+    fila = parte(POSIBLE_DUPLICADO, "DP | BIT -2", "ya se mandaron")
+    fila.trabajo.manifiesto.posible_duplicado = "ya se mandaron"
+    ventana._estados = [fila]
+    ventana._trabajos = [fila.trabajo]
+    llamadas = []
+    def advertencia(*args):
+        assert args[-1] == QMessageBox.StandardButton.No
+        assert "otra copia" in args[2]
+        return QMessageBox.StandardButton.No
+    monkeypatch.setattr(QMessageBox, "warning", advertencia)
+    monkeypatch.setattr(ventana, "_subir_estas", lambda *a, **k: llamadas.append(1))
+    ventana._subir_a_mano()
+    assert llamadas == []
+    assert fila.trabajo.manifiesto.posible_duplicado
+    assert not getattr(fila.trabajo, "_duplicado_permitido", False)
+
+
+
+def test_cancelar_por_amarillas_no_deja_reenvio_autorizado(ventana, monkeypatch):
+    from app.airvault.flujo import POSIBLE_DUPLICADO
+    fila = parte(POSIBLE_DUPLICADO, "DP | BIT -2", "mismo PDF")
+    fila.trabajo.manifiesto.posible_duplicado = "mismo PDF"
+    ventana._estados = [fila]
+    ventana._trabajos = [fila.trabajo]
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a: QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(ventana, "_preguntar_por_amarillas", lambda *a: False)
+    ventana._quitar_sospecha([fila])
+    assert fila.trabajo.manifiesto.posible_duplicado == "mismo PDF"
+    assert not getattr(fila.trabajo, "_duplicado_permitido", False)

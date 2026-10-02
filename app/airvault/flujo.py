@@ -58,6 +58,7 @@ from app.airvault.mapping import (
     valores_de_indice,
 )
 from app.airvault import duplicados as libro_de_envios
+from app.airvault import envios_exactos
 from app.airvault import registro as registro_entrega
 from app.airvault.uploader import serializar_cargas
 from app.airvault import websearch
@@ -1156,6 +1157,7 @@ class Trabajo:
 
     # ── etapas ─────────────────────────────────────────────────────
 
+    @serializar_cargas
     def subir(
         self, sesion, pdf: Path | str = "", avisar: Optional[Aviso] = None, cliente=None
     ) -> None:
@@ -1181,12 +1183,16 @@ class Trabajo:
         # Search la hace el coordinador, que tiene una sola conexion para
         # toda la ejecucion, y lo que decida llega hasta aqui en la marca.
         motivo = self.manifiesto.posible_duplicado
-        if not motivo and not self._duplicado_permitido:
-            repetidas = libro_de_envios.repetidas(carpeta_del_libro(self), self)
-            if repetidas:
-                motivo = _motivo_de_repetidas(repetidas)
+        if not self._duplicado_permitido:
+            exacto = envios_exactos.motivo(
+                carpeta_del_libro(self), pdf or self.manifiesto.pdf_origen, self.config
+            )
+            if exacto:
+                self.manifiesto.duplicado_exacto = True
+            motivo = exacto or motivo or revisar_duplicado(self)
+            if motivo:
                 marcar_posible_duplicado(self, motivo)
-        if motivo and not self._duplicado_permitido and self.config.detener_por_duplicados:
+        if motivo and not self._duplicado_permitido and duplicado_bloquea(self):
             raise ErrorDeCorrida(
                 f"No se sube «{self.manifiesto.nombre_batch}»: {motivo}. "
                 "Publicarlas otra vez dejaria el mismo documento dos veces "
@@ -1254,7 +1260,14 @@ class Trabajo:
         subidor = SubidorQuickUpload(sesion, self.manifiesto.repo_id)
         self.manifiesto.etapa("subir").marcar(EstadoEtapa.EN_CURSO)
         self.guardar()
-        resultado = subidor.subir(archivo, valores, avisar=avisar)
+        try:
+            resultado = envios_exactos.enviar(
+                carpeta_del_libro(self), self, archivo, subidor, valores, avisar
+            )
+        except envios_exactos.CargaRepetida as exc:
+            self.manifiesto.duplicado_exacto = True
+            marcar_posible_duplicado(self, str(exc))
+            raise ErrorDeCorrida(str(exc)) from exc
         if not resultado.ok:
             self.manifiesto.etapa("subir").marcar(EstadoEtapa.ERROR, resultado.detalle)
             self.guardar()
@@ -1845,6 +1858,11 @@ class Trabajo:
         en amarillo el batch no se cierra hoy, y entonces mas vale no
         haberlo tocado.
         """
+        if duplicado_bloquea(self):
+            return ResultadoCompletar(
+                False, [], len(self.manifiesto.registros),
+                "no se cierra porque " + self.manifiesto.posible_duplicado,
+            )
         if self.manifiesto.solo_subir:
             return ResultadoCompletar(
                 False,
@@ -2757,6 +2775,7 @@ def autorizar_posible_duplicado(trabajo: "Trabajo") -> None:
     """Permite un reenvio pedido tras revisar la alerta en AirVault."""
     trabajo.manifiesto.posible_duplicado = ""
     trabajo._duplicado_permitido = True
+    trabajo.manifiesto.duplicado_exacto = False
     trabajo.guardar()
 
 
@@ -2766,7 +2785,10 @@ def es_posible_duplicado(trabajo: "Trabajo") -> bool:
 
 def duplicado_bloquea(trabajo: "Trabajo") -> bool:
     """La alerta se conserva aun cuando la persona permite continuar."""
-    return es_posible_duplicado(trabajo) and trabajo.config.detener_por_duplicados
+    return es_posible_duplicado(trabajo) and (
+        getattr(trabajo.manifiesto, "duplicado_exacto", False)
+        or trabajo.config.detener_por_duplicados
+    )
 
 
 def buscador_de(
@@ -2781,21 +2803,24 @@ def buscador_de(
     se puede distinguir «no esta» de «pregunte donde no era», asi que el
     buscador se construye igual pero dira que no puede responder.
 
-    Sin ``buscar_publicadas`` no hay consulta: se devuelve ``None`` y quien
-    pregunta se queda con el libro de envios, que es local y tambien frena
-    un batch repetido. Viene apagado porque la ruta de busqueda no esta
-    documentada y se adivina en ejecucion; encenderlo es decidir que se
-    quiere pagar ese descubrimiento a cambio de ver tambien los batches ya
-    completados, que son los que ninguna consulta a la cola encuentra.
+    La casilla de duplicados activa la consulta de Web Search. Tambien puede
+    activarse con ``buscar_publicadas`` para otros usos. Sin ambas opciones
+    queda la memoria local y la proteccion permanente del PDF exacto.
     """
-    if sesion is None or not config.buscar_publicadas:
+    if sesion is None or not (config.buscar_publicadas or config.detener_por_duplicados):
         return None
     raiz = Path(ruta_config).parent if ruta_config else None
+    controles = []
+    if raiz:
+        for carpeta in (raiz, raiz / "output" / "airvault"):
+            for numero in libro_de_envios.leer(carpeta).controles():
+                if numero not in controles:
+                    controles.append(numero)
     return websearch.Buscador(
         sesion=sesion,
         config=config,
         ruta_config=Path(ruta_config) if ruta_config else None,
-        controles=libro_de_envios.leer(raiz).controles() if raiz else (),
+        controles=controles[:libro_de_envios.CONTROLES_POR_DEFECTO],
     )
 
 
@@ -2805,27 +2830,39 @@ def revisar_duplicado(
 ) -> str:
     """Por que este batch no se debe mandar a Quick Upload, si lo hay.
 
-    Dos preguntas, en este orden. La primera es local y siempre responde:
-    ¿alguna de estas bitacoras ya viajo en **otro** batch? La segunda
-    necesita red: ¿alguna esta ya publicada en Web Search? La primera
-    detecta el reparto rehecho y la ejecucion reprocesada; la segunda, el
-    batch que ya se completo y salio de la cola, que es el unico caso que
-    ninguna consulta a la cola puede ver.
-
-    Devuelve cadena vacia cuando no hay nada que impida subir. Una consulta
-    que no se pudo hacer no inventa un motivo: sin respuesta se sube, que
-    es lo que hacia antes, pero con el libro local ya decidiendo.
+    El mismo PDF siempre se bloquea. Para el resto se contrasta el total
+    de bitacoras del batch con la memoria local y Web Search, aplicando el
+    porcentaje configurado. La verificacion activada requiere respuestas
+    para todas las bitacoras antes de permitir la carga.
     """
-    numeros = websearch.numeros_de(trabajo)
+    exacto = envios_exactos.motivo(
+        carpeta_del_libro(trabajo), trabajo.manifiesto.pdf_origen, trabajo.config
+    )
+    if exacto:
+        trabajo.manifiesto.duplicado_exacto = True
+        return exacto
+    numeros = list(dict.fromkeys(websearch.numeros_de(trabajo)))
     if not numeros:
         return ""
-    repetidas = libro_de_envios.repetidas(carpeta_del_libro(trabajo), trabajo)
-    if repetidas:
-        return _motivo_de_repetidas(repetidas)
+    repetidas = set(libro_de_envios.repetidas(carpeta_del_libro(trabajo), trabajo))
+    umbral = trabajo.config.porcentaje_duplicados
+    if len(repetidas) * 100 >= len(numeros) * umbral:
+        return _motivo_de_repetidas(sorted(repetidas))
     if buscador is None:
         return ""
-    veredicto = websearch.revisar_batch(buscador, numeros)
-    return veredicto.resumen() if veredicto.ya_publicado else ""
+    # Se consulta el batch completo: una muestra de tres numeros no puede
+    # determinar un porcentaje del total. Los desconocidos no son ausentes.
+    veredicto = websearch.revisar_batch(buscador, numeros, cuantas=len(numeros))
+    presentes = repetidas | set(veredicto.publicadas)
+    porcentaje = len(presentes) * 100 / len(numeros)
+    if presentes and porcentaje >= umbral:
+        return (f"Web Search ya tiene publicadas {len(presentes)} de "
+                f"{len(numeros)} bitacoras ({porcentaje:.1f}%; limite {umbral}%)")
+    if trabajo.config.detener_por_duplicados and (
+        len(veredicto.publicadas) + len(veredicto.ausentes) < len(numeros)
+    ):
+        return "No se pudo verificar todo el batch en AirVault; revise antes de reenviar"
+    return ""
 
 
 def _motivo_de_repetidas(repetidas: Sequence[str]) -> str:
@@ -2920,6 +2957,8 @@ def subir_partes(
     _validar_nombres_de_batches(trabajos)
     ejecucion = list(en_la_ejecucion or trabajos)
     _validar_sin_bitacoras_repetidas(trabajos, ejecucion)
+    for raiz in {carpeta_del_libro(trabajo) for trabajo in ejecucion}:
+        envios_exactos.iniciar(raiz)
     claves_forzadas = {str(clave) for clave in forzados or ()}
     por_subir = list(trabajos)
     confirmados: set[str] = set()
@@ -3161,10 +3200,10 @@ def subir_partes(
             )
         if motivo:
             marcar_posible_duplicado(trabajo, motivo)
-        if motivo and not trabajo.config.detener_por_duplicados:
+        if motivo and not duplicado_bloquea(trabajo):
             if avisar is not None:
                 avisar(f"{cabeza}Posible duplicado: {motivo}; se continúa", 0, 0)
-        if motivo and trabajo.config.detener_por_duplicados:
+        if motivo and duplicado_bloquea(trabajo):
             fallos.append((
                 trabajo,
                 f"No se subio porque {motivo}. Si en AirVault no esta, "

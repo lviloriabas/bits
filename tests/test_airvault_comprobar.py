@@ -96,7 +96,7 @@ def corrida(tmp_path, nombre: str = "BITS 18 AUG 2026 05 42",
     csv.write_text(CSV, encoding="utf-8")
     archivos = list(pdfs) or [f"{nombre}.pdf"]
     for pdf in archivos:
-        (carpeta / pdf).write_bytes(b"%PDF-1.4\n")
+        (carpeta / pdf).write_bytes(b"%PDF-1.4\n" + pdf.encode("utf-8"))
     delante = [{"separador": "HP-1848CMP"}] if con_divisoria else []
     paginas = [
         delante + [{"archivo": "Image_001.pdf", "pagina": 1},
@@ -792,6 +792,9 @@ def _trabajos_principal_division_y_revisar(tmp_path):
         trabajo.manifiesto.solo_subir = nombre.endswith("REVISAR")
         trabajo.manifiesto.lotes_previos = ["003VIEJO"]
         trabajo.manifiesto.parte = indice
+        pdf_parte = csv.parent.parent / f"parte-{indice}.pdf"
+        pdf_parte.write_bytes(b"%PDF-1.4\n" + str(indice).encode())
+        trabajo.manifiesto.pdf_origen = str(pdf_parte)
         # Cada parte se lleva sus propias bitacoras, como en una entrega
         # repartida de verdad. Compartirlas seria un batch subido dos veces,
         # que es justo lo que la guarda de reparto no deja mandar.
@@ -1573,6 +1576,8 @@ def test_la_orden_de_subir_a_mano_no_espera_a_la_comprobacion(
     # Por su cuenta el programa no lo mandaria: lleva una revision de tres.
     assert comprobar_partes([trabajo], cliente)[0].estado == PROCESANDO
 
+    from app.airvault.flujo import autorizar_posible_duplicado
+    autorizar_posible_duplicado(trabajo)  # la persona acepto la advertencia
     subir_partes(
         [trabajo],
         SesionFalsa(),
@@ -1663,6 +1668,8 @@ def test_un_empty_batch_que_ya_estaba_no_frena_la_orden(tmp_path, monkeypatch):
 
     monkeypatch.setattr(Trabajo, "subir", subir)
 
+    from app.airvault.flujo import autorizar_posible_duplicado
+    autorizar_posible_duplicado(trabajo)  # la persona acepto la advertencia
     subir_partes(
         [trabajo],
         SesionFalsa(),
@@ -2234,6 +2241,8 @@ def test_subir_de_nuevo_reenvia_el_que_no_aparecio_durante_mucho_tiempo(
 
     monkeypatch.setattr(Trabajo, "subir", subir)
 
+    from app.airvault.flujo import autorizar_posible_duplicado
+    autorizar_posible_duplicado(trabajo)  # la persona acepto la advertencia
     subir_partes(
         [trabajo],
         SesionFalsa(),
@@ -2290,6 +2299,8 @@ def test_una_carga_perdida_se_avisa_pero_no_se_reenvia_sola(
     assert subidas == []
 
     # La orden expresa si la manda.
+    from app.airvault.flujo import autorizar_posible_duplicado
+    autorizar_posible_duplicado(perdida)  # acepto la advertencia
     subir_partes(
         [perdida], SesionFalsa(), cliente=cliente,
         forzados=[str(perdida.carpeta)],
@@ -2370,6 +2381,8 @@ def test_una_carga_vieja_que_no_esta_en_la_cola_se_da_por_perdida_enseguida(
     subir_partes([trabajo], SesionFalsa(), cliente=cliente)
     assert subidas == []
 
+    from app.airvault.flujo import autorizar_posible_duplicado
+    autorizar_posible_duplicado(trabajo)  # acepto la advertencia
     subir_partes(
         [trabajo], SesionFalsa(), cliente=cliente,
         forzados=[str(trabajo.carpeta)],

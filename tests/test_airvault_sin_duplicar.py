@@ -238,15 +238,15 @@ def test_si_web_search_no_lo_tiene_la_carga_sigue(tmp_path, monkeypatch):
     assert not es_posible_duplicado(trabajo)
 
 
-def test_sin_poder_consultar_no_se_inventa_un_motivo(tmp_path):
-    """Un fallo de red no puede parar el trabajo del dia."""
+def test_sin_poder_consultar_se_detiene_la_verificacion_activada(tmp_path):
+    """No confunde un fallo de red con la ausencia de duplicados."""
     trabajo = _trabajo(tmp_path)
 
     class BuscadorMudo(BuscadorFalso):
         def _pedir(self, ruta, plantilla, valor):
             raise RuntimeError("sin red")
 
-    assert revisar_duplicado(trabajo, BuscadorMudo()) == ""
+    assert "No se pudo verificar" in revisar_duplicado(trabajo, BuscadorMudo())
 
 
 def test_desmarcada_advierte_y_sube_aunque_web_search_detecte_duplicados(tmp_path, monkeypatch):
@@ -282,13 +282,13 @@ def test_desmarcada_no_impide_completar_y_conserva_la_alerta(tmp_path, monkeypat
 
 # ── preguntarle a Web Search es opcional ───────────────────────────
 
-def test_de_fabrica_no_se_le_pregunta_a_web_search(tmp_path):
+def test_desmarcada_no_se_le_pregunta_a_web_search(tmp_path):
     """La ruta de busqueda se adivina en ejecucion; no se paga sin pedirlo.
 
     Sin buscador no se deja de vigilar: el libro de envios es local, no
     falla y frena igual un batch que ya se mando.
     """
-    assert buscador_de(SesionFalsa(), AirVaultConfig(), tmp_path / "a.json") is None
+    assert buscador_de(SesionFalsa(), AirVaultConfig(detener_por_duplicados=False), tmp_path / "a.json") is None
 
 
 def test_encendida_la_opcion_si_se_construye_el_buscador(tmp_path):

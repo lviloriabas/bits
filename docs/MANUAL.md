@@ -367,3 +367,26 @@ cambia en una no se lleva a la otra.
 | Un batch tiene distinta cantidad de páginas       | Revise la entrega y el batch antes de indexar; la diferencia bloquea el trabajo afectado.                                                               |
 | Hay valores remotos distintos o posible duplicado | Revise el conflicto en AirVault antes de reintentar.                                                                                                    |
 | Necesita liberar espacio                          | **Carpetas -> Vaciar input / Vaciar output** envía esos archivos a la Papelera. `input/processed/` se conserva al vaciar input.                         |
+
+
+### Evitar batches duplicados
+
+En **Indexar en AirVault**, active **Verificar duplicados en AirVault antes de subir**
+y elija **Porcentaje para detener** (1 a 100%). El porcentaje se calcula sobre todas
+las bitacoras distintas del batch, sin separadores: 25 bitacoras ya presentes de
+100 alcanzan un limite de 25%. Se consulta el batch completo antes de subir.
+Ambas opciones se recuerdan al cerrar. La consulta incompleta detiene la carga
+cuando la verificacion esta activada.
+
+El mismo PDF tiene ademas una proteccion permanente, independiente de la casilla
+y del porcentaje. Su huella se guarda antes de enviar y sobrevive al cierre,
+al cambio de nombre, a otra carpeta de entrega y al borrado del trabajo local.
+Tambien se incorpora el historial anterior cuyos manifiestos y PDF aun existen.
+Una carga sin respuesta queda reservada para evitar reenviarla automaticamente.
+La memoria vive junto a los trabajos de AirVault en la instalacion portable.
+
+Para repetirlo, use **No es duplicado: volver a subir** o pulse **Subir a AirVault**
+con el batch marcado. La advertencia explica que puede crear otra copia y abre
+con **No** como respuesta predeterminada. **Si** autoriza un solo intento; cerrar
+el programa no conserva esa autorizacion. Una segunda ventana no puede enviar
+otra carga mientras una este en curso.

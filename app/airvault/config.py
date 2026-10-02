@@ -128,7 +128,8 @@ class AirVaultConfig:
     # ese último estado en la carpeta portable.
     completar_batch: bool | None = None
     # La comprobacion sigue avisando; solo esta preferencia decide si bloquea.
-    detener_por_duplicados: bool = False
+    detener_por_duplicados: bool = True
+    porcentaje_duplicados: int = 1
     # Como se representa la fecha en el CSV: «month_end» o «specific_day».
     # Tampoco tiene valor impuesto por el programa. Es una decision de quien
     # entrega, no del archivo que se abre, asi que la instalacion conserva
@@ -237,6 +238,12 @@ class AirVaultConfig:
         utiles = {k: v for k, v in cambios.items() if v is not None}
         return replace(self, **utiles) if utiles else self
 
+    def __post_init__(self):
+        if (isinstance(self.porcentaje_duplicados, bool)
+                or not isinstance(self.porcentaje_duplicados, int)
+                or not 1 <= self.porcentaje_duplicados <= 100):
+            raise ValueError("El porcentaje de duplicados debe estar entre 1 y 100")
+
     def url(self, ruta: str) -> str:
         return f"{self.base_url.rstrip('/')}/{ruta.lstrip('/')}"
 
@@ -331,6 +338,12 @@ def guardar_preferencias(path: Path | str, **valores: bool) -> bool:
     return _actualizar(
         path, {clave: bool(valor) for clave, valor in valores.items()}
     )
+
+
+def guardar_politica_duplicados(path, marcada: bool, porcentaje: int) -> bool:
+    AirVaultConfig(porcentaje_duplicados=porcentaje)
+    return _actualizar(path, {"detener_por_duplicados": bool(marcada),
+                             "porcentaje_duplicados": porcentaje})
 
 
 def guardar_completar_batch(path: Path | str, marcado: bool) -> bool:

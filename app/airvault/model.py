@@ -182,6 +182,7 @@ class Manifiesto(BaseModel):
     # batch sea el que lo subio. Decidirlo es de quien mira AirVault, y por
     # eso se puede quitar a mano; lo que el programa no hace es seguir solo.
     posible_duplicado: str = ""
+    duplicado_exacto: bool = False
     # El propio programa cerro el batch al terminar de indexarlo. Distingue
     # lo que quedo terminado sin que nadie interviniera de lo que ya estaba
     # cerrado en AirVault cuando se encontro.

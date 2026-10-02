@@ -15,5 +15,7 @@
   "completar_batch": false,
   "auto_depurar": true,
   "buscar_publicadas": false,
-  "csv_date_mode": "specific_day"
+  "csv_date_mode": "specific_day",
+  "detener_por_duplicados": true,
+  "porcentaje_duplicados": 1
 }

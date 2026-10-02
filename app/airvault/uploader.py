@@ -52,7 +52,7 @@ def serializar_cargas(funcion):
     @wraps(funcion)
     def ejecutar(*args, **kwargs):
         sesion = kwargs.get("sesion") or (args[1] if len(args) > 1 else None)
-        if args and isinstance(args[0], SubidorQuickUpload):
+        if args and getattr(args[0], "sesion", None) is not None:
             sesion = args[0].sesion
         sesion = getattr(sesion, "sesion", sesion)
         while not _TURNO_CARGA.acquire(timeout=0.25):

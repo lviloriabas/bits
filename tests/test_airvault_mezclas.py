@@ -79,6 +79,7 @@ def test_no_sube_el_segundo_si_el_primero_sigue_sin_identificar(tmp_path, monkey
     trabajos, _ = escenario(tmp_path)
     for t in trabajos:
         t.manifiesto.etapas.clear()
+        t.guardar()
     cliente = ClienteFalso()
     enviados = []
 
@@ -170,6 +171,14 @@ def test_subir_recupera_la_mezcla_y_publica_dos_batches_independientes(tmp_path,
 
     monkeypatch.setattr(SubidorQuickUpload, "subir", subir)
     monkeypatch.setattr("app.airvault.flujo._paginas_del_pdf", lambda _p: 2)
+    # Apartar la mezcla conserva los originales remotos: no se reenvian
+    # los mismos PDF hasta que la persona acepte la advertencia.
+    fallos = subir_partes(trabajos, SesionFalsa(), cliente=cliente)
+    assert len(fallos) == 2
+    assert enviados == []
+    from app.airvault.flujo import autorizar_posible_duplicado
+    for trabajo in trabajos:
+        autorizar_posible_duplicado(trabajo)
     assert subir_partes(trabajos, SesionFalsa(), cliente=cliente) == []
     assert enviados == [t.manifiesto.nombre_batch for t in trabajos]
     assert [t.manifiesto.batch_id for t in trabajos] == ["003NUE0", "003NUE1"]

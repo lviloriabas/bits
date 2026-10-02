@@ -1567,7 +1567,13 @@ class AirVaultWindow(QDialog):
         cuerpo.addWidget(self.resumen)
 
         botones = self._fila_botones()
-        cuerpo.addWidget(self.detener_duplicados_check)
+        politica = QHBoxLayout()
+        politica.setSpacing(SPACE_S)
+        politica.addWidget(self.detener_duplicados_check)
+        politica.addWidget(QLabel("Porcentaje para detener:"))
+        politica.addWidget(self.porcentaje_duplicados_spin)
+        politica.addStretch()
+        cuerpo.addLayout(politica)
         cuerpo.addLayout(botones)
 
     @staticmethod
@@ -2319,6 +2325,19 @@ class AirVaultWindow(QDialog):
         accion.triggered.connect(hacer)
         return accion
 
+    def _preguntar_reenvio(self, partes) -> bool:
+        nombres = ", ".join(parte.nombre for parte in partes)
+        respuesta = QMessageBox.warning(
+            self, "Advertencia: posible batch duplicado",
+            f"Se volverá a subir: {nombres}.\n\n"
+            "Estas bitácoras pueden estar ya en AirVault. Reenviar crea otra copia, "
+            "incluso si el batch anterior está completado. Revise AirVault antes de continuar.\n\n"
+            "¿Autoriza volver a subir estos batches?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return respuesta == QMessageBox.StandardButton.Yes
+
     def _quitar_sospecha(self, partes) -> None:
         """Autoriza y reenvia un batch marcado como posible duplicado.
 
@@ -2332,6 +2351,11 @@ class AirVaultWindow(QDialog):
         from app.airvault.flujo import (autorizar_posible_duplicado,
                                         estado_local)
 
+        partes = list(partes)
+        if not partes or not self._preguntar_reenvio(partes):
+            return
+        if not self._preguntar_por_amarillas([parte.trabajo for parte in partes]):
+            return
         limpiadas = set()
         for parte in partes:
             autorizar_posible_duplicado(parte.trabajo)
@@ -3034,9 +3058,23 @@ class AirVaultWindow(QDialog):
         )
         self.completar_check.toggled.connect(self._al_cambiar_completar)
         fila.addWidget(self.completar_check)
-        self.detener_duplicados_check = QCheckBox("Detener subida si se detectan duplicados")
+        self.detener_duplicados_check = QCheckBox("Verificar duplicados en AirVault antes de subir")
         self.detener_duplicados_check.setChecked(self._config.detener_por_duplicados)
-        self.detener_duplicados_check.setToolTip("Desmarcada: avisa de posibles duplicados y continúa. La selección se recuerda al cerrar.")
+        self.detener_duplicados_check.setToolTip(
+            "Consulta las bitácoras en AirVault y detiene al alcanzar el porcentaje elegido. "
+            "El mismo PDF siempre requiere advertencia y confirmación para reenviarse."
+        )
+        self.porcentaje_duplicados_spin = QSpinBox()
+        self.porcentaje_duplicados_spin.setRange(1, 100)
+        self.porcentaje_duplicados_spin.setSuffix(" %")
+        self.porcentaje_duplicados_spin.setValue(self._config.porcentaje_duplicados)
+        self.porcentaje_duplicados_spin.setToolTip(
+            "Bitácoras ya presentes / total de bitácoras del batch. "
+            "Se detiene cuando el porcentaje es igual o mayor. No cuenta separadores."
+        )
+        self.porcentaje_duplicados_spin.valueChanged.connect(
+            lambda _: self._guardar_politica_duplicados(self.detener_duplicados_check.isChecked())
+        )
         self.detener_duplicados_check.toggled.connect(self._guardar_politica_duplicados)
         fila.addStretch()
 
@@ -4228,18 +4266,26 @@ class AirVaultWindow(QDialog):
         return self._config
 
     def _guardar_politica_duplicados(self, marcada: bool) -> None:
-        from app.airvault.config import guardar_preferencias
+        from app.airvault.config import guardar_politica_duplicados
         from app.airvault.flujo import POSIBLE_DUPLICADO, estado_local
-        if not guardar_preferencias(self._raiz / AIRVAULT_FILENAME, detener_por_duplicados=marcada):
+        porcentaje = self.porcentaje_duplicados_spin.value()
+        porcentaje_anterior = self._config.porcentaje_duplicados
+        if not guardar_politica_duplicados(self._raiz / AIRVAULT_FILENAME, marcada, porcentaje):
             with QSignalBlocker(self.detener_duplicados_check):
                 self.detener_duplicados_check.setChecked(self._config.detener_por_duplicados)
+            with QSignalBlocker(self.porcentaje_duplicados_spin):
+                self.porcentaje_duplicados_spin.setValue(self._config.porcentaje_duplicados)
             self.resumen.setText("No se pudo guardar la opción de duplicados.")
             return
-        self._config = self._config.with_overrides(detener_por_duplicados=marcada)
+        self._config = self._config.with_overrides(detener_por_duplicados=marcada, porcentaje_duplicados=porcentaje)
         self._estado["config"] = self._config
         trabajos = list(self._trabajos) + [p.trabajo for p in self._estados]
         for trabajo in trabajos:
-            trabajo.config = trabajo.config.with_overrides(detener_por_duplicados=marcada)
+            trabajo.config = trabajo.config.with_overrides(detener_por_duplicados=marcada, porcentaje_duplicados=porcentaje)
+            if (porcentaje != porcentaje_anterior
+                    and not getattr(trabajo.manifiesto, "duplicado_exacto", False)):
+                from app.airvault.flujo import limpiar_posible_duplicado
+                limpiar_posible_duplicado(trabajo)
         self._estados = [estado_local(p.trabajo) if p.estado == POSIBLE_DUPLICADO else p for p in self._estados]
         self._pintar_lotes()
         self._ajustar_vigilancia()
