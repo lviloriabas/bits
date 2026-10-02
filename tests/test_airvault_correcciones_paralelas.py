@@ -325,6 +325,7 @@ def test_cierra_solo_la_pestana_temporal_aunque_edge_se_conserve(monkeypatch):
 
 def test_las_revisiones_paralelas_conservan_su_respuesta(app):
     worker = CorreccionWorker(AirVaultConfig(), [])
+    worker.mostrar_previas = True
     primera_abierta = Event()
     segunda_llama = Event()
     contestar_primera = Event()
@@ -370,3 +371,28 @@ def test_cancelar_despierta_la_revision_que_espera_turno(app):
                 revision.result(timeout=3)
     finally:
         worker._candado_revision.release()
+
+
+def test_apagar_el_visor_libera_los_casos_que_esperan_con_su_opcion_default(app):
+    worker = CorreccionWorker(AirVaultConfig(), [])
+    worker.mostrar_previas = True
+    primera_abierta = Event()
+    cerrar_primera = Event()
+    expuestas = []
+
+    def mostrar(caso, _vistas, elegidas):
+        expuestas.append(caso)
+        primera_abierta.set()
+        assert cerrar_primera.wait(3)
+        worker.mostrar_previas = False
+        worker.responder_previa(elegidas)
+
+    worker.previa.connect(mostrar, Qt.ConnectionType.DirectConnection)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        primera = pool.submit(worker._revisar, "primera", [], {"a"})
+        assert primera_abierta.wait(3)
+        segunda = pool.submit(worker._revisar, "segunda", [], {"b", "c"})
+        cerrar_primera.set()
+        assert primera.result(timeout=3) == {"a"}
+        assert segunda.result(timeout=3) == {"b", "c"}
+    assert expuestas == ["primera"]

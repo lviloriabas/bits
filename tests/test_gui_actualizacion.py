@@ -14,9 +14,13 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from PySide6.QtCore import Qt
 
 from app.gui import actualizacion
 from app.gui import main_window as ventana_principal
+from app.gui.tokens import TEMA_CLARO, TEMA_OSCURO, paleta, tema
+from app.gui.theme import aplicar_tema, install_application_theme
+from app.utils.preferencias_ui import guardar_opcion
 
 
 def _respuesta(codigo: int = 0, salida: str = "", error: str = ""):
@@ -89,28 +93,139 @@ def test_sin_rama_remota_no_se_sabe(repositorio, monkeypatch):
 
 def test_el_pull_solo_avanza(repositorio, monkeypatch):
     llamadas = _git_que_responde(monkeypatch, {
+        "rev-parse": _respuesta(salida="abc123\n"),
         "pull": _respuesta(salida="Fast-forward\n"),
+        "log": _respuesta(salida="def456 Mejora el visor\nfed321 Iguala el boton\n"),
     })
 
     assert actualizacion.traer_version_nueva(repositorio) == (
         True, "Fast-forward"
     )
-    assert llamadas == [("pull", "--ff-only")]
+    assert llamadas == [
+        ("rev-parse", "HEAD"),
+        ("pull", "--ff-only"),
+        ("log", "--reverse", "--format=%h %s", "abc123..HEAD"),
+    ]
+    assert actualizacion.leer_novedades_instaladas(repositorio) == [
+        "def456 Mejora el visor", "fed321 Iguala el boton",
+    ]
 
 
 def test_el_pull_que_falla_devuelve_lo_que_dijo_git(repositorio, monkeypatch):
-    _git_que_responde(monkeypatch, {
+    llamadas = _git_que_responde(monkeypatch, {
+        "rev-parse": _respuesta(salida="abc123\n"),
         "pull": _respuesta(codigo=1, error="Not possible to fast-forward"),
     })
 
     assert actualizacion.traer_version_nueva(repositorio) == (
         False, "Not possible to fast-forward"
     )
+    assert actualizacion.leer_novedades_instaladas(repositorio) == []
+    assert not any(llamada[0] == "log" for llamada in llamadas)
 
 
 def test_el_boton_empieza_oculto(window):
     assert window.btn_actualizar.isHidden()
     assert window.btn_actualizar.text() == "Hacer clic aquí para actualizar"
+    assert window.btn_actualizar.objectName() == "actualizarButton"
+    assert paleta().UPDATE_BG in window.btn_actualizar.styleSheet()
+
+
+def test_actualizar_es_amarillo_y_conserva_la_altura_al_cambiar_tema(window, app, monkeypatch):
+    previo = tema()
+    monkeypatch.setattr("app.gui.theme.guardar_tema", lambda _nombre: True)
+    install_application_theme(app)
+    window.show()
+    try:
+        for nombre in (TEMA_CLARO, TEMA_OSCURO):
+            aplicar_tema(nombre)
+            window._on_actualizacion_encontrada(1)
+            window.ensurePolished()
+            app.processEvents()
+            assert f"background-color: {paleta().UPDATE_BG}" in window.btn_actualizar.styleSheet()
+            assert window.btn_actualizar.height() == window.btn_automatico.height()
+    finally:
+        aplicar_tema(previo)
+
+
+def test_el_aviso_se_muestra_una_vez_al_volver_a_abrir(window, tmp_path, monkeypatch):
+    guardar_opcion(
+        actualizacion._NOVEDADES_INSTALADAS,
+        ["def456 Mejora el visor", "fed321 Conserva <datos>"], tmp_path,
+    )
+    monkeypatch.setattr(ventana_principal, "SCRIPT_DIR", tmp_path)
+    vistos = []
+
+    def mostrar(aviso):
+        vistos.append(aviso.text())
+        assert aviso.textFormat() == Qt.TextFormat.PlainText
+
+    monkeypatch.setattr(ventana_principal.QMessageBox, "exec", mostrar)
+    window.mostrar_novedades_instaladas()
+    window.mostrar_novedades_instaladas()
+
+    assert vistos == [
+        "Se instalaron estos cambios:\n\ndef456 Mejora el visor\nfed321 Conserva <datos>"
+    ]
+    assert actualizacion.leer_novedades_instaladas(tmp_path) == []
+
+
+def test_un_pull_sin_cambios_no_inventa_novedades(repositorio, monkeypatch):
+    _git_que_responde(monkeypatch, {
+        "rev-parse": _respuesta(salida="abc123\n"),
+        "pull": _respuesta(salida="Already up to date.\n"),
+        "log": _respuesta(),
+    })
+    assert actualizacion.traer_version_nueva(repositorio)[0]
+    assert actualizacion.leer_novedades_instaladas(repositorio) == []
+
+
+def test_conserva_el_aviso_si_no_se_pudo_reiniciar(repositorio, monkeypatch):
+    guardar_opcion(actualizacion._NOVEDADES_INSTALADAS, ["abc123 Mejora anterior"], repositorio)
+    _git_que_responde(monkeypatch, {
+        "rev-parse": _respuesta(salida="abc123\n"),
+        "pull": _respuesta(),
+        "log": _respuesta(salida="def456 Mejora nueva\n"),
+    })
+    assert actualizacion.traer_version_nueva(repositorio)[0]
+    assert actualizacion.leer_novedades_instaladas(repositorio) == [
+        "abc123 Mejora anterior", "def456 Mejora nueva",
+    ]
+
+
+def test_fallar_al_leer_el_historial_no_impide_actualizar(repositorio, monkeypatch):
+    _git_que_responde(monkeypatch, {
+        "rev-parse": _respuesta(salida="abc123\n"),
+        "pull": _respuesta(salida="Fast-forward\n"),
+        "log": _respuesta(codigo=128),
+    })
+    assert actualizacion.traer_version_nueva(repositorio) == (True, "Fast-forward")
+    assert actualizacion.leer_novedades_instaladas(repositorio) == []
+
+
+def test_primer_arranque_tras_actualizar_desde_una_version_anterior(repositorio, monkeypatch):
+    llamadas = _git_que_responde(monkeypatch, {
+        "reflog": _respuesta(salida="pull --ff-only: Fast-forward\n"),
+        "rev-parse": _respuesta(salida="abc123\n"),
+        "log": _respuesta(salida="def456 Mejora el visor\n"),
+    })
+    actualizacion.recuperar_aviso_del_pull(repositorio)
+    assert actualizacion.leer_novedades_instaladas(repositorio) == ["def456 Mejora el visor"]
+    assert ("rev-parse", "HEAD@{1}") in llamadas
+    actualizacion.confirmar_novedades_instaladas(repositorio)
+    cantidad = len(llamadas)
+    actualizacion.recuperar_aviso_del_pull(repositorio)
+    assert len(llamadas) == cantidad
+    assert actualizacion.leer_novedades_instaladas(repositorio) == []
+
+
+def test_abrir_despues_de_un_commit_local_no_muestra_actualizacion(repositorio, monkeypatch):
+    llamadas = _git_que_responde(monkeypatch, {
+        "reflog": _respuesta(salida="commit: Mejora local\n"),
+    })
+    actualizacion.recuperar_aviso_del_pull(repositorio)
+    assert actualizacion.leer_novedades_instaladas(repositorio) == []
+    assert len(llamadas) == 1
 
 
 def test_el_boton_aparece_solo_con_commits_nuevos(window):

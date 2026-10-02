@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from PySide6.QtCore import QByteArray, QBuffer, QIODevice, Qt
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import QDialog
+
 from app.gui import web_reports_window as modulo_ventana
 from app.airvault.config import AirVaultConfig
 from app.airvault.correcciones import (
     ACCION_BORRAR,
     ACCION_REINDEXAR,
     ACCION_REVISAR,
+    Copia,
     Resultado,
 )
 from app.airvault.web_reports import TIPO_MAL_INDEXADA, parsear_filas
 from app.gui.web_reports_window import ADVERTENCIA_CORRECCION, WebReportsWindow
+from app.gui.revision_copias_dialog import RevisionCopiasDialog
 
 
 def _fila(matricula: str, detalle: str) -> list[dict[str, str]]:
@@ -312,3 +319,57 @@ def test_elegir_la_mal_indexada_sola_no_la_da_por_reindexable(
         assert "primero se quitan las copias" in plan[0].motivo
     finally:
         ventana.close()
+
+
+def test_desactivar_revision_durante_el_trabajo_llega_al_worker(app, tmp_path):
+    ventana = WebReportsWindow(tmp_path)
+    worker = modulo_ventana.CorreccionWorker(AirVaultConfig(), [], ventana)
+    worker.mostrar_previas = True
+    ventana._worker = worker
+    ventana._habilitar(False)
+    assert ventana.mostrar_previas.isEnabled()
+    ventana.mostrar_previas.setChecked(False)
+    assert not worker.mostrar_previas
+    ventana.mostrar_previas.setChecked(True)
+    assert worker.mostrar_previas
+
+
+def test_la_previa_que_ya_estaba_en_cola_respeta_desactivar(app, tmp_path, monkeypatch):
+    ventana = WebReportsWindow(tmp_path)
+    worker = modulo_ventana.CorreccionWorker(AirVaultConfig(), [], ventana)
+    ventana._worker = worker
+    monkeypatch.setattr(ventana, "sender", lambda: worker)
+    ventana._revisar_copias(None, [], {"posterior"})
+    assert worker._respuesta_previa.is_set()
+    assert worker._seleccion_previa == {"posterior"}
+
+
+def test_el_boton_del_visor_continua_y_apaga_las_siguientes_previas(app, tmp_path, monkeypatch):
+    ventana = WebReportsWindow(tmp_path)
+    worker = modulo_ventana.CorreccionWorker(AirVaultConfig(), [], ventana)
+    worker.mostrar_previas = True
+    ventana._worker = worker
+    monkeypatch.setattr(ventana, "sender", lambda: worker)
+    pixmap = QPixmap(100, 100)
+    pixmap.fill(Qt.GlobalColor.white)
+    datos = QByteArray()
+    buffer = QBuffer(datos)
+    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    pixmap.save(buffer, "PNG")
+    vistas = [
+        (Copia(str(i), str(i), str(i), datetime(2026, 1, i + 1), "HP-9913CMP", 1, "LOG PAGE"), bytes(datos))
+        for i in range(3)
+    ]
+    correccion = _excepciones(("HP-9913CMP", "DUPLICATED 2008159(3x)"))[0]
+
+    def aceptar_default(dialogo):
+        dialogo.lista.item(0).setCheckState(Qt.CheckState.Checked)
+        dialogo.predeterminadas.click()
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(RevisionCopiasDialog, "exec", aceptar_default)
+    ventana._revisar_copias(correccion, vistas, {"1", "2"})
+    assert worker._seleccion_previa == {"1", "2"}
+    assert not worker.mostrar_previas
+    assert not ventana.mostrar_previas.isChecked()
+    assert ventana._revision_actual is None

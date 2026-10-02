@@ -21,12 +21,14 @@ from loguru import logger
 from PySide6.QtCore import QThread, Signal
 
 from app.utils.no_console import CREATE_NO_WINDOW
+from app.utils.preferencias_ui import guardar_opcion, leer_opcion
 
 # ``git fetch`` va a la red; si no contesta en este tiempo se da por no
 # disponible y se vuelve a intentar en la siguiente consulta.
 _ESPERA_FETCH_S = 30
 _ESPERA_PULL_S = 120
 _ESPERA_LOCAL_S = 10
+_NOVEDADES_INSTALADAS = "actualizacion.commits_instalados"
 
 
 def _git(raiz: Path, *argumentos: str, espera: float) -> subprocess.CompletedProcess:
@@ -97,6 +99,13 @@ def traer_version_nueva(raiz: Path) -> tuple[bool, str]:
     ``--ff-only`` solo avanza la copia local: si hay cambios propios que no
     encajan, Git se niega y la carpeta queda como estaba.
     """
+    anterior = ""
+    try:
+        revision = _git(raiz, "rev-parse", "HEAD", espera=_ESPERA_LOCAL_S)
+        if revision.returncode == 0:
+            anterior = revision.stdout.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.info(f"No se pudo identificar la version anterior: {exc}")
     try:
         resultado = _git(raiz, "pull", "--ff-only", espera=_ESPERA_PULL_S)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -106,7 +115,63 @@ def traer_version_nueva(raiz: Path) -> tuple[bool, str]:
         for parte in (resultado.stdout, resultado.stderr)
         if parte.strip()
     )
-    return resultado.returncode == 0, salida
+    ok = resultado.returncode == 0
+    if ok and anterior:
+        _guardar_novedades(raiz, anterior)
+    return ok, salida
+
+
+def _guardar_novedades(raiz: Path, anterior: str) -> None:
+    """Anota solo los commits incorporados por el pull que acaba de terminar."""
+    try:
+        historia = _git(
+            raiz, "log", "--reverse", "--format=%h %s", f"{anterior}..HEAD",
+            espera=_ESPERA_LOCAL_S,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.info(f"No se pudieron leer los cambios instalados: {exc}")
+        return
+    if historia.returncode != 0:
+        return
+    nuevos = [linea.strip() for linea in historia.stdout.splitlines() if linea.strip()]
+    if nuevos:
+        # Si el reinicio anterior fallo, conserva tambien su aviso pendiente.
+        pendientes = leer_novedades_instaladas(raiz)
+        pendientes.extend(linea for linea in nuevos if linea not in pendientes)
+        if not guardar_opcion(_NOVEDADES_INSTALADAS, pendientes, raiz):
+            logger.warning("No se pudo guardar el aviso de actualizacion")
+
+
+def leer_novedades_instaladas(raiz: Path) -> list[str]:
+    """El aviso pendiente vive junto al programa y se lee sin red ni Git."""
+    datos = leer_opcion(_NOVEDADES_INSTALADAS, [], raiz)
+    if not isinstance(datos, list):
+        return []
+    return [dato for dato in datos if isinstance(dato, str) and dato.strip()]
+
+
+def confirmar_novedades_instaladas(raiz: Path) -> None:
+    """Tras cerrar el aviso, el siguiente arranque ya no lo repite."""
+    if not guardar_opcion(_NOVEDADES_INSTALADAS, [], raiz):
+        logger.warning("No se pudo confirmar el aviso de actualizacion")
+
+
+def recuperar_aviso_del_pull(raiz: Path) -> None:
+    """Recupera el primer aviso si el pull lo hizo una version sin esta funcion."""
+    if leer_opcion(_NOVEDADES_INSTALADAS, raiz=raiz) is not None:
+        return
+    if shutil.which("git") is None or not (raiz / ".git").exists():
+        return
+    try:
+        ultimo = _git(
+            raiz, "reflog", "-1", "--format=%gs", "HEAD", espera=_ESPERA_LOCAL_S,
+        )
+        if ultimo.returncode == 0 and ultimo.stdout.strip().startswith("pull "):
+            previo = _git(raiz, "rev-parse", "HEAD@{1}", espera=_ESPERA_LOCAL_S)
+            if previo.returncode == 0 and previo.stdout.strip():
+                _guardar_novedades(raiz, previo.stdout.strip())
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.info(f"No se pudo recuperar el aviso del ultimo pull: {exc}")
 
 
 class BuscarActualizacionWorker(QThread):

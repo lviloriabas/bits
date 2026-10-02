@@ -260,6 +260,8 @@ class CorreccionWorker(_TrabajoEnEdge):
         try:
             if self._cancelado():
                 raise ConsultaCancelada()
+            if not self.mostrar_previas:
+                return set(elegidas)
             self._respuesta_previa.clear()
             self._seleccion_previa = None
             self.previa.emit(correccion, vistas, elegidas)
@@ -277,9 +279,9 @@ class CorreccionWorker(_TrabajoEnEdge):
         # haya leído el plan y lo haya autorizado. Cada caso se sigue
         # comprobando contra la pantalla antes de escribir nada.
         corrector = CorrectorLogPageAudit(self._config)
-        if self.mostrar_previas:
-            corrector.revisar = self._revisar
-            corrector.cache_previa = self.cache_previa
+        corrector.revisar = self._revisar
+        corrector.revision_activa = lambda: self.mostrar_previas
+        corrector.cache_previa = self.cache_previa
         return corrector.aplicar(
             self._plan,
             avisar=self.avance.emit,
@@ -339,6 +341,7 @@ class WebReportsWindow(QDialog):
         self._raiz = Path(raiz)
         self._config = AirVaultConfig.load(self._raiz / AIRVAULT_FILENAME)
         self._worker: Optional[_TrabajoEnEdge] = None
+        self._revision_actual = None
         self._cerrar_al_terminar = False
         self._resultados: list[ExcepcionLogPageAudit] = []
         # Si ahora mismo no hay ningún trabajo en Edge. Lo consulta el
@@ -547,6 +550,7 @@ class WebReportsWindow(QDialog):
         # Mirar las páginas antes de borrarlas cuesta cargarlas, así que
         # quien trabaja sin ellas las apaga: apagadas se quedan.
         recordar(WEB_REPORTS, "revisar_imagenes", self.mostrar_previas)
+        self.mostrar_previas.toggled.connect(self._cambiar_revision)
         self._cache_previa = {}
         cuerpo.addWidget(self.mostrar_previas)
         cuerpo.addLayout(self._fila_botones())
@@ -695,15 +699,32 @@ class WebReportsWindow(QDialog):
         )
         worker.start()
 
+    def _cambiar_revision(self, activa):
+        worker = self._worker
+        if isinstance(worker, CorreccionWorker):
+            worker.mostrar_previas = activa
+            if not activa and self._revision_actual is not None:
+                self._revision_actual.usar_predeterminadas()
+
     def _revisar_copias(self, correccion, vistas, elegidas):
         from app.gui.revision_copias_dialog import RevisionCopiasDialog
         worker = self.sender()
         if worker is not self._worker or worker._cancelado():
             worker.responder_previa(None)
             return
+        if not worker.mostrar_previas:
+            worker.responder_previa(set(elegidas))
+            return
         dialogo = RevisionCopiasDialog(correccion, vistas, elegidas, self)
-        aceptado = dialogo.exec() == QDialog.DialogCode.Accepted
-        worker.responder_previa(dialogo.seleccionadas() if aceptado else None)
+        self._revision_actual = dialogo
+        try:
+            aceptado = dialogo.exec() == QDialog.DialogCode.Accepted
+            if aceptado and dialogo.continuar_con_predeterminadas:
+                self.mostrar_previas.setChecked(False)
+            worker.responder_previa(dialogo.seleccionadas() if aceptado else None)
+        finally:
+            self._revision_actual = None
+            dialogo.deleteLater()
 
     def _autorizado(self, plan: list[Correccion]) -> bool:
         """Lo que va a pasar, por escrito, antes de tocar nada.

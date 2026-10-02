@@ -95,7 +95,13 @@ from app.gui.responsive import (
     fit_to_screen,
 )
 from app.gui.table_sort import ColumnSortController
-from app.gui.actualizacion import ActualizarWorker, BuscarActualizacionWorker
+from app.gui.actualizacion import (
+    ActualizarWorker,
+    BuscarActualizacionWorker,
+    confirmar_novedades_instaladas,
+    leer_novedades_instaladas,
+    recuperar_aviso_del_pull,
+)
 from app.gui.airvault_window import AIRVAULT_TOOLTIP, AirVaultWindow
 from app.gui.web_reports_window import (
     WEB_REPORTS_TOOLTIP,
@@ -120,6 +126,8 @@ from app.gui.tokens import (
     RADIUS_CARD,
     RADIUS_CONTROL,
     WEIGHT_STRONG,
+    blend,
+    on_accent_text,
     paleta,
     qss_vars,
     tema,
@@ -808,6 +816,21 @@ class MainWindow(QMainWindow):
         self._load_default_input()
 
     # ── Versión nueva ───────────────────────────────────────────────────
+
+    def mostrar_novedades_instaladas(self) -> None:
+        """En el siguiente arranque, muestra una vez lo que instalo el boton."""
+        recuperar_aviso_del_pull(SCRIPT_DIR)
+        novedades = leer_novedades_instaladas(SCRIPT_DIR)
+        if not novedades:
+            return
+        aviso = QMessageBox(self)
+        aviso.setWindowTitle("Actualización instalada")
+        aviso.setIcon(QMessageBox.Icon.Information)
+        aviso.setTextFormat(Qt.TextFormat.PlainText)
+        aviso.setText("Se instalaron estos cambios:\n\n" + "\n".join(novedades))
+        aviso.addButton("Aceptar", QMessageBox.ButtonRole.AcceptRole)
+        aviso.exec()
+        confirmar_novedades_instaladas(SCRIPT_DIR)
 
     def vigilar_actualizaciones(self) -> None:
         """Pregunta ahora si hay versión nueva y luego cada media hora."""
@@ -1609,9 +1632,10 @@ class MainWindow(QMainWindow):
         self.busy_label.setToolTip("Procesamiento en curso")
 
         # Solo aparece cuando el repositorio tiene commits que esta copia no
-        # tiene. Va primero en la fila y en el color de aviso para que se
+        # tiene. Va primero en la fila y con el amarillo de aviso para que se
         # vea sin ocupar una franja propia.
         self.btn_actualizar = QPushButton(_ACTUALIZAR_TEXTO)
+        self.btn_actualizar.setObjectName("actualizarButton")
         self.btn_actualizar.setCursor(Qt.CursorShape.PointingHandCursor)
         pintar_del_tema(self.btn_actualizar, _hoja_de_actualizar)
         self.btn_actualizar.clicked.connect(self._actualizar_aplicacion)
@@ -5387,14 +5411,24 @@ class MainWindow(QMainWindow):
 
 
 def _hoja_de_actualizar() -> str:
-    """El botón de versión nueva, en el color de aviso del tema."""
+    """El aviso amarillo comparte las medidas de todos los botones."""
     c = paleta()
+    aviso = c.UPDATE_BG
+    hover = blend(c.TEXT, aviso, 0.10)
+    pulsado = blend(c.WINDOW_BG, aviso, 0.12)
     return (
-        f"QPushButton {{ color: {c.STATUS_WARNING}; "
-        f"border: 1px solid {c.STATUS_WARNING}; "
-        f"border-radius: {RADIUS_CONTROL}px; font-weight: {WEIGHT_STRONG}; }}"
-        f"QPushButton:disabled {{ color: {c.TEXT_DISABLED}; "
-        f"border-color: {c.PANE_BORDER}; }}"
+        "QPushButton#actualizarButton {"
+        f"background-color: {aviso}; border: 1px solid {aviso}; "
+        f"border-radius: {RADIUS_CONTROL}px; "
+        f"color: {on_accent_text(aviso)}; font-weight: {WEIGHT_STRONG};"
+        "} QPushButton#actualizarButton:hover {"
+        f"background-color: {hover}; border-color: {hover};"
+        "} QPushButton#actualizarButton:pressed {"
+        f"background-color: {pulsado}; border-color: {pulsado};"
+        "} QPushButton#actualizarButton:disabled {"
+        f"background-color: {c.CONTROL_DISABLED}; border-color: {c.PANE_BORDER}; "
+        f"color: {c.TEXT_DISABLED};"
+        "}"
     )
 
 

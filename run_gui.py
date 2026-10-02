@@ -70,6 +70,7 @@ def main() -> int:
     # Detectar PDFs y calcular la estimación puede tocar archivos grandes.
     # Se difiere para que la ventana sea visible inmediatamente.
     QTimer.singleShot(0, window.load_initial_data)
+    QTimer.singleShot(0, window.mostrar_novedades_instaladas)
     # Pregunta al repositorio si hay versión nueva. Va en un hilo y solo
     # muestra el botón de actualizar si la copia local quedó atrás.
     QTimer.singleShot(0, window.vigilar_actualizaciones)

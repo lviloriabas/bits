@@ -130,6 +130,9 @@ class Paleta:
     STATUS_OK: str
     STATUS_WARNING: str
     STATUS_ERROR: str
+    # El amarillo de actualizacion rellena un boton. El aviso claro de arriba
+    # es oscuro para texto sobre blanco y no sirve como fondo amarillo.
+    UPDATE_BG: str
 
     # La tabla. La fila alterna y la cabecera son tonos propios porque tienen
     # que separarse del fondo de la tabla sin llegar al de un control.
@@ -194,6 +197,7 @@ OSCURA = _con_alias(
     STATUS_OK="#6ccb5f",
     STATUS_WARNING="#fce100",
     STATUS_ERROR="#ff99a4",
+    UPDATE_BG="#fce100",
     TABLE_ALTERNATE_BG="#313131",
     TABLE_HEADER_BG="#252525",
     SCROLL_HANDLE_HOVER="#5f5f5f",
@@ -221,6 +225,7 @@ CLARA = _con_alias(
     STATUS_OK="#0f7b0f",
     STATUS_WARNING="#9d5d00",
     STATUS_ERROR="#c42b1c",
+    UPDATE_BG="#fce100",
     TABLE_ALTERNATE_BG="#f7f7f7",
     TABLE_HEADER_BG="#f3f3f3",
     SCROLL_HANDLE_HOVER="#8a8a8a",

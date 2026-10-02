@@ -327,6 +327,23 @@ def test_omitir_preview_no_abre_borrado(monkeypatch):
     assert not any("onDeletePage" in orden for orden in pagina.ordenes)
 
 
+def test_apagar_revision_conserva_la_mas_antigua_sin_descargar_imagenes(monkeypatch, tmp_path):
+    pagina = _PaginaFalsa(_REJILLA, [_REJILLA[1]])
+    corrector = CorrectorLogPageAudit(AirVaultConfig(), ResolutorFlota())
+    corrector.auditoria = tmp_path / "auditoria.jsonl"
+    corrector.revision_activa = lambda: False
+
+    def no_revisar(*_):
+        pytest.fail("El visor apagado no debe descargar ni pedir una revision")
+
+    corrector.revisar = no_revisar
+    monkeypatch.setattr(corrector, "_imagen_previa", no_revisar)
+    correccion = planificar(_excepciones(("HP-9913CMP", "DUPLICATED 2008159(2x)")))[0]
+    assert corrector._borrar(pagina, correccion, copias_en(_REJILLA, "2008159"), False).hecho
+    pedidas = [orden for orden in pagina.ordenes if "onDeletePage" in orden]
+    assert len(pedidas) == 1 and ')("1_3209_884_1_1_0"' in pedidas[0]
+
+
 def test_cada_copia_se_queda_con_la_clave_de_su_documento() -> None:
     """Borrar por posición cae en otro documento en cuanto falta una fila.
 

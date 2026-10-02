@@ -668,6 +668,7 @@ class CorrectorLogPageAudit:
     ) -> None:
         self.config = config
         self.revisar = None
+        self.revision_activa = None
         self.cache_previa: dict[tuple, bytes] = {}
         self._candado_previa = Lock()
         self.auditoria = app_root() / "output" / "airvault" / "correcciones_auditoria.jsonl"
@@ -935,7 +936,7 @@ class CorrectorLogPageAudit:
             )
         if len({c.clave for c in copias}) != len(copias):
             return Resultado(correccion, detalle="La búsqueda repite una misma clave; no se elimina.")
-        if self.revisar is not None:
+        if self.revisar is not None and (self.revision_activa is None or self.revision_activa()):
             vistas = [(c, self._imagen_previa(pagina, c)) for c in copias]
             elegidas = self.revisar(correccion, vistas, {c.clave for c in sobran})
             if not elegidas:
@@ -1004,7 +1005,7 @@ class CorrectorLogPageAudit:
                 salida.write(json.dumps(registro, ensure_ascii=False) + "\n")
 
     def _imagen_previa(self, pagina: _Pagina, copia: Copia) -> bytes:
-        """Miniatura de la misma imagen PNG que abre el visor de AirVault."""
+        """Vista legible de la misma imagen PNG que abre el visor de AirVault."""
         clave = (copia.clave, copia.cuando, copia.imagenes)
         with self._candado_previa:
             if clave in self.cache_previa:
@@ -1020,7 +1021,7 @@ class CorrectorLogPageAudit:
           img.onload = () => {
             clearTimeout(timer);
             try {
-              const scale = Math.min(1, 1000 / Math.max(img.naturalWidth, img.naturalHeight));
+              const scale = Math.min(1, 2400 / Math.max(img.naturalWidth, img.naturalHeight));
               const canvas = document.createElement('canvas');
               canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
               canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
