@@ -418,10 +418,6 @@ class WebReportsWindow(QDialog):
         grid.addWidget(self.filtro_combo, 0, 6)
         grid.setColumnStretch(7, 1)
 
-        self.sin_inicio = QCheckBox("Sin límite inicial")
-        self.sin_inicio.toggled.connect(lambda marcado: self.desde_edit.setEnabled(not marcado))
-        grid.addWidget(self.sin_inicio, 1, 1)
-
         opciones = QGridLayout()
         opciones.setHorizontalSpacing(SPACE_S)
         opciones.setVerticalSpacing(self._densidad.group_spacing)
@@ -455,14 +451,14 @@ class WebReportsWindow(QDialog):
         self.actualizar_combo = self._combo("actualizar", OPCIONES_ACTUALIZAR, "1")
         self.actualizar_combo.setToolTip("YES regenera los datos; NO usa el reporte guardado por AirVault.")
         opciones.addWidget(self.actualizar_combo, 3, 1)
-        grid.addLayout(opciones, 2, 0, 1, 8)
+        grid.addLayout(opciones, 1, 0, 1, 8)
 
         ayuda = QLabel(
             "Las celdas subrayadas abren la página o el libro en Web Search."
         )
         ayuda.setWordWrap(True)
         pintar_del_tema(ayuda, lambda: f"color: {color_ayuda()};")
-        grid.addWidget(ayuda, 3, 0, 1, 8)
+        grid.addWidget(ayuda, 2, 0, 1, 8)
         cuerpo.addWidget(consulta)
         # Con el cuadro ya colgado de la ventana, que es cuando los campos
         # heredan la hoja de estilo y saben cuánto miden de verdad.
@@ -835,9 +831,9 @@ class WebReportsWindow(QDialog):
             return
         self.desde_edit.interpretText()
         self.hasta_edit.interpretText()
-        desde = None if self.sin_inicio.isChecked() else self.desde_edit.date().toPython()
+        desde = self.desde_edit.date().toPython()
         hasta = self.hasta_edit.date().toPython()
-        if desde is not None and hasta is not None and desde > hasta:
+        if desde > hasta:
             self.resumen.setText(
                 "La fecha inicial no puede ser posterior a la fecha final."
             )
@@ -1114,15 +1110,12 @@ class WebReportsWindow(QDialog):
             self.desde_edit,
             self.hasta_edit,
             self.filtro_combo,
-            self.sin_inicio,
             self.repositorio_combo, self.libro_combo, self.minimo_combo,
             self.aeronaves_edit, self.bitacoras_edit, self.orden_combo,
             self.actualizar_combo,
             self.boton_consultar,
         ):
             control.setEnabled(habilitado)
-        self.desde_edit.setEnabled(habilitado and not self.sin_inicio.isChecked())
-        self.hasta_edit.setEnabled(habilitado)
         # Corregir solo se ofrece cuando hay algo que el reporte deje
         # decidido. Con la tabla vacía, o con todo pendiente de revisar a
         # mano, el botón no tendría nada que hacer; y el de la selección

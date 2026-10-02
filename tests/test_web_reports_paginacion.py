@@ -222,10 +222,11 @@ def test_los_menus_corresponden_a_airvault_y_mostrar_solo_ofrece_tres(app, tmp_p
         assert ventana._parametros_consulta().actualizar == "1"
         ventana.actualizar_combo.setCurrentIndex(1)
         assert ventana._parametros_consulta().actualizar == "2"
-        ventana.sin_inicio.setChecked(True)
         ventana._habilitar(False)
-        ventana._habilitar(True)
         assert not ventana.desde_edit.isEnabled()
+        assert not ventana.hasta_edit.isEnabled()
+        ventana._habilitar(True)
+        assert ventana.desde_edit.isEnabled()
         assert ventana.hasta_edit.isEnabled()
         ventana.minimo_combo.setCurrentIndex(4)
         ventana.libro_combo.setCurrentIndex(2)
