@@ -44,7 +44,6 @@ from app.airvault.web_reports import (
     OPCIONES_MINIMO,
     OPCIONES_MOSTRAR,
     OPCIONES_ORDEN,
-    OPCIONES_EXPORTAR,
     OPCIONES_ACTUALIZAR,
     ParametrosLogPageAudit,
     TIPO_DUPLICADA,
@@ -54,6 +53,7 @@ from app.airvault.web_reports import (
     ExcepcionLogPageAudit,
     abrir_en_web_search,
 )
+from app.utils.preferencias_ui import leer_opcion
 from app.gui.cronometro import Cronometro, cronometro_qss
 from app.gui.memoria import WEB_REPORTS, recordar
 from app.gui.responsive import fit_to_screen
@@ -440,14 +440,10 @@ class WebReportsWindow(QDialog):
         self.orden_combo = self._combo("orden", OPCIONES_ORDEN)
         opciones.addWidget(self.orden_combo, 2, 3)
 
-        opciones.addWidget(QLabel("Para exportar:"), 3, 0)
-        self.exportar_combo = self._combo("para_exportar", OPCIONES_EXPORTAR)
-        self.exportar_combo.setToolTip("For Export: elige el formato del reporte de AirVault.")
-        opciones.addWidget(self.exportar_combo, 3, 1)
-        opciones.addWidget(QLabel("Actualizar datos:"), 3, 2)
-        self.actualizar_combo = self._combo("actualizar", OPCIONES_ACTUALIZAR, "2")
-        self.actualizar_combo.setToolTip("Refresh: Sí regenera los datos; No usa el reporte guardado por AirVault.")
-        opciones.addWidget(self.actualizar_combo, 3, 3)
+        opciones.addWidget(QLabel("Refresh:"), 3, 0)
+        self.actualizar_combo = self._combo("actualizar", OPCIONES_ACTUALIZAR, "1")
+        self.actualizar_combo.setToolTip("YES regenera los datos; NO usa el reporte guardado por AirVault.")
+        opciones.addWidget(self.actualizar_combo, 3, 1)
         grid.addLayout(opciones, 2, 0, 1, 8)
 
         ayuda = QLabel(
@@ -784,6 +780,22 @@ class WebReportsWindow(QDialog):
             control.setCurrentIndex(control.findData(defecto))
         configure_combo_box(control, 0)
         control.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        # Conserva las elecciones anteriores sin agregar alias al menu.
+        anteriores = {
+            "repositorio": {"Producción": "1", "Pruebas": "2"},
+            "tipo_libro": {"Todos": "1"},
+            "orden": {
+                "Aeronave y número inicial de página": "1",
+                "Aeronave y fecha inicial del libro": "2",
+                "Aeronave y fecha final del libro": "3",
+            },
+            "actualizar": {"Sí": "1", "No": "2"},
+        }
+        guardado = leer_opcion(f"{WEB_REPORTS}.{nombre}")
+        if isinstance(guardado, str):
+            valor = anteriores.get(nombre, {}).get(guardado)
+            if valor is not None:
+                control.setCurrentIndex(control.findData(valor))
         recordar(WEB_REPORTS, nombre, control)
         return control
 
@@ -795,7 +807,6 @@ class WebReportsWindow(QDialog):
             bitacoras=self.bitacoras_edit.text(),
             minimo_paginas=self.minimo_combo.currentData(),
             orden=self.orden_combo.currentData(),
-            para_exportar=self.exportar_combo.currentData(),
             actualizar=self.actualizar_combo.currentData(),
         )
 
@@ -1095,7 +1106,7 @@ class WebReportsWindow(QDialog):
             self.sin_inicio,
             self.repositorio_combo, self.libro_combo, self.minimo_combo,
             self.aeronaves_edit, self.bitacoras_edit, self.orden_combo,
-            self.exportar_combo, self.actualizar_combo,
+            self.actualizar_combo,
             self.boton_consultar,
         ):
             control.setEnabled(habilitado)

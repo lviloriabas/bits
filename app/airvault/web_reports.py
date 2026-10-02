@@ -41,8 +41,8 @@ FILTRO_DUPLICADAS = "10"
 
 # Valores comprobados en el formulario de produccion de Log Page Audit.
 # SSRS usa posiciones del desplegable, no los numeros que muestra.
-OPCIONES_REPOSITORIO = (("Producción", "1"), ("Pruebas", "2"))
-OPCIONES_LIBRO = (("Todos", "1"), ("Copa-6", "2"), ("Copa-7", "3"))
+OPCIONES_REPOSITORIO = (("REPO: Copa:MX:MXDocs", "1"), ("REPO: Copa:MX:MXDocs Test", "2"))
+OPCIONES_LIBRO = (("(ALL)", "1"), ("Copa-6", "2"), ("Copa-7", "3"))
 OPCIONES_MINIMO = tuple((str(n), str(i)) for i, n in enumerate((5, 10, 25, 40, 50), 1))
 OPCIONES_MOSTRAR = (
     ("Ambas", (FILTRO_MAL_INDEXADAS, FILTRO_DUPLICADAS)),
@@ -50,12 +50,11 @@ OPCIONES_MOSTRAR = (
     ("Solo duplicadas", (FILTRO_DUPLICADAS,)),
 )
 OPCIONES_ORDEN = (
-    ("Aeronave y número inicial de página", "1"),
-    ("Aeronave y fecha inicial del libro", "2"),
-    ("Aeronave y fecha final del libro", "3"),
+    ("AC#, Start Page Number", "1"),
+    ("AC#, Book Start Date", "2"),
+    ("AC#, Book End Date", "3"),
 )
-OPCIONES_EXPORTAR = (("No", "1"), ("Sí", "2"))
-OPCIONES_ACTUALIZAR = (("Sí", "1"), ("No", "2"))
+OPCIONES_ACTUALIZAR = (("YES", "1"), ("NO", "2"))
 
 
 @dataclass(frozen=True)
@@ -66,8 +65,7 @@ class ParametrosLogPageAudit:
     bitacoras: str = ""
     minimo_paginas: str = "1"
     orden: str = "1"
-    para_exportar: str = "1"
-    actualizar: str = "2"
+    actualizar: str = "1"
 
     def validar(self) -> None:
         for valor, opciones in (
@@ -75,7 +73,6 @@ class ParametrosLogPageAudit:
             (self.tipo_libro, OPCIONES_LIBRO),
             (self.minimo_paginas, OPCIONES_MINIMO),
             (self.orden, OPCIONES_ORDEN),
-            (self.para_exportar, OPCIONES_EXPORTAR),
             (self.actualizar, OPCIONES_ACTUALIZAR),
         ):
             if valor not in {v for _nombre, v in opciones}:
@@ -562,7 +559,7 @@ class ClienteLogPageAudit:
             f"{_CONTROL}ctl15_ddValue": parametros.minimo_paginas,
             f"{_CONTROL}ctl17_ddValue": filtro,
             f"{_CONTROL}ctl19_ddValue": parametros.orden,
-            f"{_CONTROL}ctl21_ddValue": parametros.para_exportar,
+            f"{_CONTROL}ctl21_ddValue": "1",  # For Export siempre NO.
             f"{_CONTROL}ctl23_ddValue": parametros.actualizar,
         }
 

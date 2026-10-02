@@ -192,7 +192,7 @@ def test_escribe_todos_los_parametros_y_los_null_en_el_formulario_real_js(
     monkeypatch.setattr(ClienteLogPageAudit, "_esperar_reporte", staticmethod(lambda *args: comprobaciones.append(args)))
     monkeypatch.setattr(ClienteLogPageAudit, "_leer_todas_paginas", staticmethod(lambda *_a: []))
     parametros = ParametrosLogPageAudit(tipo_libro="3", aeronaves="HP-9913CMP", bitacoras="2008152",
-                                      minimo_paginas="5", orden="3", para_exportar="2", actualizar="1")
+                                      minimo_paginas="5", orden="3", actualizar="2")
     ClienteLogPageAudit(AirVaultConfig())._correr_reporte(
         DOM(), None if sin_inicio else date(2026, 9, 7),
         None if sin_fin else date(2026, 10, 2), "10", parametros)
@@ -204,7 +204,7 @@ def test_escribe_todos_los_parametros_y_los_null_en_el_formulario_real_js(
     assert [puestos[_CONTROL + id]["value"] for id in (
         "ctl05_ddValue", "ctl11_txtValue", "ctl13_txtValue", "ctl15_ddValue",
         "ctl17_ddValue", "ctl19_ddValue", "ctl21_ddValue", "ctl23_ddValue")
-    ] == ["3", "HP-9913CMP", "2008152", "5", "10", "3", "2", "1"]
+    ] == ["3", "HP-9913CMP", "2008152", "5", "10", "3", "1", "2"]
     assert engine.evaluate("envios").toInt() == 1
     assert comprobaciones[0][2] == 1
 
@@ -217,6 +217,11 @@ def test_los_menus_corresponden_a_airvault_y_mostrar_solo_ofrece_tres(app, tmp_p
         for control, opciones in ((ventana.libro_combo, OPCIONES_LIBRO),
                                   (ventana.minimo_combo, OPCIONES_MINIMO), (ventana.orden_combo, OPCIONES_ORDEN)):
             assert [(control.itemText(i), control.itemData(i)) for i in range(control.count())] == list(opciones)
+        assert not hasattr(ventana, "exportar_combo")
+        assert ventana.actualizar_combo.currentText() == "YES"
+        assert ventana._parametros_consulta().actualizar == "1"
+        ventana.actualizar_combo.setCurrentIndex(1)
+        assert ventana._parametros_consulta().actualizar == "2"
         ventana.sin_inicio.setChecked(True)
         ventana._habilitar(False)
         ventana._habilitar(True)
@@ -249,3 +254,26 @@ def test_el_cliente_rechaza_fechas_futuras_antes_de_abrir_edge(inicio, fin):
 def test_un_rango_invertido_se_rechaza_antes_de_abrir_edge():
     with pytest.raises(ValueError, match="posterior a la final"):
         ClienteLogPageAudit(AirVaultConfig()).consultar(date(2026, 9, 7), date(2026, 9, 1), ["10"])
+
+
+@pytest.mark.parametrize("nombre,guardado,control,valor", [
+    ("repositorio", "Pruebas", "repositorio_combo", "2"),
+    ("tipo_libro", "Todos", "libro_combo", "1"),
+    ("orden", "Aeronave y fecha final del libro", "orden_combo", "3"),
+    ("actualizar", "No", "actualizar_combo", "2"),
+])
+def test_renombrar_las_opciones_conserva_el_filtro_guardado(
+    app, tmp_path, opciones_de_interfaz, nombre, guardado, control, valor,
+):
+    opciones_de_interfaz.write_text(json.dumps({
+        f"web_reports.{nombre}": guardado,
+        "web_reports.para_exportar": "Sí",
+    }), encoding="utf-8")
+    ventana = WebReportsWindow(tmp_path)
+    try:
+        combo = getattr(ventana, control)
+        assert combo.currentData() == valor
+        assert combo.findText(guardado) == -1
+        assert not hasattr(ventana._parametros_consulta(), "para_exportar")
+    finally:
+        ventana.close()
