@@ -84,8 +84,6 @@ ACCION_REVISAR = "Revisar a mano"
 # Presupuesto prudente por pestaña, incluida la carga de imágenes. No es una
 # medida del consumo de AirVault: se vuelve a consultar la RAM al repartir.
 _MEMORIA_PESTANA_MB = 768
-# La memoria manda, pero el servidor compartido no recibe más de cuatro casos.
-_MAX_CORRECCIONES = 4
 _CANDADO_AUDITORIA = Lock()
 
 
@@ -97,11 +95,9 @@ def _paralelismo_correcciones(en_curso: int = 0) -> int:
     adicionales = (
         max(0, libre - parallelism.reserved_memory_mb()) // _MEMORIA_PESTANA_MB
     )
-    return max(1, min(
-        _MAX_CORRECCIONES,
-        parallelism.available_cpu_threads(),
-        en_curso + adicionales,
-    ))
+    # Las tareas esperan al servidor en sockets independientes. No ocupan
+    # un núcleo continuamente, por eso el reparto lo limita la RAM.
+    return max(1, en_curso + adicionales)
 
 # Lo que dice el boton que cierra cada cuadro de AirVault. Se busca por
 # su texto porque los cuadros de jQuery UI no le ponen identificador a
@@ -760,6 +756,8 @@ class CorrectorLogPageAudit:
         avanzar: Callable[[int, int], None],
     ) -> list[Resultado]:
         """Reparte casos completos y reduce nuevas aperturas si baja la RAM."""
+        if not pendientes:
+            return []
         sin_empezar = list(enumerate(pendientes))
         terminadas: dict[int, Resultado] = {}
         en_curso: dict[Future[Resultado], tuple[int, Correccion]] = {}
@@ -777,7 +775,10 @@ class CorrectorLogPageAudit:
 
         # La RAM de una pestaña tarda en ocuparse mientras carga. Conservar
         # el techo inicial evita repartir otra vez ese mismo presupuesto.
-        techo = _paralelismo_correcciones(0)
+        techo = min(
+            _paralelismo_correcciones(0),
+            len({correccion.log_number for correccion in pendientes}),
+        )
         with ThreadPoolExecutor(max_workers=techo) as pool:
             try:
                 while sin_empezar or en_curso:

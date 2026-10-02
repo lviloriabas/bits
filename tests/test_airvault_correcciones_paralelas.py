@@ -40,8 +40,9 @@ def _aplicar(corrector, plan, progreso=lambda *_: None, cancelar=lambda: False):
     (4096, 1800, 4, 0, 1),
     (8192, 3500, 8, 0, 2),
     (16384, 5000, 12, 0, 3),
-    (32768, 10000, 64, 0, 4),
-    (32768, 10000, 1, 0, 1),
+    (32768, 10000, 64, 0, 9),
+    (32768, 10000, 1, 0, 9),
+    (65536, 60000, 64, 0, 74),
     (32768, 0, 12, 0, 1),
     (32768, 3000, 12, 0, 1),
     (8192, 2304, 8, 2, 3),
@@ -54,6 +55,37 @@ def test_reutiliza_la_ram_libre_y_la_reserva_del_equipo(
     monkeypatch.setattr(correcciones.parallelism, "available_memory_mb", lambda: libre)
     monkeypatch.setattr(correcciones.parallelism, "available_cpu_threads", lambda: hilos)
     assert correcciones._paralelismo_correcciones(activos) == esperados
+
+
+@pytest.mark.parametrize("cantidad", [6, 12])
+def test_abre_todos_los_casos_que_caben_en_ram_aunque_superen_los_hilos(
+    monkeypatch, cantidad,
+):
+    corrector = CorrectorLogPageAudit(AirVaultConfig(), ResolutorFlota())
+    barrera = Barrier(cantidad, timeout=5)
+    ocupadas = set()
+    candado = Lock()
+    picos = []
+
+    def atender(_navegador, _version, caso, _cancelar, _ensayo):
+        with candado:
+            ocupadas.add(caso.log_number)
+            picos.append(len(ocupadas))
+        barrera.wait()
+        with candado:
+            ocupadas.remove(caso.log_number)
+        return Resultado(caso, hecho=True)
+
+    monkeypatch.setattr(correcciones.parallelism, "total_memory_mb", lambda: 32768)
+    monkeypatch.setattr(correcciones.parallelism, "available_cpu_threads", lambda: 2)
+    monkeypatch.setattr(correcciones.parallelism, "available_memory_mb",
+                        lambda: 3072 + cantidad * 768)
+    monkeypatch.setattr(corrector, "_un_caso", atender)
+    resultados = _aplicar(corrector, [_caso(n) for n in range(cantidad)])
+    assert len(resultados) == cantidad
+    assert all(r.hecho for r in resultados)
+    assert max(picos) == cantidad
+    assert not ocupadas
 
 
 def test_solapa_casos_y_devuelve_resultados_en_el_orden_del_plan(monkeypatch):
