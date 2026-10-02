@@ -1571,7 +1571,7 @@ class AirVaultWindow(QDialog):
         politica.setSpacing(SPACE_S)
         politica.addWidget(self.detener_duplicados_check)
         politica.addWidget(QLabel("Porcentaje para detener:"))
-        politica.addWidget(self.porcentaje_duplicados_spin)
+        politica.addWidget(self.porcentaje_duplicados_control)
         politica.addStretch()
         cuerpo.addLayout(politica)
         cuerpo.addLayout(botones)
@@ -3075,6 +3075,8 @@ class AirVaultWindow(QDialog):
         self.porcentaje_duplicados_spin.valueChanged.connect(
             lambda _: self._guardar_politica_duplicados(self.detener_duplicados_check.isChecked())
         )
+        self.porcentaje_duplicados_control = SpinBoxWithButtons(self.porcentaje_duplicados_spin)
+        self.porcentaje_duplicados_control.setMaximumWidth(180)
         self.detener_duplicados_check.toggled.connect(self._guardar_politica_duplicados)
         fila.addStretch()
 
