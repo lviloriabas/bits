@@ -1613,10 +1613,165 @@ def test_sin_completar_batch_la_meta_es_quedar_indexado(ventana):
     ventana.completar_check.setChecked(False)
     ventana._estados = [parte(INDEXADO)]
     ventana._pintar_lotes()
+    # El ultimo punto espera la comprobacion final y el cierre del hilo.
+    assert ventana.progreso.value() == 99
+    ventana._al_comprobar({
+        "estados": ventana._estados, "planes": {}, "partes": [],
+    })
+    ventana._al_terminar()
     assert ventana.progreso.value() == 100
+    assert ventana.progreso.text() == "100% - Proceso terminado"
 
     ventana.completar_check.setChecked(True)
     assert ventana.progreso.value() == 90
+    assert ventana.progreso.format() == "%p%"
+
+
+@pytest.mark.parametrize("estado", ["completado", "autocompletado"])
+def test_el_fin_espera_al_ultimo_hilo_y_queda_en_la_bitacora(ventana, estado):
+    ventana.completar_check.setChecked(True)
+    ventana._estados = [parte(estado)]
+    ventana._al_comprobar({
+        "estados": ventana._estados, "planes": {}, "partes": [],
+    })
+
+    assert ventana.progreso.value() == 99
+    assert not any(
+        "Proceso terminado" in ventana.bitacora.item(i).text()
+        for i in range(ventana.bitacora.count())
+    )
+    ventana._al_terminar()
+
+    assert ventana.progreso.text() == "100% - Proceso terminado"
+    assert "Proceso terminado: 1 completado." in ventana.resumen.text()
+    assert "No queda trabajo automático pendiente" in ventana.bitacora.item(
+        ventana.bitacora.count() - 1
+    ).text()
+    assert ventana._linea_viva is None
+    assert not ventana._vigilando()
+
+
+@pytest.mark.parametrize("estado", [
+    "sin_subir", "buscando", "procesando", "listo", "incompleto",
+    "solo_revisar", "descuadrado", "tomado", "posible_duplicado",
+])
+def test_un_batch_pendiente_no_se_confunde_con_el_fin(ventana, estado):
+    from app.airvault.flujo import COMPLETADO
+    from app.gui.automatizacion import INDEXAR
+
+    ventana.auto_check.setChecked(False)
+    ventana._opciones.fijar(INDEXAR, False)
+    ventana._estados = [
+        parte(COMPLETADO, carpeta="hecho"), parte(estado, carpeta="pendiente"),
+    ]
+    ventana._al_comprobar({
+        "estados": ventana._estados, "planes": {}, "partes": [],
+    })
+    ventana._al_terminar()
+
+    assert ventana.progreso.value() < 100
+    assert ventana.progreso.format() == "%p%"
+    assert "Proceso terminado" not in ventana.resumen.text()
+    assert not any(
+        "Proceso terminado" in ventana.bitacora.item(i).text()
+        for i in range(ventana.bitacora.count())
+    )
+
+
+def test_el_fin_no_se_adelanta_a_un_cierre_pendiente(ventana, monkeypatch):
+    from app.airvault.flujo import INDEXADO
+
+    ventana.completar_check.setChecked(True)
+    ventana._estados = [parte(INDEXADO)]
+    cierres = []
+    monkeypatch.setattr(ventana, "_indexar", lambda **kw: cierres.append(kw))
+    ventana._al_comprobar({
+        "estados": ventana._estados, "planes": {}, "partes": [],
+    })
+    ventana._al_terminar()
+
+    assert cierres == [{"automatico": True}]
+    assert ventana.progreso.value() == 90
+    assert "Proceso terminado" not in ventana.resumen.text()
+
+
+def test_el_fin_de_revisar_distingue_la_revision_manual(ventana):
+    from app.airvault.flujo import INDEXADO
+
+    ventana.completar_check.setChecked(True)
+    revisar = parte(INDEXADO)
+    revisar.trabajo.manifiesto.solo_subir = True
+    ventana._al_comprobar({
+        "estados": [revisar], "planes": {}, "partes": [],
+    })
+    ventana._al_terminar()
+
+    assert ventana.progreso.text() == "100% - Proceso terminado"
+    ultima = ventana.bitacora.item(ventana.bitacora.count() - 1).text()
+    assert "No queda trabajo automático pendiente" in ultima
+    assert "REVISAR quedan para revisión manual" in ultima
+
+
+@pytest.mark.parametrize("estados", [[], ["cancelado"]])
+def test_una_cola_vacia_o_cancelada_no_anuncia_exito(ventana, estados):
+    ventana._al_comprobar({
+        "estados": [parte(e) for e in estados], "planes": {}, "partes": [],
+    })
+    ventana._al_terminar()
+
+    assert ventana.progreso.value() == 0
+    assert ventana.progreso.format() == "%p%"
+    assert "Proceso terminado" not in ventana.resumen.text()
+
+
+def test_una_cola_casi_terminada_no_redondea_al_cien_por_ciento(ventana):
+    from app.airvault.flujo import COMPLETADO, LISTO
+
+    ventana.completar_check.setChecked(True)
+    ventana._estados = [
+        parte(COMPLETADO, carpeta=f"hecho-{i}") for i in range(199)
+    ] + [parte(LISTO, carpeta="pendiente")]
+    ventana._pintar_avance()
+
+    assert ventana.progreso.value() == 99
+    assert ventana.progreso.format() == "%p%"
+
+
+@pytest.mark.parametrize("fallo", [True, False], ids=["fallo", "cancelacion"])
+def test_un_fallo_o_cancelacion_descarta_el_aviso_de_fin(ventana, fallo):
+    from app.airvault.flujo import COMPLETADO
+
+    ventana._al_comprobar({
+        "estados": [parte(COMPLETADO)], "planes": {}, "partes": [],
+    })
+    if fallo:
+        ventana._al_fallar("No se pudo comprobar AirVault.")
+    else:
+        ventana._al_cancelar()
+    ventana._al_terminar()
+
+    assert ventana.progreso.value() < 100
+    assert "Proceso terminado" not in ventana.resumen.text()
+
+
+def test_el_fin_espera_a_las_acciones_de_la_cola(ventana, monkeypatch):
+    from app.airvault.flujo import COMPLETADO
+
+    terminado = parte(COMPLETADO)
+    ventana._al_comprobar({
+        "estados": [terminado], "planes": {}, "partes": [],
+    })
+    ventana._cola_de_acciones = [("comprobar", [terminado.trabajo])]
+    acciones = []
+    monkeypatch.setattr(
+        ventana, "_ejecutar_accion",
+        lambda modo, trabajos: acciones.append(modo) or True,
+    )
+    ventana._al_terminar()
+
+    assert acciones == ["comprobar"]
+    assert ventana.progreso.value() == 99
+    assert "Proceso terminado" not in ventana.resumen.text()
 
 
 # ── mientras escribe ───────────────────────────────────────────────

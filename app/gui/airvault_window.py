@@ -1426,6 +1426,10 @@ class AirVaultWindow(QDialog):
         # escribiendo, por carpeta: (etapa, fracción). Es lo que deja a la
         # barra moverse dentro de un batch y no solo al cambiar de estado.
         self._en_vuelo: dict[str, tuple[str, float]] = {}
+        # El final se anuncia despues de una comprobacion buena y del ultimo
+        # hilo, una sola vez para la misma cola y meta.
+        self._fin_pendiente = False
+        self._fin_confirmado: Optional[tuple] = None
         # La última línea de la bitácora mientras hay algo en marcha: gira
         # mientras trabaja y cuenta lo que falta mientras espera. Sin ella no
         # había forma de distinguir un trabajo largo de uno ya parado.
@@ -4457,6 +4461,7 @@ class AirVaultWindow(QDialog):
     def _lanzar(self, modo: str, estado: dict) -> None:
         if self._worker is not None and self._worker.isRunning():
             return
+        self._fin_pendiente = False
         self._worker_filtrado = self.solo_ejecucion_check.isChecked()
         if self._worker_filtrado:
             estado["recuperar_pendientes"] = False
@@ -4494,6 +4499,7 @@ class AirVaultWindow(QDialog):
         self._cuenta_paso = (0, 0)
         self._arrancar_reloj()
         worker.start()
+        self._pintar_avance()
         self._actualizar_latido()
         # Con el hilo ya en marcha, para que la línea de pasos de la ventana
         # principal pase a «en curso» al empezar y no al terminar.
@@ -4637,14 +4643,58 @@ class AirVaultWindow(QDialog):
             suma += min(1.0, avance / meta)
         return suma / len(partes)
 
+    def _firma_de_fin(self) -> Optional[tuple]:
+        """Identifica la cola solo si todos sus batches alcanzaron la meta."""
+        from app.airvault.flujo import (AUTOCOMPLETADO, CANCELADO,
+                                        COMPLETADO, INDEXADO)
+
+        partes = self._partes_en_cola()
+        activos = [p for p in partes if p.estado != CANCELADO]
+        if not activos:
+            return None
+        completar = self.completar_check.isChecked()
+        for parte in activos:
+            if parte.estado in (COMPLETADO, AUTOCOMPLETADO):
+                continue
+            if parte.estado == INDEXADO and (
+                not completar or parte.trabajo.manifiesto.solo_subir
+            ):
+                continue
+            return None
+        return (completar, tuple(sorted(
+            (str(p.trabajo.carpeta), p.batch_id, p.estado,
+             len(p.trabajo.manifiesto.registros),
+             p.trabajo.manifiesto.solo_subir)
+            for p in partes
+        )))
+
     def _pintar_avance(self) -> None:
         """Deja la barra en lo que lleva la cola entera."""
         if not hasattr(self, "completar_check"):
             # Todavía construyéndose: la meta depende de esa casilla.
             return
         avance = self._avance_global()
+        firma = self._firma_de_fin()
+        if firma is None:
+            self._fin_confirmado = None
+        terminado = bool(
+            firma is not None and firma == self._fin_confirmado
+            and self.hilo() is None and not self._vigilando()
+            and not self._cola_de_acciones
+            and not self._comprobar_al_terminar
+            and not self._subir_al_terminar
+            and not self._indexar_al_terminar
+        )
         self.progreso.setRange(0, 100)
-        self.progreso.setValue(0 if avance is None else round(avance * 100))
+        # El ultimo punto incluye la comprobacion y el cierre del hilo.
+        # Redondear una cola casi lista tampoco puede anunciar el 100%.
+        self.progreso.setValue(
+            100 if terminado else
+            0 if avance is None else min(99, round(avance * 100))
+        )
+        self.progreso.setFormat(
+            "%p% - Proceso terminado" if terminado else "%p%"
+        )
 
     # ── la línea viva de la bitácora ───────────────────────────────
 
@@ -4885,6 +4935,7 @@ class AirVaultWindow(QDialog):
         # Una comprobación buena borra la racha: lo que llevara fallando
         # dejó de fallar.
         self._fallos_seguidos = 0
+        self._fin_pendiente = True
         self._estado["planes"] = datos["planes"]
         self._recibir_trabajos(self._estado.get("trabajos") or self._trabajos)
         acotado = bool(datos.get("acotado"))
@@ -4964,17 +5015,11 @@ class AirVaultWindow(QDialog):
                 + self._aviso_para_subir_a_mano()
             )
         else:
-            incluye_revision = any(
-                p.trabajo.manifiesto.solo_subir for p in self._estados
-            )
             self.resumen.setText(
-                f"Proceso terminado: {conteo}."
-                + (
-                    " Las incidencias de REVISAR quedan para revisión manual."
-                    if incluye_revision else ""
-                )
+                f"Revisión terminada: {conteo}." if conteo else
+                "Revisión terminada: no hay batches en la cola."
             )
-            self.estado_label.setText("Proceso automático terminado")
+            self.estado_label.setText("Revisión terminada")
         # Una línea por batch con su rótulo, como la columna Estado. El
         # detalle entero de cada uno sigue en la ayuda de su celda.
         self._anotar(
@@ -5012,6 +5057,22 @@ class AirVaultWindow(QDialog):
     def _al_indexar(self, datos: dict) -> None:
         resultado = datos["resultado"]
         acotado = bool(datos.get("acotado"))
+        self._fin_pendiente = bool(
+            not resultado.interrumpido and not datos.get("incompleto")
+            and all(r.completado for _t, r in datos.get("cierres") or [])
+        )
+        # Una accion de la tabla no encadena una revision global. Su resultado
+        # ya confirmado debe actualizar las filas que acaba de escribir o cerrar.
+        from app.airvault.flujo import estado_local
+
+        carpetas = set(datos.get("carpetas") or [])
+        carpetas.update(str(t.carpeta) for t, _r in datos.get("cierres") or [])
+        if carpetas:
+            self._estados = [
+                estado_local(p.trabajo) if str(p.trabajo.carpeta) in carpetas
+                else p for p in self._estados
+            ]
+            self._pintar_lotes()
         if acotado:
             self._parar_vigilancia()
         lotes = datos.get("lotes", 1)
@@ -5128,6 +5189,8 @@ class AirVaultWindow(QDialog):
         return "".join(partes)
 
     def _al_fallar(self, mensaje: str) -> None:
+        self._fin_pendiente = False
+        self._fin_confirmado = None
         preparados = self._estado.get("trabajos") or []
         if preparados and not self._trabajos:
             # Preparar los PDF ocurre antes de conectar. Si la sesion o la
@@ -5162,6 +5225,8 @@ class AirVaultWindow(QDialog):
 
     def _al_cancelar(self) -> None:
         """Lo paró quien lo lanzó: se dice y se sueltan los batches."""
+        self._fin_pendiente = False
+        self._fin_confirmado = None
         self.estado_label.setText("Cancelado")
         self._anotar("Cancelado: se desbloquean los batches abiertos")
         self._parar_vigilancia()
@@ -5210,7 +5275,37 @@ class AirVaultWindow(QDialog):
         self._publicar_avance()
         # Lo que se pidió desde la tabla mientras esto trabajaba entra ahora,
         # que es lo que hace de la tabla una cola y no una lista de avisos.
-        self._siguiente_de_la_cola()
+        if self._siguiente_de_la_cola():
+            return
+        self._anunciar_fin()
+
+    def _anunciar_fin(self) -> None:
+        """Deja el final en la barra y la bitacora cuando ya no falta nada."""
+        if not self._fin_pendiente:
+            return
+        self._fin_pendiente = False
+        firma = self._firma_de_fin()
+        if (
+            firma is None or self.hilo() is not None or self._vigilando()
+            or self._cola_de_acciones or self._comprobar_al_terminar
+            or self._subir_al_terminar or self._indexar_al_terminar
+        ):
+            return
+        partes = self._partes_en_cola()
+        texto = (
+            f"Proceso terminado: {conteo_de_estados(partes)}. "
+            "No queda trabajo automático pendiente."
+        )
+        if any(p.trabajo.manifiesto.solo_subir for p in partes):
+            texto += " Las incidencias de REVISAR quedan para revisión manual."
+        self.resumen.setText(texto)
+        self.estado_label.setText("Proceso terminado")
+        self.estado_label.setToolTip(texto)
+        self._actualizar_latido()
+        if firma != self._fin_confirmado:
+            self._anotar(texto)
+        self._fin_confirmado = firma
+        self._pintar_avance()
 
     # ── lo que ve la ventana principal ─────────────────────────────
 

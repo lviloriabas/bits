@@ -151,6 +151,11 @@ def cadena(app, tmp_path, monkeypatch):
         ("subir", f"DP | {NOMBRE} -2"),
     ]
     assert fallos == []
+    assert ventana.progreso.value() < 100
+    assert not any(
+        "Proceso terminado" in ventana.bitacora.item(i).text()
+        for i in range(ventana.bitacora.count())
+    )
 
     # Después AirVault termina de armar el segundo.
     cliente.terminar_de_armar()
@@ -159,7 +164,7 @@ def cadena(app, tmp_path, monkeypatch):
     ventana.close()
 
 
-def _todo_terminado(cliente, trabajos, fallos):
+def _todo_terminado(ventana, cliente, trabajos, fallos):
     assert fallos == []
     # Cada archivo se subió una sola vez.
     assert [e for e in cliente.eventos if e[0] == "subir"] == [
@@ -185,6 +190,15 @@ def _todo_terminado(cliente, trabajos, fallos):
         < eventos.index(("escribir", "003B2"))
         < eventos.index(("escribir", "003B3"))
     )
+    assert ventana.progreso.text() == "100% - Proceso terminado"
+    assert "Proceso terminado: 3 completados." in ventana.resumen.text()
+    assert "No queda trabajo automático pendiente" in ventana.bitacora.item(
+        ventana.bitacora.count() - 1
+    ).text()
+    assert ventana._linea_viva is None
+    assert not ventana._vigilando()
+    assert ventana.hilo() is None
+    assert not ventana._cola_de_acciones
 
 
 def test_subir_con_batches_ya_subidos_retoma_los_que_faltan(cadena):
@@ -192,7 +206,7 @@ def test_subir_con_batches_ya_subidos_retoma_los_que_faltan(cadena):
 
     ventana._subir_a_mano()
 
-    _todo_terminado(cliente, trabajos, fallos)
+    _todo_terminado(ventana, cliente, trabajos, fallos)
 
 
 @pytest.mark.parametrize("reloj", [True, False], ids=["con-reloj", "sin-reloj"])
@@ -203,7 +217,7 @@ def test_revisar_en_airvault_termina_todo_lo_que_falta(cadena, reloj):
 
     ventana.boton_revisar.click()
 
-    _todo_terminado(cliente, trabajos, fallos)
+    _todo_terminado(ventana, cliente, trabajos, fallos)
     assert modos[0] == "comprobar"
 
 
@@ -212,7 +226,7 @@ def test_continuar_pendiente_termina_todo_lo_que_falta(cadena):
 
     ventana._continuar_pendiente()
 
-    _todo_terminado(cliente, trabajos, fallos)
+    _todo_terminado(ventana, cliente, trabajos, fallos)
 
 
 def test_la_cadena_termina_y_no_queda_nada_por_hacer(cadena):
@@ -227,3 +241,29 @@ def test_la_cadena_termina_y_no_queda_nada_por_hacer(cadena):
     assert cliente.eventos == eventos
     assert modos == ["comprobar"]
     assert fallos == []
+    assert ventana.progreso.text() == "100% - Proceso terminado"
+    finales = [
+        ventana.bitacora.item(i).text()
+        for i in range(ventana.bitacora.count())
+        if "Proceso terminado" in ventana.bitacora.item(i).text()
+    ]
+    assert len(finales) == 1
+
+
+def test_completar_desde_la_cola_confirma_el_fin_sin_revision_global(cadena):
+    from app.airvault.flujo import INDEXADO
+
+    ventana, cliente, trabajos, fallos, modos = cadena
+    ventana.completar_check.setChecked(False)
+    ventana.boton_revisar.click()
+    assert ventana.progreso.text() == "100% - Proceso terminado"
+    pendientes = [p for p in ventana._estados if p.estado == INDEXADO]
+    assert len(pendientes) == 2
+
+    ventana.completar_check.setChecked(True)
+    assert ventana.progreso.value() < 100
+    modos.clear()
+    ventana._completar_estas(pendientes)
+
+    assert modos == ["completar"]
+    _todo_terminado(ventana, cliente, trabajos, fallos)
