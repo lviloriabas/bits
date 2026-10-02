@@ -383,11 +383,15 @@ Código: `app/airvault/flujo.py`, `session.py`, `navegador.py`, `uploader.py`, `
 
 Log Page Audit es un informe de SSRS, no una API. Se conduce su visor por pantalla con el mismo Edge del perfil `portable/edge-airvault/`. Se entra por el enlace federado de `url_sso`: el enlace del informe lleva a la pantalla de acceso local de AirVault, que pide unas credenciales que en una instalación federada con Entra ID nadie tiene. Esa entrada renueva la sesión sin intervención mientras la sesión de Entra ID siga viva; cuando también ha caducado hace falta un acceso interactivo.
 
+Los valores de los desplegables se verificaron contra el formulario de producción: Book Type usa 1/2/3 para Todos/Copa-6/Copa-7 y Min Book Pages Cutoff usa 1/2/3/4/5 para 5/10/25/40/50. Se envían también aeronaves, bitácoras, orden, For Export y Refresh. La interfaz mantiene únicamente duplicadas, mal indexadas y ambas en Mostrar. Las fechas usan mes/día/año en SSRS y la fecha inicial sin límite activa su cbNull. La fecha final siempre se limita al día actual o a una fecha anterior; se rechazan fechas futuras.
+
+La lectura espera una representación nueva del reporte, la página solicitada y el fin de la carga, y verifica que el servidor conserve los parámetros. Avanza con Next Page hasta que quede deshabilitado y el total definitivo coincida con la página actual, incluyendo los totales provisionales de SSRS. No devuelve filas parciales ante un fallo. Se conserva el contexto del libro entre páginas y se eliminan únicamente repeticiones del mismo caso, con su libro y detalle. Los enlaces nativos determinan el repoId de cada libro, también para el repositorio de pruebas.
+
 El plan sale entero del reporte y no consulta nada: una mal indexada ya trae las dos matrículas y una duplicada, cuántas copias hay. Lo que el reporte no diga con esas palabras queda como caso a revisar, con el motivo escrito.
 
 | Acción | Operación interna |
 |---|---|
-| Consultar | Ejecuta cada filtro en la misma sesión y analiza las filas del visor. No escribe nada. |
+| Consultar | Ejecuta los filtros 8 (mal indexadas) y/o 10 (duplicadas) con los parámetros elegidos. Recorre todas las páginas del visor y hereda los datos del libro en las filas de continuación. No escribe nada. |
 | Borrar copias | Conserva la aparición más antigua por fecha y borra el resto con `onDeletePage`. Sin una fecha legible en todas, no borra ninguna. |
 | Reindexar | Abre `onReindexDocument` y escribe matrícula y flota. Cambiar de aeronave puede cambiar la flota, y conservar la anterior sustituiría un dato malo por otro. |
 

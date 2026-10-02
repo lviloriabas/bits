@@ -206,11 +206,14 @@ Mientras **Revisar cada** esté activo, la cola sigue consultando hasta que todo
 
 Log Page Audit es un reporte de AirVault que señala dos defectos de lo ya publicado: una bitácora **duplicada**, que aparece más de una vez, y una **mal indexada**, archivada bajo una aeronave que no es la de su libro. **Web Reports…**, en la ventana principal, consulta ese reporte y corrige lo que el propio reporte deja decidido.
 
-1. Pulse **Web Reports…** y elija **Desde** y **Hasta**. En **Mostrar** decida si quiere mal indexadas, duplicadas o ambas.
-2. Pulse **Consultar**. Consultar no modifica nada en AirVault.
-3. Revise la tabla. **Matrícula del libro** es la aeronave que le corresponde a la bitácora; **Matrícula indexada**, aquella bajo la que quedó archivada. En una mal indexada las dos difieren, y esa diferencia es el defecto. En una duplicada la segunda queda vacía: el reporte no la indica.
-4. Las celdas subrayadas abren Web Search: la de **Página**, sus apariciones; la de **Rango del libro**, el libro entero.
-5. Pulse **Corregir todas…**, o seleccione filas con Ctrl o Mayús y pulse **Corregir seleccionadas…**. Confirme el resumen.
+1. Pulse **Web Reports…** y elija **Desde** y **Hasta**. Se muestran como día/mes/año y se envían a AirVault como mes/día/año. **Sin límite inicial** equivale a NULL en la fecha inicial del reporte. La fecha final siempre tiene límite y no puede superar el día actual. En **Mostrar** elija mal indexadas, duplicadas o ambas.
+2. Ajuste los mismos parámetros de AirVault: **Repositorio**, **Tipo de libro** (Todos, Copa-6 o Copa-7), **Aeronaves**, **Bitácoras**, **Mínimo de páginas** (5, 10, 25, 40 o 50), **Orden**, **Para exportar** y **Actualizar datos**. Los campos vacíos de aeronaves y bitácoras dejan la consulta sin esos filtros. **Actualizar datos: Sí** pide regenerar los datos en AirVault; **No** usa su reporte guardado.
+3. Pulse **Consultar**. Consultar no modifica nada en AirVault.
+4. Revise la tabla. **Matrícula del libro** es la aeronave que le corresponde a la bitácora; **Matrícula indexada**, aquella bajo la que quedó archivada. En una mal indexada las dos difieren, y esa diferencia es el defecto. En una duplicada la segunda queda vacía: el reporte no la indica.
+5. Las celdas subrayadas abren Web Search: la de **Página**, sus apariciones; la de **Rango del libro**, el libro entero.
+6. Pulse **Corregir todas…**, o seleccione filas con Ctrl o Mayús y pulse **Corregir seleccionadas…**. Confirme el resumen.
+
+La consulta lee todas las páginas de cada reporte y conserva el libro de las filas de continuación. La frase de estado indica la página que está leyendo. Si falla la navegación o cambian los parámetros, informa el error y no presenta una consulta incompleta como terminada. Las fechas se aplican con el criterio del reporte de AirVault; el rango de fechas mostrado por un libro puede extenderse fuera del intervalo consultado.
 
 ```mermaid
 flowchart TD

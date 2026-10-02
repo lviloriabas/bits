@@ -6,6 +6,7 @@ from datetime import date
 from pathlib import Path
 from threading import Event
 from typing import Optional
+from urllib.parse import parse_qs, urlsplit
 
 from PySide6.QtCore import QDate, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -37,8 +39,14 @@ from app.airvault.correcciones import (
     resumen_del_plan,
 )
 from app.airvault.web_reports import (
-    FILTRO_DUPLICADAS,
-    FILTRO_MAL_INDEXADAS,
+    OPCIONES_REPOSITORIO,
+    OPCIONES_LIBRO,
+    OPCIONES_MINIMO,
+    OPCIONES_MOSTRAR,
+    OPCIONES_ORDEN,
+    OPCIONES_EXPORTAR,
+    OPCIONES_ACTUALIZAR,
+    ParametrosLogPageAudit,
     TIPO_DUPLICADA,
     TIPO_MAL_INDEXADA,
     ClienteLogPageAudit,
@@ -196,15 +204,17 @@ class WebReportsWorker(_TrabajoEnEdge):
     def __init__(
         self,
         config: AirVaultConfig,
-        desde: date,
-        hasta: date,
+        desde: date | None,
+        hasta: date | None,
         filtros: tuple[str, ...],
         parent=None,
+        parametros: ParametrosLogPageAudit | None = None,
     ) -> None:
         super().__init__(config, parent)
         self._desde = desde
         self._hasta = hasta
         self._filtros = filtros
+        self._parametros = parametros
 
     def _trabajar(self):
         return ClienteLogPageAudit(self._config).consultar(
@@ -214,6 +224,7 @@ class WebReportsWorker(_TrabajoEnEdge):
             avisar=self.avance.emit,
             cancelar=self._cancelado,
             progreso=self.paso.emit,
+            parametros=self._parametros,
         )
 
 
@@ -391,45 +402,60 @@ class WebReportsWindow(QDialog):
         # seguidos, con «Mostrar:» pegado al campo de la fecha final.
         grid.setColumnMinimumWidth(4, SPACE_L)
         grid.addWidget(QLabel("Mostrar:"), 0, 5)
-        self.filtro_combo = QComboBox()
-        self.filtro_combo.addItem(
-            "Mal indexadas y duplicadas",
-            (FILTRO_MAL_INDEXADAS, FILTRO_DUPLICADAS),
-        )
-        self.filtro_combo.addItem(
-            "Solo mal indexadas", (FILTRO_MAL_INDEXADAS,)
-        )
-        self.filtro_combo.addItem("Solo duplicadas", (FILTRO_DUPLICADAS,))
-        # Sin suelo de caracteres y ajustado al contenido: pide lo que mide
-        # su frase más larga y ni un píxel más. Con el suelo de 26 pedía el
-        # ancho de 26 mayúsculas, casi el doble de lo que ocupan sus tres
-        # opciones, y ese exceso salía de los campos de fecha, que se
-        # quedaban en su mínimo.
-        configure_combo_box(self.filtro_combo, 0)
-        self.filtro_combo.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToContents
-        )
-        self.filtro_combo.setToolTip(
-            "Qué excepciones del reporte se traen a la tabla."
-        )
-        # Quién revisa duplicadas y quién revisa mal indexadas suele ser la
-        # misma persona todos los días: el desplegable abre en lo último que
-        # pidió. El rango de fechas no se recuerda, que ese sí cambia en
-        # cada consulta.
-        recordar(WEB_REPORTS, "filtro", self.filtro_combo)
+        self.filtro_combo = self._combo("filtro", OPCIONES_MOSTRAR)
+        self.filtro_combo.setToolTip("Duplicadas, mal indexadas o ambas.")
         grid.addWidget(self.filtro_combo, 0, 6)
-        # El sitio que sobra se queda al final de la fila. Con el estiramiento
-        # en la columna del desplegable, este crecía hasta el borde de la
-        # ventana: cuatrocientos veintisiete píxeles para tres frases que
-        # miden la mitad.
         grid.setColumnStretch(7, 1)
+
+        self.sin_inicio = QCheckBox("Sin límite inicial")
+        self.sin_inicio.toggled.connect(lambda marcado: self.desde_edit.setEnabled(not marcado))
+        grid.addWidget(self.sin_inicio, 1, 1)
+
+        opciones = QGridLayout()
+        opciones.setHorizontalSpacing(SPACE_S)
+        opciones.setVerticalSpacing(self._densidad.group_spacing)
+        opciones.addWidget(QLabel("Repositorio:"), 0, 0)
+        self.repositorio_combo = self._combo("repositorio", OPCIONES_REPOSITORIO)
+        opciones.addWidget(self.repositorio_combo, 0, 1)
+        opciones.addWidget(QLabel("Tipo de libro:"), 0, 2)
+        self.libro_combo = self._combo("tipo_libro", OPCIONES_LIBRO)
+        opciones.addWidget(self.libro_combo, 0, 3)
+
+        opciones.addWidget(QLabel("Aeronaves:"), 1, 0)
+        self.aeronaves_edit = QLineEdit()
+        self.aeronaves_edit.setPlaceholderText("Todas")
+        self.aeronaves_edit.setToolTip("AC Numbers(s): escriba el filtro igual que en AirVault.")
+        opciones.addWidget(self.aeronaves_edit, 1, 1)
+        opciones.addWidget(QLabel("Bitácoras:"), 1, 2)
+        self.bitacoras_edit = QLineEdit()
+        self.bitacoras_edit.setPlaceholderText("Todas")
+        self.bitacoras_edit.setToolTip("Log Page(s): escriba el filtro igual que en AirVault.")
+        opciones.addWidget(self.bitacoras_edit, 1, 3)
+
+        opciones.addWidget(QLabel("Mínimo de páginas:"), 2, 0)
+        self.minimo_combo = self._combo("minimo_paginas", OPCIONES_MINIMO)
+        self.minimo_combo.setToolTip("Min Book Pages Cutoff: el mismo umbral de AirVault.")
+        opciones.addWidget(self.minimo_combo, 2, 1)
+        opciones.addWidget(QLabel("Orden:"), 2, 2)
+        self.orden_combo = self._combo("orden", OPCIONES_ORDEN)
+        opciones.addWidget(self.orden_combo, 2, 3)
+
+        opciones.addWidget(QLabel("Para exportar:"), 3, 0)
+        self.exportar_combo = self._combo("para_exportar", OPCIONES_EXPORTAR)
+        self.exportar_combo.setToolTip("For Export: elige el formato del reporte de AirVault.")
+        opciones.addWidget(self.exportar_combo, 3, 1)
+        opciones.addWidget(QLabel("Actualizar datos:"), 3, 2)
+        self.actualizar_combo = self._combo("actualizar", OPCIONES_ACTUALIZAR, "2")
+        self.actualizar_combo.setToolTip("Refresh: Sí regenera los datos; No usa el reporte guardado por AirVault.")
+        opciones.addWidget(self.actualizar_combo, 3, 3)
+        grid.addLayout(opciones, 2, 0, 1, 8)
 
         ayuda = QLabel(
             "Las celdas subrayadas abren la página o el libro en Web Search."
         )
         ayuda.setWordWrap(True)
         pintar_del_tema(ayuda, lambda: f"color: {color_ayuda()};")
-        grid.addWidget(ayuda, 1, 0, 1, 8)
+        grid.addWidget(ayuda, 3, 0, 1, 8)
         cuerpo.addWidget(consulta)
         # Con el cuadro ya colgado de la ventana, que es cuando los campos
         # heredan la hoja de estilo y saben cuánto miden de verdad.
@@ -750,6 +776,30 @@ class WebReportsWindow(QDialog):
         self.resumen.setText(f"Error al corregir: {mensaje}")
 
     @staticmethod
+    def _combo(nombre, opciones, defecto=None) -> QComboBox:
+        control = QComboBox()
+        for texto, valor in opciones:
+            control.addItem(texto, valor)
+        if defecto is not None:
+            control.setCurrentIndex(control.findData(defecto))
+        configure_combo_box(control, 0)
+        control.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        recordar(WEB_REPORTS, nombre, control)
+        return control
+
+    def _parametros_consulta(self) -> ParametrosLogPageAudit:
+        return ParametrosLogPageAudit(
+            repositorio=self.repositorio_combo.currentData(),
+            tipo_libro=self.libro_combo.currentData(),
+            aeronaves=self.aeronaves_edit.text(),
+            bitacoras=self.bitacoras_edit.text(),
+            minimo_paginas=self.minimo_combo.currentData(),
+            orden=self.orden_combo.currentData(),
+            para_exportar=self.exportar_combo.currentData(),
+            actualizar=self.actualizar_combo.currentData(),
+        )
+
+    @staticmethod
     def _fecha(valor: QDate) -> QDateEdit:
         control = QDateEdit(valor)
         control.setCalendarPopup(True)
@@ -761,9 +811,11 @@ class WebReportsWindow(QDialog):
     def _consultar(self) -> None:
         if self.hilo() is not None:
             return
-        desde = self.desde_edit.date().toPython()
+        self.desde_edit.interpretText()
+        self.hasta_edit.interpretText()
+        desde = None if self.sin_inicio.isChecked() else self.desde_edit.date().toPython()
         hasta = self.hasta_edit.date().toPython()
-        if desde > hasta:
+        if desde is not None and hasta is not None and desde > hasta:
             self.resumen.setText(
                 "La fecha inicial no puede ser posterior a la fecha final."
             )
@@ -771,7 +823,7 @@ class WebReportsWindow(QDialog):
         filtros = tuple(self.filtro_combo.currentData())
         self._config = AirVaultConfig.load(self._raiz / AIRVAULT_FILENAME)
         worker = WebReportsWorker(
-            self._config, desde, hasta, filtros, self
+            self._config, desde, hasta, filtros, self, self._parametros_consulta()
         )
         worker.avance.connect(self._al_avanzar)
         worker.resultado.connect(self._al_recibir)
@@ -839,6 +891,12 @@ class WebReportsWindow(QDialog):
     def _al_recibir(self, excepciones: object) -> None:
         self._cerrar_cronometro(aprender=True)
         self._resultados = list(excepciones)
+        repositorios = {
+            int(parse_qs(urlsplit(item.url_busqueda).query)["repoId"][0])
+            for item in self._resultados if item.url_busqueda
+        }
+        if len(repositorios) == 1:
+            self._config = self._config.with_overrides(repo_id=repositorios.pop())
         self._llenar_tabla(self._resultados)
         mal_indexadas = sum(
             resultado.tipo == TIPO_MAL_INDEXADA
@@ -1034,9 +1092,15 @@ class WebReportsWindow(QDialog):
             self.desde_edit,
             self.hasta_edit,
             self.filtro_combo,
+            self.sin_inicio,
+            self.repositorio_combo, self.libro_combo, self.minimo_combo,
+            self.aeronaves_edit, self.bitacoras_edit, self.orden_combo,
+            self.exportar_combo, self.actualizar_combo,
             self.boton_consultar,
         ):
             control.setEnabled(habilitado)
+        self.desde_edit.setEnabled(habilitado and not self.sin_inicio.isChecked())
+        self.hasta_edit.setEnabled(habilitado)
         # Corregir solo se ofrece cuando hay algo que el reporte deje
         # decidido. Con la tabla vacía, o con todo pendiente de revisar a
         # mano, el botón no tendría nada que hacer; y el de la selección

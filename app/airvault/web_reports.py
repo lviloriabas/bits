@@ -39,9 +39,52 @@ TIPO_DUPLICADA = "Duplicada"
 FILTRO_MAL_INDEXADAS = "8"
 FILTRO_DUPLICADAS = "10"
 
+# Valores comprobados en el formulario de produccion de Log Page Audit.
+# SSRS usa posiciones del desplegable, no los numeros que muestra.
+OPCIONES_REPOSITORIO = (("Producción", "1"), ("Pruebas", "2"))
+OPCIONES_LIBRO = (("Todos", "1"), ("Copa-6", "2"), ("Copa-7", "3"))
+OPCIONES_MINIMO = tuple((str(n), str(i)) for i, n in enumerate((5, 10, 25, 40, 50), 1))
+OPCIONES_MOSTRAR = (
+    ("Ambas", (FILTRO_MAL_INDEXADAS, FILTRO_DUPLICADAS)),
+    ("Solo mal indexadas", (FILTRO_MAL_INDEXADAS,)),
+    ("Solo duplicadas", (FILTRO_DUPLICADAS,)),
+)
+OPCIONES_ORDEN = (
+    ("Aeronave y número inicial de página", "1"),
+    ("Aeronave y fecha inicial del libro", "2"),
+    ("Aeronave y fecha final del libro", "3"),
+)
+OPCIONES_EXPORTAR = (("No", "1"), ("Sí", "2"))
+OPCIONES_ACTUALIZAR = (("Sí", "1"), ("No", "2"))
+
+
+@dataclass(frozen=True)
+class ParametrosLogPageAudit:
+    repositorio: str = "1"
+    tipo_libro: str = "1"
+    aeronaves: str = ""
+    bitacoras: str = ""
+    minimo_paginas: str = "1"
+    orden: str = "1"
+    para_exportar: str = "1"
+    actualizar: str = "2"
+
+    def validar(self) -> None:
+        for valor, opciones in (
+            (self.repositorio, OPCIONES_REPOSITORIO),
+            (self.tipo_libro, OPCIONES_LIBRO),
+            (self.minimo_paginas, OPCIONES_MINIMO),
+            (self.orden, OPCIONES_ORDEN),
+            (self.para_exportar, OPCIONES_EXPORTAR),
+            (self.actualizar, OPCIONES_ACTUALIZAR),
+        ):
+            if valor not in {v for _nombre, v in opciones}:
+                raise ValueError("Una opción de Log Page Audit no es válida")
+
 _CONTROL = "ReportViewerControl_ctl04_"
 _AREA_REPORTE = "ReportViewerControl_ctl09"
 _ESPERA_REPORTE = "ReportViewerControl_AsyncWait"
+_PAGINADOR = "ReportViewerControl_ctl05_ctl00_"
 _FORMULARIO_LISTO = (
     f"document.getElementById('{_CONTROL}ctl03_ddValue')"
     f" && !document.getElementById('{_CONTROL}ctl03_ddValue').disabled"
@@ -216,15 +259,35 @@ def _texto(celda: object) -> str:
 def parsear_filas(
     filas: Iterable[Sequence[object]], config: AirVaultConfig
 ) -> list[ExcepcionLogPageAudit]:
-    """Convierte las filas planas de SSRS en excepciones sin duplicarlas."""
+    """Lee duplicadas y mal indexadas sin perder las filas de continuacion.
+
+    SSRS deja vacios los datos del libro en las filas siguientes del mismo
+    grupo. Se heredan incluso al cambiar de pagina, pero nunca de una
+    cabecera ni de otro libro.
+    """
     salida: list[ExcepcionLogPageAudit] = []
-    vistos: set[tuple[str, str, str, str, int | None]] = set()
+    libro: list[str] | None = None
+    config_libro = config
     for fila in filas:
         celdas = [_texto(celda) for celda in fila]
         # El diseño del reporte lleva dos celdas separadoras. Las filas de
         # datos tienen diez columnas; cabeceras y pies se descartan por no
         # contener ninguna excepcion reconocible.
-        if len(celdas) < 10:
+        if len(celdas) == 8:
+            # Version sin las dos columnas separadoras del visor.
+            celdas = celdas[:2] + [""] + celdas[2:7] + [""] + celdas[7:]
+        if len(celdas) != 10:
+            continue
+        if celdas[0] and celdas[1] and celdas[0] != "AC#":
+            libro = celdas[:9]
+            repositorios = [
+                celda.get("repo_id") for celda in fila
+                if isinstance(celda, dict) and celda.get("repo_id")
+            ]
+            config_libro = config.with_overrides(repo_id=int(repositorios[0])) if repositorios else config
+        elif not any(celdas[:9]) and celdas[9] and libro is not None:
+            celdas[:9] = libro
+        else:
             continue
         detalle = celdas[9]
         coincidencias: list[tuple[str, re.Match[str]]] = []
@@ -248,10 +311,6 @@ def parsear_filas(
                 if tipo == TIPO_DUPLICADA
                 else None
             )
-            clave = (tipo, numero, celdas[0], destino, copias)
-            if clave in vistos:
-                continue
-            vistos.add(clave)
             salida.append(
                 ExcepcionLogPageAudit(
                     tipo=tipo,
@@ -266,13 +325,13 @@ def parsear_filas(
                     log_number=numero,
                     destino=destino,
                     copias=copias,
-                    url_busqueda=url_busqueda_log(config, numero),
+                    url_busqueda=url_busqueda_log(config_libro, numero),
                     url_busqueda_libro=url_busqueda_del_libro(
-                        config, celdas[3]
+                        config_libro, celdas[3]
                     ),
                 )
             )
-    return salida
+    return ClienteLogPageAudit._sin_repetidos(salida)
 
 
 def _puerto_de(version: dict) -> int:
@@ -387,12 +446,13 @@ class ClienteLogPageAudit:
 
     def consultar(
         self,
-        desde: date,
-        hasta: date,
+        desde: date | None,
+        hasta: date | None,
         filtros: Sequence[str],
         avisar: Callable[[str], None] | None = None,
         cancelar: Callable[[], bool] | None = None,
         progreso: Callable[[int, int], None] | None = None,
+        parametros: ParametrosLogPageAudit | None = None,
     ) -> list[ExcepcionLogPageAudit]:
         """Trae las excepciones del reporte en el rango y los filtros dados.
 
@@ -402,8 +462,16 @@ class ClienteLogPageAudit:
         numeros y no texto. El primer aviso llega con cero hechos, en cuanto
         el formulario responde: es la senal de que la apertura termino.
         """
-        if desde > hasta:
+        hoy = date.today()
+        hasta = hasta or hoy
+        if hasta > hoy or (desde is not None and desde > hoy):
+            raise ValueError("Las fechas no pueden ser posteriores al día actual")
+        if desde is not None and desde > hasta:
             raise ValueError("La fecha inicial no puede ser posterior a la final")
+        opciones = parametros or ParametrosLogPageAudit()
+        opciones.validar()
+        if any(filtro not in (FILTRO_MAL_INDEXADAS, FILTRO_DUPLICADAS) for filtro in filtros):
+            raise ValueError("Elija duplicadas, mal indexadas o ambas")
         if not filtros:
             return []
         notificar = avisar or (lambda _texto: None)
@@ -438,10 +506,10 @@ class ClienteLogPageAudit:
                         "Log Page Audit no quedó listo. Complete el acceso "
                         "en Edge con la cuenta de trabajo y vuelva a intentar."
                     )
-                self._elegir_repositorio(pagina)
+                self._elegir_repositorio(pagina, opciones.repositorio)
                 if not pagina.esperar(_FECHA_LISTA, 120.0):
                     raise RuntimeError(
-                        "El repositorio de producción no habilitó las fechas"
+                        "El repositorio no habilitó los parámetros del reporte"
                     )
 
                 resultado: list[ExcepcionLogPageAudit] = []
@@ -453,8 +521,14 @@ class ClienteLogPageAudit:
                         else "duplicadas"
                     )
                     notificar(f"Consultando páginas {nombre}")
-                    filas = self._correr_reporte(pagina, desde, hasta, filtro)
-                    resultado.extend(parsear_filas(filas, self.config))
+                    filas = self._correr_reporte(
+                        pagina, desde, hasta, filtro, opciones, notificar
+                    )
+                    tipo = TIPO_MAL_INDEXADA if filtro == FILTRO_MAL_INDEXADAS else TIPO_DUPLICADA
+                    resultado.extend(
+                        item for item in parsear_filas(filas, self.config)
+                        if item.tipo == tipo
+                    )
                     avanzar(numero, len(filtros))
                 return self._sin_repetidos(resultado)
             finally:
@@ -462,148 +536,211 @@ class ClienteLogPageAudit:
                     pagina.cerrar()
 
     @staticmethod
-    def _elegir_repositorio(pagina: _Pagina) -> None:
+    def _elegir_repositorio(pagina: _Pagina, repositorio: str = "1") -> None:
         elegido = pagina.evaluar(
-            f"""(function(){{
-              var control = document.getElementById('{_CONTROL}ctl03_ddValue');
-              if (!control) return false;
-              if (control.value !== '1') {{
-                control.value = '1';
-                if (control.onchange) control.onchange();
-                else control.dispatchEvent(new Event('change'));
-              }}
+            """(function(valor){
+              var c = document.getElementById('%sctl03_ddValue');
+              if (!c || !Array.from(c.options).some(o => o.value === valor)) return false;
+              if (c.value !== valor) {
+                c.value = valor;
+                c.dispatchEvent(new Event('change', {bubbles: true}));
+              }
               return true;
-            }})()"""
+            })(%s)""" % (_CONTROL, json.dumps(repositorio))
         )
         if elegido is not True:
-            raise RuntimeError(
-                "El formulario de Log Page Audit no mostró el repositorio"
-            )
+            raise RuntimeError("El formulario no mostró el repositorio elegido")
+
+    @classmethod
+    def _valores(cls, desde, hasta, filtro, parametros):
+        return {
+            f"{_CONTROL}ctl05_ddValue": parametros.tipo_libro,
+            f"{_CONTROL}ctl07_txtValue": cls._fecha_ssrs(desde) if desde else "",
+            f"{_CONTROL}ctl09_txtValue": cls._fecha_ssrs(hasta) if hasta else "",
+            f"{_CONTROL}ctl11_txtValue": parametros.aeronaves.strip(),
+            f"{_CONTROL}ctl13_txtValue": parametros.bitacoras.strip(),
+            f"{_CONTROL}ctl15_ddValue": parametros.minimo_paginas,
+            f"{_CONTROL}ctl17_ddValue": filtro,
+            f"{_CONTROL}ctl19_ddValue": parametros.orden,
+            f"{_CONTROL}ctl21_ddValue": parametros.para_exportar,
+            f"{_CONTROL}ctl23_ddValue": parametros.actualizar,
+        }
 
     def _correr_reporte(
-        self, pagina: _Pagina, desde: date, hasta: date, filtro: str
+        self, pagina: _Pagina, desde: date | None, hasta: date | None,
+        filtro: str, parametros: ParametrosLogPageAudit | None = None,
+        avisar: Callable[[str], None] | None = None,
     ) -> list[list[object]]:
-        valores = {
-            f"{_CONTROL}ctl07_txtValue": self._fecha_ssrs(desde),
-            f"{_CONTROL}ctl09_txtValue": self._fecha_ssrs(hasta),
-            f"{_CONTROL}ctl17_ddValue": filtro,
-            f"{_CONTROL}ctl21_ddValue": "2",
-            f"{_CONTROL}ctl23_ddValue": "1",
+        opciones = parametros or ParametrosLogPageAudit()
+        valores = self._valores(desde, hasta, filtro, opciones)
+        nulos = {
+            f"{_CONTROL}ctl07_cbNull": desde is None,
+            f"{_CONTROL}ctl09_cbNull": hasta is None,
         }
+        anterior = self._estado_reporte(pagina).get("huella", "")
         lanzado = pagina.evaluar(
-            """(function(valores, areaId, botonId){
+            """(function(valores, nulos, botonId){
+              // Primero validar todo: una opcion inexistente no queda en blanco.
               for (var id in valores) {
-                var control = document.getElementById(id);
-                if (!control) return 'Falta ' + id;
-                control.value = valores[id];
+                var c = document.getElementById(id);
+                if (!c) return 'Falta ' + id;
+                if (c.options && !Array.from(c.options).some(o => o.value === valores[id]))
+                  return 'Opcion no disponible: ' + id;
               }
-              var area = document.getElementById(areaId);
-              if (area) area.innerHTML = '';
+              for (var id in nulos) {
+                var c = document.getElementById(id);
+                if (!c) return 'Falta ' + id;
+                if (c.checked !== nulos[id]) c.click();
+              }
+              for (var id in valores) document.getElementById(id).value = valores[id];
               var boton = document.getElementById(botonId);
-              if (!boton) return 'Falta ' + botonId;
+              if (!boton || boton.disabled) return 'El reporte no esta listo';
               boton.click();
               return 'OK';
             })(%s, %s, %s)"""
-            % (
-                json.dumps(valores),
-                json.dumps(_AREA_REPORTE),
-                json.dumps(f"{_CONTROL}ctl00"),
-            )
+            % (json.dumps(valores), json.dumps(nulos), json.dumps(f"{_CONTROL}ctl00"))
         )
         if lanzado != "OK":
-            raise RuntimeError(
-                f"El formulario de Log Page Audit cambió: {lanzado}"
-            )
-        self._esperar_reporte(pagina)
+            raise RuntimeError(f"El formulario de Log Page Audit cambió: {lanzado}")
+        esperados = dict(valores, **{f"{_CONTROL}ctl03_ddValue": opciones.repositorio})
+        self._esperar_reporte(pagina, anterior, 1, esperados, nulos)
+        return self._leer_todas_paginas(pagina, esperados, nulos, avisar)
+
+    @staticmethod
+    def _estado_reporte(pagina: _Pagina) -> dict:
+        estado = pagina.evaluar(
+            """(function(areaId, esperaId, prefijo, paginador){
+              function visible(c) { return !!c && c.getClientRects().length > 0 &&
+                getComputedStyle(c).visibility !== 'hidden'; }
+              var area = document.getElementById(areaId);
+              var actual = document.getElementById(paginador + 'CurrentPage');
+              var total = document.getElementById(paginador + 'TotalPages');
+              var boton = document.getElementById(prefijo + 'ctl00');
+              var siguiente = document.getElementById(paginador + 'Next_ctl00_ctl00');
+              var valores = {}, nulos = {};
+              document.querySelectorAll('[id^="' + prefijo + '"]').forEach(c => {
+                if (c.tagName === 'INPUT' || c.tagName === 'SELECT') {
+                  if (c.type === 'checkbox') nulos[c.id] = c.checked;
+                  else valores[c.id] = c.value;
+                }
+              });
+              var errores = Array.from(document.querySelectorAll(
+                '[id*="ErrorMessage"], [id*="ValidationSummary"]'))
+                .filter(visible).map(c => c.innerText.trim()).filter(Boolean).join(' ');
+              return {
+                ocupada: visible(document.getElementById(esperaId)) || !!(boton && boton.disabled),
+                huella: area ? area.innerHTML : '',
+                texto: area ? area.innerText.trim() : '',
+                actual: actual ? Number(actual.value) : 0,
+                total: total ? total.innerText.trim() : '',
+                siguiente: visible(siguiente) && !siguiente.disabled,
+                valores: valores, nulos: nulos, errores: errores
+              };
+            })(%s, %s, %s, %s)"""
+            % tuple(json.dumps(v) for v in (_AREA_REPORTE, _ESPERA_REPORTE, _CONTROL, _PAGINADOR))
+        )
+        if not isinstance(estado, dict):
+            raise RuntimeError("No se pudo leer el estado de Log Page Audit")
+        return estado
+
+    @staticmethod
+    def _comprobar_parametros(estado, valores, nulos) -> None:
+        for id, esperado in (valores or {}).items():
+            recibido = estado.get("valores", {}).get(id)
+            if id.endswith(('ctl07_txtValue', 'ctl09_txtValue')):
+                # El visor puede devolver mes y dia con ceros iniciales.
+                if esperado:
+                    try:
+                        recibido = '/'.join(str(int(n)) for n in recibido.split('/'))
+                    except (AttributeError, ValueError):
+                        recibido = None
+            if recibido != esperado:
+                raise RuntimeError("AirVault cambió los filtros o las fechas; vuelva a consultar")
+        for id, esperado in (nulos or {}).items():
+            if estado.get("nulos", {}).get(id) != esperado:
+                raise RuntimeError("AirVault cambió el límite de fechas; vuelva a consultar")
+
+    @classmethod
+    def _esperar_reporte(
+        cls, pagina: _Pagina, anterior: str = "", pagina_esperada: int = 1,
+        valores: dict | None = None, nulos: dict | None = None,
+    ) -> None:
+        limite = time.monotonic() + 1800.0
+        while time.monotonic() < limite:
+            estado = cls._estado_reporte(pagina)
+            if not estado.get("ocupada"):
+                if estado.get("errores"):
+                    raise RuntimeError(str(estado["errores"]))
+                if (estado.get("huella") and estado["huella"] != anterior
+                        and estado.get("texto") and estado.get("actual") == pagina_esperada):
+                    cls._comprobar_parametros(estado, valores, nulos)
+                    return
+            pagina._dormir(0.5)
+        raise RuntimeError(f"Log Page Audit no terminó de cargar la página {pagina_esperada}")
+
+    @staticmethod
+    def _leer_filas(pagina: _Pagina) -> list[list[object]]:
         crudas = pagina.evaluar(
             r"""(function(){
               var area = document.getElementById(%s);
-              if (!area) return [];
+              if (!area) return null;
               var salida = [];
               area.querySelectorAll('tr').forEach(function(fila){
-                var celdas = [];
-                Array.from(fila.children).forEach(function(celda){
-                  if (celda.tagName !== 'TD') return;
-                  celdas.push({
-                    t: (celda.innerText || '').replace(/\s+/g, ' ').trim()
-                  });
-                });
-                if (celdas.length) salida.push(celdas);
+                var celdas = Array.from(fila.children).filter(c => c.tagName === 'TD');
+                // Las tablas exteriores contienen el reporte entero; no son datos.
+                if (![8, 10].includes(celdas.length)) return;
+                salida.push(celdas.map(c => ({
+                  t: (c.innerText || '').replace(/\s+/g, ' ').trim(),
+                  repo_id: (function(){
+                    var a = c.querySelector('a[href]');
+                    var m = a && a.getAttribute('href').match(/repoId=(\d+)/);
+                    return m ? Number(m[1]) : null;
+                  })()
+                })));
               });
               return salida;
-            })()"""
-            % json.dumps(_AREA_REPORTE)
+            })()""" % json.dumps(_AREA_REPORTE)
         )
-        return crudas if isinstance(crudas, list) else []
+        if not isinstance(crudas, list):
+            raise RuntimeError("No se pudieron leer las filas del reporte")
+        return crudas
 
-    @staticmethod
-    def _esperar_reporte(pagina: _Pagina) -> None:
-        inicio = time.monotonic()
-        limite = inicio + 1800.0
-        while time.monotonic() < limite:
-            estado = pagina.evaluar(
+    @classmethod
+    def _leer_todas_paginas(cls, pagina, valores=None, nulos=None, avisar=None):
+        filas = []
+        numero = 1
+        notificar = avisar or (lambda _texto: None)
+        while True:
+            estado = cls._estado_reporte(pagina)
+            cls._comprobar_parametros(estado, valores, nulos)
+            if estado.get("ocupada") or estado.get("actual") != numero:
+                raise RuntimeError("El visor cambió de página durante la lectura")
+            notificar(f"Leyendo página {numero} de {estado.get('total') or '?'}")
+            filas.extend(cls._leer_filas(pagina))
+            # SSRS puede anunciar un total provisional ("2?"). Se avanza hasta
+            # que deshabilite Siguiente y confirme el total definitivo.
+            total = str(estado.get("total", "")).strip()
+            if not estado.get("siguiente"):
+                if not total.isdigit() or int(total) != numero:
+                    raise RuntimeError("El visor no confirmó la última página; el reporte está incompleto")
+                return filas
+            anterior = estado["huella"]
+            pulsado = pagina.evaluar(
                 """(function(){
-                  var area = document.getElementById(%s);
-                  var espera = document.getElementById(%s);
-                  var repo = document.getElementById(%s);
-                  var desde = document.getElementById(%s);
-                  var ocupada = espera &&
-                    getComputedStyle(espera).display !== 'none' &&
-                    getComputedStyle(espera).visibility !== 'hidden';
-                  return {
-                    ocupada: !!ocupada,
-                    texto: area ? area.innerText.trim().length : 0,
-                    repo: repo ? repo.value : '',
-                    desde: desde ? desde.value : ''
-                  };
-                })()"""
-                % (
-                    json.dumps(_AREA_REPORTE),
-                    json.dumps(_ESPERA_REPORTE),
-                    json.dumps(f"{_CONTROL}ctl03_ddValue"),
-                    json.dumps(f"{_CONTROL}ctl07_txtValue"),
-                )
+                  var c = document.getElementById(%s);
+                  if (!c || c.disabled || !c.getClientRects().length) return false;
+                  c.click(); return true;
+                })()""" % json.dumps(f"{_PAGINADOR}Next_ctl00_ctl00")
             )
-            if (
-                isinstance(estado, dict)
-                and not estado.get("ocupada")
-                and int(estado.get("texto", 0)) > 20
-            ):
-                return
-            if (
-                time.monotonic() - inicio > 15.0
-                and isinstance(estado, dict)
-                and not estado.get("ocupada")
-                and (
-                    str(estado.get("repo", "")) != "1"
-                    or not str(estado.get("desde", ""))
-                )
-            ):
-                raise RuntimeError(
-                    "SSRS reinició los parámetros sin generar el reporte"
-                )
-            pagina._dormir(1.0)
-        raise RuntimeError("Log Page Audit no terminó dentro de 30 minutos")
+            if pulsado is not True:
+                raise RuntimeError("No se pudo avanzar; el reporte está incompleto")
+            numero += 1
+            cls._esperar_reporte(pagina, anterior, numero, valores, nulos)
 
     @staticmethod
     def _fecha_ssrs(valor: date) -> str:
         return f"{valor.month}/{valor.day}/{valor.year}"
 
     @staticmethod
-    def _sin_repetidos(
-        excepciones: Iterable[ExcepcionLogPageAudit],
-    ) -> list[ExcepcionLogPageAudit]:
-        salida: list[ExcepcionLogPageAudit] = []
-        vistos: set[tuple[str, str, str, str, int | None]] = set()
-        for excepcion in excepciones:
-            clave = (
-                excepcion.tipo,
-                excepcion.log_number,
-                excepcion.matricula_libro,
-                excepcion.destino,
-                excepcion.copias,
-            )
-            if clave not in vistos:
-                vistos.add(clave)
-                salida.append(excepcion)
-        return salida
+    def _sin_repetidos(excepciones: Iterable[ExcepcionLogPageAudit]) -> list[ExcepcionLogPageAudit]:
+        return list(dict.fromkeys(excepciones))

@@ -166,7 +166,7 @@ def test_la_consulta_de_reportes_mantiene_edge_oculto(monkeypatch) -> None:
     monkeypatch.setattr(web_reports, "SesionDeNavegador", _SesionFalsa)
     monkeypatch.setattr(web_reports, "_Pagina", _PaginaFalsa)
     monkeypatch.setattr(
-        ClienteLogPageAudit, "_elegir_repositorio", staticmethod(lambda _p: None)
+        ClienteLogPageAudit, "_elegir_repositorio", staticmethod(lambda _p, _r: None)
     )
     monkeypatch.setattr(
         ClienteLogPageAudit, "_correr_reporte", lambda *_args: []
@@ -312,7 +312,7 @@ def test_la_consulta_cuenta_los_reportes_que_va_terminando(
     monkeypatch.setattr(web_reports, "SesionDeNavegador", _SesionFalsa)
     monkeypatch.setattr(web_reports, "_Pagina", _PaginaFalsa)
     monkeypatch.setattr(
-        ClienteLogPageAudit, "_elegir_repositorio", staticmethod(lambda _p: None)
+        ClienteLogPageAudit, "_elegir_repositorio", staticmethod(lambda _p, _r: None)
     )
     monkeypatch.setattr(
         ClienteLogPageAudit, "_correr_reporte", lambda *_args: []
@@ -321,7 +321,7 @@ def test_la_consulta_cuenta_los_reportes_que_va_terminando(
     ClienteLogPageAudit(AirVaultConfig()).consultar(
         date(2026, 9, 1),
         date(2026, 9, 7),
-        ["8", "9"],
+        ["8", "10"],
         progreso=lambda hechos, total: pasos.append((hechos, total)),
     )
 
