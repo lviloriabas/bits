@@ -303,7 +303,7 @@ def test_si_se_agrega_una_imagen_despues_del_preview_no_se_borra():
     assert not any("onDeletePage" in orden for orden in pagina.ordenes)
 
 
-def test_preview_permite_conservar_la_copia_nueva(monkeypatch, tmp_path):
+def test_preview_no_permite_borrar_la_original_aunque_quede_otra(monkeypatch, tmp_path):
     pagina = _PaginaFalsa(_REJILLA, [_REJILLA[0]])
     corrector = CorrectorLogPageAudit(AirVaultConfig(), ResolutorFlota())
     corrector.auditoria = tmp_path / "auditoria.jsonl"
@@ -311,10 +311,22 @@ def test_preview_permite_conservar_la_copia_nueva(monkeypatch, tmp_path):
     corrector.revisar = lambda c, vistas, elegidas: {vistas[1][0].clave}
     correccion = planificar(_excepciones(("HP-9913CMP", "DUPLICATED 2008159(2x)")))[0]
     resultado = corrector._borrar(pagina, correccion, copias_en(_REJILLA, "2008159"), False)
-    assert resultado.hecho
-    pedidas = [orden for orden in pagina.ordenes if "onDeletePage" in orden]
-    assert len(pedidas) == 1 and ')("1_3209_231_1_1_0"' in pedidas[0]
-    assert 'borrado_verificado' in corrector.auditoria.read_text(encoding="utf-8")
+    assert not resultado.hecho
+    assert "conservar la copia original" in resultado.detalle
+    assert not any("onDeletePage" in orden for orden in pagina.ordenes)
+    assert not corrector.auditoria.exists()
+
+
+def test_preview_no_permite_borrar_todas_las_copias(monkeypatch):
+    pagina = _PaginaFalsa(_REJILLA)
+    corrector = CorrectorLogPageAudit(AirVaultConfig(), ResolutorFlota())
+    monkeypatch.setattr(corrector, "_imagen_previa", lambda *_: b"png")
+    corrector.revisar = lambda _c, vistas, _elegidas: {c.clave for c, _imagen in vistas}
+    correccion = planificar(_excepciones(("HP-9913CMP", "DUPLICATED 2008159(2x)")))[0]
+    resultado = corrector._borrar(pagina, correccion, copias_en(_REJILLA, "2008159"), False)
+    assert not resultado.hecho
+    assert "conservar al menos una copia" in resultado.detalle
+    assert not any("onDeletePage" in orden for orden in pagina.ordenes)
 
 
 def test_omitir_preview_no_abre_borrado(monkeypatch):

@@ -964,8 +964,9 @@ class CorrectorLogPageAudit:
                 return Resultado(correccion, detalle="Omitida en la revisión de imágenes.")
             if not set(elegidas) < {c.clave for c in copias}:
                 return Resultado(correccion, detalle="Debe conservar al menos una copia.")
+            if se_queda.clave in elegidas:
+                return Resultado(correccion, detalle="Debe conservar la copia original (la más antigua).")
             sobran = [c for c in copias if c.clave in elegidas]
-            se_queda = next(c for c in copias if c.clave not in elegidas)
         for copia in sobran:
             actuales = self._releer(pagina, correccion.log_number)
             conocidas = {c.clave: c for c in copias}

@@ -1,18 +1,98 @@
 """Comparación de imágenes antes de eliminar copias de Web Reports."""
 
-from PySide6.QtCore import QEvent, QSize, Qt, Signal
-from PySide6.QtGui import QIcon, QKeySequence, QPixmap, QShortcut
+from PySide6.QtCore import QEvent, QRect, QSize, Qt, Signal
+from PySide6.QtGui import QIcon, QKeySequence, QPalette, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QPushButton, QSizePolicy, QVBoxLayout,
+    QPushButton, QSizePolicy, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
+    QVBoxLayout,
 )
 
+from app.airvault.correcciones import por_antiguedad
 from app.gui.responsive import fit_to_screen
 from app.gui.theme import gestor_tema
 from app.gui.tokens import SPACE_M, SPACE_S, on_accent_text, paleta
 from app.gui.widgets import (
     TABLE_RADIUS, ZoomableScrollArea, style_pdf_surface, window_stylesheet,
 )
+
+
+class _MiniaturaCopiaDelegate(QStyledItemDelegate):
+    """Mantiene la casilla junto al nombre, debajo de la imagen."""
+
+    def _rectangulos(self, option):
+        contenido = option.rect.adjusted(SPACE_S, SPACE_S, -SPACE_S, -SPACE_S)
+        estilo = option.widget.style()
+        ancho = estilo.pixelMetric(QStyle.PixelMetric.PM_IndicatorWidth, option, option.widget)
+        alto = estilo.pixelMetric(QStyle.PixelMetric.PM_IndicatorHeight, option, option.widget)
+        fila = max(alto, option.fontMetrics.height())
+        ancho_texto = min(option.fontMetrics.horizontalAdvance(option.text),
+                          max(0, contenido.width() - ancho - SPACE_S))
+        izquierda = contenido.center().x() - (ancho + SPACE_S + ancho_texto) // 2
+        etiqueta = QRect(izquierda, contenido.bottom() - fila + 1,
+                         ancho + SPACE_S + ancho_texto, fila)
+        casilla = QRect(izquierda, etiqueta.center().y() - alto // 2, ancho, alto)
+        texto = QRect(casilla.right() + SPACE_S + 1, etiqueta.top(), ancho_texto, fila)
+        imagen = QRect(contenido.left(), contenido.top(), contenido.width(),
+                       max(0, etiqueta.top() - SPACE_S - contenido.top()))
+        return imagen, casilla, texto
+
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        imagen, casilla, texto = self._rectangulos(opt)
+        fondo = QStyleOptionViewItem(opt)
+        fondo.text = ""
+        fondo.icon = QIcon()
+        fondo.features &= ~(QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
+                            | QStyleOptionViewItem.ViewItemFeature.HasDecoration
+                            | QStyleOptionViewItem.ViewItemFeature.HasDisplay)
+        estilo = opt.widget.style()
+        painter.save()
+        estilo.drawControl(QStyle.ControlElement.CE_ItemViewItem, fondo, painter, opt.widget)
+        painter.restore()
+        opt.icon.paint(painter, imagen, Qt.AlignmentFlag.AlignCenter)
+        marca = QStyleOptionViewItem(opt)
+        marca.rect = casilla
+        marca.state &= ~(QStyle.StateFlag.State_On | QStyle.StateFlag.State_Off
+                         | QStyle.StateFlag.State_NoChange)
+        marca.state |= (QStyle.StateFlag.State_On if opt.checkState == Qt.CheckState.Checked
+                        else QStyle.StateFlag.State_Off)
+        if not index.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+            marca.state &= ~QStyle.StateFlag.State_Enabled
+        painter.save()
+        estilo.drawPrimitive(QStyle.PrimitiveElement.PE_IndicatorItemViewItemCheck,
+                             marca, painter, opt.widget)
+        painter.restore()
+        rol = (QPalette.ColorRole.HighlightedText if opt.state & QStyle.StateFlag.State_Selected
+               else QPalette.ColorRole.Text)
+        painter.save()
+        painter.setFont(opt.font)
+        painter.setPen(opt.palette.color(rol))
+        painter.drawText(texto, Qt.AlignmentFlag.AlignCenter,
+                         opt.fontMetrics.elidedText(opt.text, Qt.TextElideMode.ElideRight,
+                                                   texto.width()))
+        painter.restore()
+
+    def editorEvent(self, event, model, option, index):
+        if not (index.flags() & Qt.ItemFlag.ItemIsUserCheckable
+                and index.flags() & Qt.ItemFlag.ItemIsEnabled):
+            return False
+        if event.type() == QEvent.Type.KeyPress:
+            return super().editorEvent(event, model, option, index)
+        if event.type() not in (QEvent.Type.MouseButtonPress,
+                               QEvent.Type.MouseButtonRelease,
+                               QEvent.Type.MouseButtonDblClick):
+            return False
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        if event.button() != Qt.MouseButton.LeftButton or not self._rectangulos(opt)[1].contains(event.position().toPoint()):
+            return False
+        if event.type() == QEvent.Type.MouseButtonRelease:
+            estado = (Qt.CheckState.Unchecked if opt.checkState == Qt.CheckState.Checked
+                      else Qt.CheckState.Checked)
+            return model.setData(index, estado, Qt.ItemDataRole.CheckStateRole)
+        return True
 
 
 class RevisionCopiasDialog(QDialog):
@@ -38,6 +118,7 @@ class RevisionCopiasDialog(QDialog):
         contenido = QHBoxLayout()
         contenido.setSpacing(SPACE_S)
         self.lista = QListWidget()
+        self.lista.setItemDelegate(_MiniaturaCopiaDelegate(self.lista))
         self.lista.setViewMode(QListWidget.ViewMode.IconMode)
         self.lista.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.lista.setMovement(QListWidget.Movement.Static)
@@ -119,13 +200,19 @@ class RevisionCopiasDialog(QDialog):
         self.setWindowTitle(f"Revisar copias de la bitácora {correccion.log_number}")
         self._pendiente = True
         self.continuar_con_predeterminadas = False
-        self._predeterminadas = set(elegidas)
+        vistas = list(vistas)
+        original, _ = por_antiguedad([copia for copia, _imagen in vistas])
+        if original is None and len(vistas) == 1:
+            original = vistas[0][0]
+        self._original = original.clave if original is not None else None
+        extras = {copia.clave for copia, _imagen in vistas if copia.clave != self._original}
+        self._predeterminadas = set(elegidas) & extras
         self._imagenes = []
         self._copias = []
-        self._validas = True
+        self._validas = original is not None
         self.ayuda.setText(
             "Seleccione una copia para verla en grande y marque las que desea eliminar. "
-            "Conserve al menos una. Use Ctrl + rueda para ampliar la imagen."
+            "La original (la más antigua) se conserva siempre. Use Ctrl + rueda para ampliar la imagen."
         )
         self.lista.blockSignals(True)
         self.lista.clear()
@@ -137,11 +224,16 @@ class RevisionCopiasDialog(QDialog):
             self._validas = self._validas and valida
             fecha = copia.cuando.strftime("%d/%m/%Y %H:%M") if copia.cuando else "Sin fecha"
             numero = len(self._copias)
-            item = QListWidgetItem(QIcon(pixmap), f"Copia {numero}" if valida else f"Copia {numero}: sin imagen")
-            item.setToolTip(f"{copia.matricula}\n{fecha}")
+            es_original = copia.clave == self._original
+            nombre = "Original" if es_original else f"Copia {numero}"
+            item = QListWidgetItem(QIcon(pixmap), nombre if valida else f"{nombre}: sin imagen")
+            item.setToolTip(f"{copia.matricula}\n{fecha}" + ("\nLa original se conserva siempre." if es_original else ""))
             item.setData(Qt.ItemDataRole.UserRole, copia.clave)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked if copia.clave in elegidas else Qt.CheckState.Unchecked)
+            if not es_original:
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            else:
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if copia.clave in self._predeterminadas else Qt.CheckState.Unchecked)
             self.lista.addItem(item)
         self.lista.blockSignals(False)
         self.imagen.clear()
@@ -193,7 +285,8 @@ class RevisionCopiasDialog(QDialog):
             return
         copia = self._copias[fila]
         fecha = copia.cuando.strftime("%d/%m/%Y %H:%M") if copia.cuando else "Sin fecha"
-        self.datos_copia.setText(f"Copia {fila + 1} de {self.lista.count()}: {copia.matricula} - {fecha}")
+        original = " (original)" if copia.clave == self._original else ""
+        self.datos_copia.setText(f"Copia {fila + 1} de {self.lista.count()}{original}: {copia.matricula} - {fecha}")
         self.anterior.setEnabled(fila > 0)
         self.siguiente.setEnabled(fila + 1 < self.lista.count())
         self._zoom = 1.0
@@ -223,8 +316,10 @@ class RevisionCopiasDialog(QDialog):
 
     def _marcar_actual(self, marcada):
         item = self.lista.currentItem()
-        if item is not None:
+        if self._pendiente and item is not None and item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
             item.setCheckState(Qt.CheckState.Checked if marcada else Qt.CheckState.Unchecked)
+        else:
+            self._actualizar()
 
     def usar_predeterminadas(self):
         if not self.predeterminadas.isEnabled():
@@ -261,21 +356,28 @@ class RevisionCopiasDialog(QDialog):
         if not self._pendiente:
             return
         item = self.lista.currentItem()
-        if item:
+        if item and item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
             item.setCheckState(Qt.CheckState.Unchecked if item.checkState() == Qt.CheckState.Checked else Qt.CheckState.Checked)
 
     def seleccionadas(self):
         if self.continuar_con_predeterminadas:
             return set(self._predeterminadas)
         return {self.lista.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.lista.count())
-                if self.lista.item(i).checkState() == Qt.CheckState.Checked}
+                if self.lista.item(i).checkState() == Qt.CheckState.Checked
+                and self.lista.item(i).data(Qt.ItemDataRole.UserRole) != self._original}
 
     def _actualizar(self, *_):
+        for i in range(self.lista.count()):
+            original = self.lista.item(i)
+            if original.data(Qt.ItemDataRole.UserRole) == self._original and original.checkState() != Qt.CheckState.Unchecked:
+                original.setCheckState(Qt.CheckState.Unchecked)
         self.aplicar.setEnabled(self._pendiente and self._validas and 0 < len(self.seleccionadas()) < self.lista.count())
-        self.predeterminadas.setEnabled(self._pendiente and 0 < len(self._predeterminadas) < self.lista.count())
+        self.predeterminadas.setEnabled(self._pendiente and self._original is not None
+                                       and 0 < len(self._predeterminadas) < self.lista.count())
         self.omitir.setEnabled(self._pendiente)
         item = self.lista.currentItem()
         self.eliminar_copia.blockSignals(True)
         self.eliminar_copia.setChecked(item is not None and item.checkState() == Qt.CheckState.Checked)
-        self.eliminar_copia.setEnabled(self._pendiente and item is not None)
+        self.eliminar_copia.setEnabled(self._pendiente and item is not None
+                                      and bool(item.flags() & Qt.ItemFlag.ItemIsUserCheckable))
         self.eliminar_copia.blockSignals(False)
