@@ -201,6 +201,8 @@ class _TrabajoEnEdge(QThread):
 class WebReportsWorker(_TrabajoEnEdge):
     """Consulta SSRS fuera del hilo de la interfaz."""
 
+    paginas = Signal(int, int, int, int)
+
     def __init__(
         self,
         config: AirVaultConfig,
@@ -225,6 +227,7 @@ class WebReportsWorker(_TrabajoEnEdge):
             cancelar=self._cancelado,
             progreso=self.paso.emit,
             parametros=self._parametros,
+            progreso_paginas=self.paginas.emit,
         )
 
 
@@ -343,6 +346,7 @@ class WebReportsWindow(QDialog):
         self._worker: Optional[_TrabajoEnEdge] = None
         self._aperturas: set[WebSearchWorker] = set()
         self._revision_actual = None
+        self._paginas_leidas = {}
         self._cerrar_al_terminar = False
         self._resultados: list[ExcepcionLogPageAudit] = []
         # Si ahora mismo no hay ningún trabajo en Edge. Lo consulta el
@@ -407,10 +411,12 @@ class WebReportsWindow(QDialog):
         grid.addWidget(QLabel("Desde:"), 0, 0)
         self.desde_edit = self._fecha(inicio)
         self.desde_edit.setToolTip("Primer día del reporte, incluido.")
+        recordar(WEB_REPORTS, "desde", self.desde_edit)
         grid.addWidget(self.desde_edit, 0, 1)
         grid.addWidget(QLabel("Hasta:"), 0, 2)
         self.hasta_edit = self._fecha(hoy)
         self.hasta_edit.setToolTip("Último día del reporte, incluido.")
+        recordar(WEB_REPORTS, "hasta", self.hasta_edit)
         grid.addWidget(self.hasta_edit, 0, 3)
         # Columna vacía entre el rango y el filtro: son dos preguntas
         # distintas y sin ese aire la fila se leía como seis controles
@@ -436,11 +442,13 @@ class WebReportsWindow(QDialog):
         self.aeronaves_edit = QLineEdit()
         self.aeronaves_edit.setPlaceholderText("Todas")
         self.aeronaves_edit.setToolTip("AC Numbers(s): escriba el filtro igual que en AirVault.")
+        recordar(WEB_REPORTS, "aeronaves", self.aeronaves_edit)
         opciones.addWidget(self.aeronaves_edit, 1, 1)
         opciones.addWidget(QLabel("Bitácoras:"), 1, 2)
         self.bitacoras_edit = QLineEdit()
         self.bitacoras_edit.setPlaceholderText("Todas")
         self.bitacoras_edit.setToolTip("Log Page(s): escriba el filtro igual que en AirVault.")
+        recordar(WEB_REPORTS, "bitacoras", self.bitacoras_edit)
         opciones.addWidget(self.bitacoras_edit, 1, 3)
 
         opciones.addWidget(QLabel("Mínimo de páginas:"), 2, 0)
@@ -512,7 +520,7 @@ class WebReportsWindow(QDialog):
         self.progreso = QProgressBar()
         self.progreso.setRange(0, 100)
         self.progreso.setValue(0)
-        self.progreso.setTextVisible(False)
+        self.progreso.setTextVisible(True)
         fila_progreso.addWidget(self.progreso, 1)
 
         alto = (
@@ -691,7 +699,9 @@ class WebReportsWindow(QDialog):
         worker.finished.connect(worker.deleteLater)
         self._worker = worker
         self._habilitar(False)
-        self.progreso.setRange(0, 0)
+        self.progreso.setRange(0, 100)
+        self.progreso.setValue(0)
+        self.progreso.setFormat("Corrección: %p%")
         self.resumen.setText("Corrigiendo en AirVault…")
         # Por bitácora que de verdad se va a abrir en Edge: las de revisión
         # manual salen del plan resueltas y no cuestan nada de navegador.
@@ -716,15 +726,37 @@ class WebReportsWindow(QDialog):
         if not worker.mostrar_previas:
             worker.responder_previa(set(elegidas))
             return
-        dialogo = RevisionCopiasDialog(correccion, vistas, elegidas, self)
-        self._revision_actual = dialogo
-        try:
-            aceptado = dialogo.exec() == QDialog.DialogCode.Accepted
-            if aceptado and dialogo.continuar_con_predeterminadas:
-                self.mostrar_previas.setChecked(False)
-            worker.responder_previa(dialogo.seleccionadas() if aceptado else None)
-        finally:
+        dialogo = self._revision_actual
+        if dialogo is None:
+            dialogo = RevisionCopiasDialog(correccion, vistas, elegidas, self)
+            self._revision_actual = dialogo
+            dialogo.respuesta.connect(self._responder_revision)
+            dialogo.cancelar.connect(self._cancelar_revision)
+            dialogo.show()
+        else:
+            dialogo.cargar(correccion, vistas, elegidas)
+
+    def _responder_revision(self, seleccion):
+        dialogo = self._revision_actual
+        worker = self._worker
+        if dialogo is None or not isinstance(worker, CorreccionWorker) or worker._cancelado():
+            return
+        if dialogo.continuar_con_predeterminadas:
+            self.mostrar_previas.setChecked(False)
+        worker.responder_previa(seleccion)
+
+    def _cancelar_revision(self):
+        worker = self._worker
+        if isinstance(worker, CorreccionWorker):
+            worker.cancelar()
+            self.boton_cancelar.setEnabled(False)
+            self.resumen.setText("Cancelando…")
+
+    def _cerrar_revision(self):
+        if self._revision_actual is not None:
+            dialogo = self._revision_actual
             self._revision_actual = None
+            dialogo.finalizar()
             dialogo.deleteLater()
 
     def _autorizado(self, plan: list[Correccion]) -> bool:
@@ -749,6 +781,9 @@ class WebReportsWindow(QDialog):
 
     def _al_corregir(self, resultados: object) -> None:
         """Cuenta lo que se hizo y lo que no, sin esconder lo segundo."""
+        self._cerrar_revision()
+        self.progreso.setRange(0, 100)
+        self.progreso.setValue(100)
         self._cerrar_cronometro(aprender=True)
         resultados = list(resultados)
         hechos = [resultado for resultado in resultados if resultado.hecho]
@@ -797,6 +832,7 @@ class WebReportsWindow(QDialog):
 
     def _al_fallar_correccion(self, mensaje: str) -> None:
         """Un fallo del corrector no se presenta como fallo de consulta."""
+        self._cerrar_revision()
         self._cerrar_cronometro(aprender=False)
         self.resumen.setText(f"Error al corregir: {mensaje}")
 
@@ -870,11 +906,15 @@ class WebReportsWindow(QDialog):
         worker.fallo.connect(self._al_fallar)
         worker.cancelado.connect(self._al_cancelar)
         worker.paso.connect(self._al_pasar)
+        worker.paginas.connect(self._al_leer_paginas)
         worker.finished.connect(self._al_terminar)
         worker.finished.connect(worker.deleteLater)
         self._worker = worker
         self._habilitar(False)
-        self.progreso.setRange(0, 0)
+        self._paginas_leidas = {}
+        self.progreso.setRange(0, 100)
+        self.progreso.setValue(0)
+        self.progreso.setFormat("Lectura: %p%")
         self.resumen.setText("Consultando Web Reports…")
         self._arrancar_cronometro(TAREA_CONSULTA, len(filtros))
         worker.start()
@@ -896,6 +936,21 @@ class WebReportsWindow(QDialog):
         """
         if self._estimacion is not None:
             self._estimacion.avanzo(hechas, total)
+        if isinstance(self._worker, CorreccionWorker) and total > 0:
+            self.progreso.setRange(0, 100)
+            self.progreso.setValue(100 * hechas // total)
+
+    def _al_leer_paginas(self, leidas: int, total: int, reporte: int, reportes: int) -> None:
+        self._paginas_leidas[reporte] = leidas
+        # Un total provisional de SSRS no autoriza a dar la lectura por terminada.
+        fraccion = leidas / total if total > 0 else 0
+        porcentaje = int(100 * (reporte - 1 + fraccion) / reportes)
+        self.progreso.setRange(0, 100)
+        if total > 0:
+            self.progreso.setFormat("Lectura: %p%")
+        else:
+            self.progreso.setFormat("Lectura: %p% (total por confirmar)")
+        self.progreso.setValue(max(self.progreso.value(), porcentaje))
 
     def _al_latir(self) -> None:
         """Repinta las tres cifras, cuatro veces por segundo."""
@@ -931,6 +986,7 @@ class WebReportsWindow(QDialog):
     def _al_recibir(self, excepciones: object) -> None:
         self._cerrar_cronometro(aprender=True)
         self._resultados = list(excepciones)
+        self.progreso.setFormat("Lectura: %p%")
         repositorios = {
             int(parse_qs(urlsplit(item.url_busqueda).query)["repoId"][0])
             for item in self._resultados if item.url_busqueda
@@ -938,6 +994,8 @@ class WebReportsWindow(QDialog):
         if len(repositorios) == 1:
             self._config = self._config.with_overrides(repo_id=repositorios.pop())
         self._llenar_tabla(self._resultados)
+        self.progreso.setRange(0, 100)
+        self.progreso.setValue(100)
         mal_indexadas = sum(
             resultado.tipo == TIPO_MAL_INDEXADA
             for resultado in self._resultados
@@ -969,6 +1027,10 @@ class WebReportsWindow(QDialog):
             else:
                 texto += " Requieren revisión manual."
             self.resumen.setText(texto)
+        if self._paginas_leidas:
+            paginas = sum(self._paginas_leidas.values())
+            lectura = "Leída 1 página del reporte." if paginas == 1 else f"Leídas {paginas} páginas del reporte."
+            self.resumen.setText(f"{lectura} {self.resumen.text()}")
 
     def _llenar_tabla(
         self, excepciones: list[ExcepcionLogPageAudit]
@@ -1125,17 +1187,18 @@ class WebReportsWindow(QDialog):
         self.resumen.setText(f"Error al consultar: {mensaje}")
 
     def _al_cancelar(self) -> None:
+        self._cerrar_revision()
         self._cerrar_cronometro(aprender=False)
-        self.resumen.setText("Consulta cancelada.")
+        self.resumen.setText("Corrección cancelada." if isinstance(self._worker, CorreccionWorker) else "Consulta cancelada.")
 
     def _al_terminar(self) -> None:
+        self._cerrar_revision()
         # Por si el hilo acabó sin decir cómo: el reloj no se queda corriendo
         # detrás de un trabajo que ya no existe.
         self._cerrar_cronometro(aprender=False)
         self._worker = None
         self._habilitar(not self._aperturas)
         self.progreso.setRange(0, 100)
-        self.progreso.setValue(0)
         self._cerrar_si_termino()
 
     def _cerrar_si_termino(self) -> None:

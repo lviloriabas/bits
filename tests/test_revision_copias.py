@@ -87,6 +87,9 @@ def test_todas_las_copias_se_pueden_ver_en_grande_y_conservan_las_marcas(app, ca
 
 def test_continuar_con_predeterminadas_descarta_las_marcas_manuales(app):
     dialogo = RevisionCopiasDialog(SimpleNamespace(log_number="2008159"), _vistas(3), {"1", "2"})
+    respuestas = []
+    dialogo.respuesta.connect(respuestas.append)
+    dialogo.show()
     assert dialogo.windowFlags() & Qt.WindowType.WindowMinimizeButtonHint
     dialogo.lista.item(0).setCheckState(Qt.CheckState.Checked)
     dialogo.lista.item(2).setCheckState(Qt.CheckState.Unchecked)
@@ -94,7 +97,32 @@ def test_continuar_con_predeterminadas_descarta_las_marcas_manuales(app):
     dialogo.predeterminadas.click()
     assert dialogo.continuar_con_predeterminadas
     assert dialogo.seleccionadas() == {"1", "2"}
-    assert dialogo.result() == dialogo.DialogCode.Accepted
+    assert respuestas == [{"1", "2"}]
+    assert dialogo.isVisible()
+    assert not dialogo.aplicar.isEnabled()
+
+
+def test_la_lista_de_copias_es_vertical_y_esta_al_lado_del_visor(app):
+    dialogo = RevisionCopiasDialog(SimpleNamespace(log_number="2008159"), _vistas(12), {"1"})
+    dialogo.show()
+    app.processEvents()
+    assert dialogo.lista.flow() == dialogo.lista.Flow.TopToBottom
+    assert dialogo.lista.geometry().right() < dialogo.visor.geometry().left()
+    assert dialogo.lista.verticalScrollBar().maximum() > 0
+    assert dialogo.lista.horizontalScrollBar().maximum() == 0
+
+
+def test_no_acepta_eliminar_todas_las_copias_ni_repite_la_respuesta(app):
+    dialogo = RevisionCopiasDialog(SimpleNamespace(log_number="2008159"), _vistas(2), {"1"})
+    respuestas = []
+    dialogo.respuesta.connect(respuestas.append)
+    dialogo.lista.item(0).setCheckState(Qt.CheckState.Checked)
+    dialogo.accept()
+    assert respuestas == []
+    dialogo.lista.item(0).setCheckState(Qt.CheckState.Unchecked)
+    dialogo.accept()
+    dialogo.accept()
+    assert respuestas == [{"1"}]
 
 
 def test_el_visor_abierto_acompana_los_dos_temas(app, monkeypatch):

@@ -26,9 +26,9 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from PySide6.QtCore import QSignalBlocker
+from PySide6.QtCore import QDate, QSignalBlocker, Qt
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QAbstractButton, QComboBox, QSpinBox
+from PySide6.QtWidgets import QAbstractButton, QComboBox, QDateEdit, QLineEdit, QSpinBox
 
 from app.utils.preferencias_ui import guardar_opcion, leer_opcion
 
@@ -69,6 +69,10 @@ def recordar(
         _recordar_combo(llave, control)
     elif isinstance(control, QSpinBox):
         _recordar_spin(llave, control)
+    elif isinstance(control, QDateEdit):
+        _recordar_fecha(llave, control)
+    elif isinstance(control, QLineEdit):
+        _recordar_texto(llave, control)
     elif isinstance(control, (QAbstractButton, QAction)):
         _recordar_marca(llave, control)
     else:
@@ -100,6 +104,31 @@ def _recordar_spin(nombre: str, control: QSpinBox) -> None:
             control.setValue(valor)
     control.valueChanged.connect(
         lambda cantidad, nombre=nombre: guardar_opcion(nombre, int(cantidad))
+    )
+
+
+def _recordar_fecha(nombre: str, control: QDateEdit) -> None:
+    """Fechas en formato ISO, independientes del formato que se muestra."""
+    guardado = leer_opcion(nombre)
+    if isinstance(guardado, str):
+        fecha = QDate.fromString(guardado, Qt.DateFormat.ISODate)
+        if fecha.isValid() and control.minimumDate() <= fecha <= control.maximumDate():
+            with QSignalBlocker(control):
+                control.setDate(fecha)
+    control.dateChanged.connect(
+        lambda fecha, nombre=nombre:
+        guardar_opcion(nombre, fecha.toString(Qt.DateFormat.ISODate))
+    )
+
+
+def _recordar_texto(nombre: str, control: QLineEdit) -> None:
+    """Filtros de texto, incluido el vacio que vuelve a consultar todo."""
+    guardado = leer_opcion(nombre)
+    if isinstance(guardado, str):
+        with QSignalBlocker(control):
+            control.setText(guardado)
+    control.textChanged.connect(
+        lambda texto, nombre=nombre: guardar_opcion(nombre, texto)
     )
 
 

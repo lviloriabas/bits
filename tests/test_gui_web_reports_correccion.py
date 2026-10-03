@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import datetime
 from PySide6.QtCore import QByteArray, QBuffer, QIODevice, Qt
 from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import QDialog
 
 from app.gui import web_reports_window as modulo_ventana
 from app.airvault.config import AirVaultConfig
@@ -362,14 +361,85 @@ def test_el_boton_del_visor_continua_y_apaga_las_siguientes_previas(app, tmp_pat
     ]
     correccion = _excepciones(("HP-9913CMP", "DUPLICATED 2008159(3x)"))[0]
 
-    def aceptar_default(dialogo):
-        dialogo.lista.item(0).setCheckState(Qt.CheckState.Checked)
-        dialogo.predeterminadas.click()
-        return QDialog.DialogCode.Accepted
-
-    monkeypatch.setattr(RevisionCopiasDialog, "exec", aceptar_default)
     ventana._revisar_copias(correccion, vistas, {"1", "2"})
+    dialogo = ventana._revision_actual
+    dialogo.lista.item(0).setCheckState(Qt.CheckState.Checked)
+    dialogo.predeterminadas.click()
     assert worker._seleccion_previa == {"1", "2"}
     assert not worker.mostrar_previas
     assert not ventana.mostrar_previas.isChecked()
+    assert ventana._revision_actual is dialogo
+    assert dialogo.isVisible()
+
+
+def _revision_abierta(app, tmp_path, monkeypatch):
+    from tests.test_revision_copias import _vistas
+
+    ventana = WebReportsWindow(tmp_path)
+    worker = modulo_ventana.CorreccionWorker(AirVaultConfig(), [], ventana)
+    worker.mostrar_previas = True
+    ventana._worker = worker
+    monkeypatch.setattr(ventana, "sender", lambda: worker)
+    correccion = _excepciones(("HP-9913CMP", "DUPLICATED 2008159(3x)"))[0]
+    ventana._revisar_copias(correccion, _vistas(3), {"1", "2"})
+    return ventana, worker, correccion
+
+
+def test_reutiliza_el_visor_tras_eliminar_y_omitir(app, tmp_path, monkeypatch):
+    from tests.test_revision_copias import _vistas
+
+    ventana, worker, correccion = _revision_abierta(app, tmp_path, monkeypatch)
+    dialogo = ventana._revision_actual
+    dialogo.aplicar.click()
+    assert worker._seleccion_previa == {"1", "2"}
+    assert dialogo.isVisible()
+    assert not dialogo.aplicar.isEnabled()
+    worker._respuesta_previa.clear()
+    siguiente = _excepciones(("HP-9913CMP", "DUPLICATED 2008160(2x)"))[0]
+    ventana._revisar_copias(siguiente, _vistas(2), {"1"})
+    assert ventana._revision_actual is dialogo
+    assert "2008160" in dialogo.windowTitle()
+    assert dialogo.lista.count() == 2
+    dialogo.omitir.click()
+    assert worker._respuesta_previa.is_set()
+    assert worker._seleccion_previa is None
+    assert not worker._cancelado()
+    assert dialogo.isVisible()
+    ventana._al_terminar()
     assert ventana._revision_actual is None
+    assert not dialogo.isVisible()
+    assert not worker._cancelado()
+
+
+def test_la_x_del_visor_cancela_tambien_despues_de_aplicar(app, tmp_path, monkeypatch):
+    ventana, worker, _ = _revision_abierta(app, tmp_path, monkeypatch)
+    dialogo = ventana._revision_actual
+    dialogo.aplicar.click()
+    dialogo.close()
+    assert worker._cancelado()
+    assert not dialogo.isVisible()
+    assert ventana.resumen.text() == "Cancelando…"
+    ventana._al_cancelar()
+    assert ventana.resumen.text() == "Corrección cancelada."
+
+
+def test_cancelar_en_el_visor_detiene_la_revision(app, tmp_path, monkeypatch):
+    ventana, worker, _ = _revision_abierta(app, tmp_path, monkeypatch)
+    ventana._revision_actual.boton_cancelar.click()
+    assert worker._cancelado()
+    assert not worker._respuesta_previa.is_set()
+
+
+def test_la_barra_muestra_la_correccion_y_conserva_el_porcentaje_al_cancelar(app, tmp_path):
+    ventana = WebReportsWindow(tmp_path)
+    worker = modulo_ventana.CorreccionWorker(AirVaultConfig(), [], ventana)
+    ventana._worker = worker
+    ventana.progreso.setFormat("Corrección: %p%")
+    ventana._al_pasar(1, 4)
+    assert ventana.progreso.value() == 25
+    ventana._al_pasar(2, 4)
+    assert ventana.progreso.value() == 50
+    ventana._al_cancelar()
+    ventana._al_terminar()
+    assert ventana.progreso.value() == 50
+    assert ventana.progreso.format() == "Corrección: %p%"

@@ -98,11 +98,50 @@ def test_lee_todas_las_paginas_incluso_con_total_provisional():
         [fila("2008154 MIS-INDEX to ACN [HP-9813CMP]")],
     ], ["2?", "3?", "3"])
     avisos = []
-    filas = ClienteLogPageAudit._leer_todas_paginas(pagina, avisar=avisos.append)
+    progreso = []
+    filas = ClienteLogPageAudit._leer_todas_paginas(
+        pagina, avisar=avisos.append, progreso=lambda *paso: progreso.append(paso))
     resultado = parsear_filas(filas, AirVaultConfig())
     assert pagina.leidas == [1, 2, 3]
     assert [r.log_number for r in resultado] == ["2008152", "2008153", "2008154"]
     assert avisos[-1] == "Leyendo página 3 de 3"
+    assert progreso == [(1, 0), (2, 0), (3, 3)]
+
+
+def test_informa_cada_pagina_leida_con_el_total_confirmado():
+    pasos = []
+    ClienteLogPageAudit._leer_todas_paginas(
+        Paginas([[], [], []]), progreso=lambda *paso: pasos.append(paso))
+    assert pasos == [(1, 3), (2, 3), (3, 3)]
+
+
+def test_la_barra_cuenta_la_lectura_y_conserva_el_total_de_paginas(app, tmp_path):
+    ventana = WebReportsWindow(tmp_path)
+    assert ventana.progreso.isTextVisible()
+    ventana._al_leer_paginas(1, 4, 1, 2)
+    assert ventana.progreso.value() == 12
+    assert ventana.progreso.format() == "Lectura: %p%"
+    ventana._al_leer_paginas(4, 4, 1, 2)
+    assert ventana.progreso.value() == 50
+    ventana._al_leer_paginas(1, 2, 2, 2)
+    assert ventana.progreso.value() == 75
+    ventana._al_leer_paginas(2, 2, 2, 2)
+    ventana._al_recibir([])
+    ventana._al_terminar()
+    assert ventana.progreso.value() == 100
+    assert ventana.resumen.text().startswith("Leídas 6 páginas del reporte.")
+
+
+def test_no_inventa_un_porcentaje_si_ssrs_no_confirma_el_total(app, tmp_path):
+    ventana = WebReportsWindow(tmp_path)
+    ventana._al_leer_paginas(2, 0, 1, 1)
+    assert ventana.progreso.value() == 0
+    assert "total por confirmar" in ventana.progreso.format()
+    ventana._al_leer_paginas(3, 3, 1, 1)
+    ventana._al_recibir([])
+    assert ventana.progreso.value() == 100
+    assert "total por confirmar" not in ventana.progreso.format()
+    assert "Leídas 3 páginas del reporte." in ventana.resumen.text()
 
 
 def test_no_devuelve_resultados_parciales_si_siguiente_falla():

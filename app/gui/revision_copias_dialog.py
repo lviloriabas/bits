@@ -1,6 +1,6 @@
 """Comparación de imágenes antes de eliminar copias de Web Reports."""
 
-from PySide6.QtCore import QEvent, QSize, Qt
+from PySide6.QtCore import QEvent, QSize, Qt, Signal
 from PySide6.QtGui import QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
@@ -16,12 +16,15 @@ from app.gui.widgets import (
 
 
 class RevisionCopiasDialog(QDialog):
+    respuesta = Signal(object)
+    cancelar = Signal()
+
     def __init__(self, correccion, vistas, elegidas, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(f"Revisar copias de la bitácora {correccion.log_number}")
         self.setWindowFlag(Qt.WindowType.WindowMinimizeButtonHint, True)
         self._densidad = fit_to_screen(self, 1100, 850)
-        self._predeterminadas = set(elegidas)
+        self._predeterminadas = set()
+        self._pendiente = False
         self.continuar_con_predeterminadas = False
         self._imagenes = []
         self._copias = []
@@ -29,36 +32,23 @@ class RevisionCopiasDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(*([self._densidad.window_margin] * 4))
         layout.setSpacing(SPACE_S)
-        ayuda = QLabel(
-            "Seleccione una copia para verla en grande y marque las que desea eliminar. "
-            "Conserve al menos una. Use Ctrl + rueda para ampliar la imagen."
-        )
-        ayuda.setWordWrap(True)
-        layout.addWidget(ayuda)
+        self.ayuda = QLabel()
+        self.ayuda.setWordWrap(True)
+        layout.addWidget(self.ayuda)
+        contenido = QHBoxLayout()
+        contenido.setSpacing(SPACE_S)
         self.lista = QListWidget()
         self.lista.setViewMode(QListWidget.ViewMode.IconMode)
         self.lista.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.lista.setMovement(QListWidget.Movement.Static)
-        self.lista.setFlow(QListWidget.Flow.LeftToRight)
+        self.lista.setFlow(QListWidget.Flow.TopToBottom)
         self.lista.setWrapping(False)
-        self.lista.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.lista.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.lista.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         self.lista.setSpacing(SPACE_S)
-        self._validas = True
-        for copia, imagen in vistas:
-            pixmap = QPixmap()
-            valida = pixmap.loadFromData(imagen, "PNG")
-            self._imagenes.append(pixmap)
-            self._copias.append(copia)
-            self._validas = self._validas and valida
-            fecha = copia.cuando.strftime("%d/%m/%Y %H:%M") if copia.cuando else "Sin fecha"
-            numero = len(self._copias)
-            item = QListWidgetItem(QIcon(pixmap), f"Copia {numero}" if valida else f"Copia {numero}: sin imagen")
-            item.setToolTip(f"{copia.matricula}\n{fecha}")
-            item.setData(Qt.ItemDataRole.UserRole, copia.clave)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked if copia.clave in elegidas else Qt.CheckState.Unchecked)
-            self.lista.addItem(item)
-        layout.addWidget(self.lista)
+        contenido.addWidget(self.lista)
+        detalle = QVBoxLayout()
+        detalle.setSpacing(SPACE_S)
         navegacion = QHBoxLayout()
         navegacion.setSpacing(SPACE_S)
         self.anterior = QPushButton("Anterior")
@@ -73,7 +63,7 @@ class RevisionCopiasDialog(QDialog):
         navegacion.addWidget(self.datos_copia, 1)
         navegacion.addWidget(self.eliminar_copia)
         navegacion.addWidget(self.siguiente)
-        layout.addLayout(navegacion)
+        detalle.addLayout(navegacion)
         self.visor = ZoomableScrollArea()
         self.visor.setObjectName("visorCopia")
         self.visor.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
@@ -86,25 +76,30 @@ class RevisionCopiasDialog(QDialog):
         style_pdf_surface(self.visor)
         self.visor.viewport().installEventFilter(self)
         self.lista.viewport().installEventFilter(self)
-        layout.addWidget(self.visor, 1)
+        detalle.addWidget(self.visor, 1)
+        contenido.addLayout(detalle, 1)
+        layout.addLayout(contenido, 1)
         botones = QHBoxLayout()
         botones.setSpacing(SPACE_S)
         self.predeterminadas = QPushButton("Corregir todas con la opción predeterminada")
         self.predeterminadas.setToolTip(
-            "Continúa esta bitácora y las restantes sin abrir el visor. "
+            "Continúa esta bitácora y las restantes sin pedir más revisiones. "
             "Conserva la copia más antigua y elimina las posteriores."
         )
         self.predeterminadas.clicked.connect(self.usar_predeterminadas)
         botones.addWidget(self.predeterminadas)
         botones.addStretch()
-        omitir = QPushButton("Omitir esta bitácora")
-        omitir.clicked.connect(self.reject)
+        self.omitir = QPushButton("Omitir esta bitácora")
+        self.omitir.clicked.connect(lambda: self._responder(None))
+        self.boton_cancelar = QPushButton("Cancelar")
+        self.boton_cancelar.clicked.connect(self.reject)
         self.aplicar = QPushButton("Eliminar seleccionadas")
         self.aplicar.setObjectName("primaryButton")
         self.aplicar.clicked.connect(self.accept)
-        botones.addWidget(omitir)
+        botones.addWidget(self.boton_cancelar)
+        botones.addWidget(self.omitir)
         botones.addWidget(self.aplicar)
-        for boton in (self.anterior, self.siguiente, self.predeterminadas, omitir, self.aplicar):
+        for boton in (self.anterior, self.siguiente, self.predeterminadas, self.boton_cancelar, self.omitir, self.aplicar):
             boton.setAutoDefault(False)
         layout.addLayout(botones)
         self.lista.itemChanged.connect(self._actualizar)
@@ -117,6 +112,40 @@ class RevisionCopiasDialog(QDialog):
             self._atajos.append(atajo)
         gestor_tema().cambiado.connect(self._tema)
         self._tema()
+        self.cargar(correccion, vistas, elegidas)
+
+    def cargar(self, correccion, vistas, elegidas):
+        """Cambia de bitácora sin cerrar ni recrear el visor."""
+        self.setWindowTitle(f"Revisar copias de la bitácora {correccion.log_number}")
+        self._pendiente = True
+        self.continuar_con_predeterminadas = False
+        self._predeterminadas = set(elegidas)
+        self._imagenes = []
+        self._copias = []
+        self._validas = True
+        self.ayuda.setText(
+            "Seleccione una copia para verla en grande y marque las que desea eliminar. "
+            "Conserve al menos una. Use Ctrl + rueda para ampliar la imagen."
+        )
+        self.lista.blockSignals(True)
+        self.lista.clear()
+        for copia, imagen in vistas:
+            pixmap = QPixmap()
+            valida = pixmap.loadFromData(imagen, "PNG")
+            self._imagenes.append(pixmap)
+            self._copias.append(copia)
+            self._validas = self._validas and valida
+            fecha = copia.cuando.strftime("%d/%m/%Y %H:%M") if copia.cuando else "Sin fecha"
+            numero = len(self._copias)
+            item = QListWidgetItem(QIcon(pixmap), f"Copia {numero}" if valida else f"Copia {numero}: sin imagen")
+            item.setToolTip(f"{copia.matricula}\n{fecha}")
+            item.setData(Qt.ItemDataRole.UserRole, copia.clave)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if copia.clave in elegidas else Qt.CheckState.Unchecked)
+            self.lista.addItem(item)
+        self.lista.blockSignals(False)
+        self.imagen.clear()
+        self.datos_copia.clear()
         self._acomodar_miniaturas()
         self.lista.setCurrentRow(0)
         self._actualizar()
@@ -147,15 +176,12 @@ class RevisionCopiasDialog(QDialog):
         return super().eventFilter(objeto, evento)
 
     def _acomodar_miniaturas(self):
-        # Todas siguen accesibles; con muchas copias la franja se desplaza.
-        cantidad = max(1, self.lista.count())
-        ancho = max(96, self.lista.viewport().width() // cantidad - SPACE_S)
-        alto = max(64, min(104, self.height() // 8))
-        self.lista.setIconSize(QSize(min(200, ancho - 2 * SPACE_S), alto))
+        # La lista lateral desplaza las copias verticalmente.
+        ancho = max(120, min(180, self.width() // 6))
+        alto = max(80, min(140, self.height() // 6))
+        self.lista.setIconSize(QSize(ancho - 2 * SPACE_M, alto))
         self.lista.setGridSize(QSize(ancho, alto + self.fontMetrics().height() + 2 * SPACE_M))
-        self.lista.setFixedHeight(
-            self.lista.gridSize().height() + self.lista.horizontalScrollBar().sizeHint().height() + 2 * SPACE_S
-        )
+        self.lista.setFixedWidth(ancho + self.lista.verticalScrollBar().sizeHint().width() + 2 * SPACE_S)
 
     def _mover(self, paso):
         fila = self.lista.currentRow() + paso
@@ -201,10 +227,39 @@ class RevisionCopiasDialog(QDialog):
             item.setCheckState(Qt.CheckState.Checked if marcada else Qt.CheckState.Unchecked)
 
     def usar_predeterminadas(self):
+        if not self.predeterminadas.isEnabled():
+            return
         self.continuar_con_predeterminadas = True
-        self.accept()
+        self._responder(set(self._predeterminadas))
+
+    def accept(self):
+        if self.aplicar.isEnabled():
+            self._responder(self.seleccionadas())
+
+    def _responder(self, seleccion):
+        if not self._pendiente:
+            return
+        self._pendiente = False
+        self.ayuda.setText("Procesando la corrección. Puede cancelar o cerrar el visor para detenerla.")
+        for i in range(self.lista.count()):
+            item = self.lista.item(i)
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
+        self._actualizar()
+        self.respuesta.emit(seleccion)
+
+    def reject(self):
+        self._pendiente = False
+        self.cancelar.emit()
+        super().reject()
+
+    def finalizar(self):
+        """Cierra al terminar el trabajo sin solicitar una cancelación."""
+        self._pendiente = False
+        self.done(QDialog.DialogCode.Accepted)
 
     def _alternar(self):
+        if not self._pendiente:
+            return
         item = self.lista.currentItem()
         if item:
             item.setCheckState(Qt.CheckState.Unchecked if item.checkState() == Qt.CheckState.Checked else Qt.CheckState.Checked)
@@ -216,10 +271,11 @@ class RevisionCopiasDialog(QDialog):
                 if self.lista.item(i).checkState() == Qt.CheckState.Checked}
 
     def _actualizar(self, *_):
-        self.aplicar.setEnabled(self._validas and 0 < len(self.seleccionadas()) < self.lista.count())
-        self.predeterminadas.setEnabled(0 < len(self._predeterminadas) < self.lista.count())
+        self.aplicar.setEnabled(self._pendiente and self._validas and 0 < len(self.seleccionadas()) < self.lista.count())
+        self.predeterminadas.setEnabled(self._pendiente and 0 < len(self._predeterminadas) < self.lista.count())
+        self.omitir.setEnabled(self._pendiente)
         item = self.lista.currentItem()
         self.eliminar_copia.blockSignals(True)
         self.eliminar_copia.setChecked(item is not None and item.checkState() == Qt.CheckState.Checked)
-        self.eliminar_copia.setEnabled(item is not None)
+        self.eliminar_copia.setEnabled(self._pendiente and item is not None)
         self.eliminar_copia.blockSignals(False)

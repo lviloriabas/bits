@@ -328,3 +328,17 @@ def test_la_consulta_cuenta_los_reportes_que_va_terminando(
     # El cero no sobra: es el aviso de que la sesion ya esta en pie y de que
     # lo que se cuente desde ahi es el costo de los reportes, no el de abrir.
     assert pasos == [(0, 2), (1, 2), (2, 2)]
+
+    paginas = []
+
+    def reporte(_self, _pagina, _desde, _hasta, _filtro, _opciones, _avisar, avance):
+        avance(1, 2)
+        avance(2, 2)
+        return []
+
+    monkeypatch.setattr(ClienteLogPageAudit, "_correr_reporte", reporte)
+    ClienteLogPageAudit(AirVaultConfig()).consultar(
+        date(2026, 9, 1), date(2026, 9, 7), ["8", "10"],
+        progreso_paginas=lambda *paso: paginas.append(paso),
+    )
+    assert paginas == [(1, 2, 1, 2), (2, 2, 1, 2), (1, 2, 2, 2), (2, 2, 2, 2)]

@@ -230,7 +230,9 @@ flowchart TD
     F -. "ya corregida" .-> Z
 ```
 
-**Revisar imágenes antes de eliminar copias** abre una comparación para cada bitácora duplicada. La selección inicial conserva la más antigua. Puede cambiar las marcas, omitir la bitácora o pulsar **Eliminar seleccionadas**. Siempre debe conservar una copia. Las miniaturas se guardan en memoria mientras la ventana siga abierta, para reutilizarlas si el documento no cambió. Si desactiva la opción, la corrección conserva automáticamente la copia más antigua.
+**Revisar imágenes antes de eliminar copias** abre un único visor durante la corrección. Las copias aparecen en una lista vertical a la izquierda, con la imagen elegida en grande a su lado. El visor permanece abierto al eliminar u omitir y muestra la siguiente bitácora en la misma ventana. La selección inicial conserva la más antigua. Puede cambiar las marcas, omitir la bitácora o pulsar **Eliminar seleccionadas**. Siempre debe conservar al menos una copia en Web Search. **Cancelar** o la **X** del visor detienen el proceso, incluso después de ordenar un borrado; las copias ya eliminadas no se recuperan. Las miniaturas se guardan en memoria mientras la ventana siga abierta, para reutilizarlas si el documento no cambió. Si desactiva la opción, la corrección conserva automáticamente la copia más antigua.
+
+La barra indica **Lectura** o **Corrección**, cada una con su propio porcentaje de 0 a 100 %. Durante la lectura cuenta las páginas de cada reporte; si AirVault todavía no confirma el total, lo indica y espera ese dato para calcular el porcentaje. Al finalizar la lectura, el resumen muestra cuántas páginas del reporte se leyeron. Durante la corrección, el porcentaje cuenta las bitácoras terminadas. Cancelar conserva el porcentaje alcanzado.
 
 Solo se eliminan documentos de tipo **LOG PAGE** con **Images = 1**. Si cualquiera tiene varias imágenes, falta ese recuento o el tipo corresponde a otra área, se bloquea el grupo y se informa el motivo. Justo antes de eliminar se vuelve a comprobar que las copias coincidan con las revisadas y que la que debe conservarse siga presente. Esto protege documentos de Fleet u otras áreas incluidos en la búsqueda.
 
@@ -347,12 +349,13 @@ vez:
   «Automatizacion».
 - En el visor de CSV: «Mostrar campos» y si la tabla abre con las columnas
   importantes o con todas.
-- En Web Reports: que excepciones se traen y si se revisan las imagenes
-  antes de eliminar copias.
+- En Web Reports: fechas desde y hasta, filtros de aeronaves y bitacoras,
+  repositorio, tipo de libro, minimo de paginas, orden, actualizacion,
+  que excepciones se traen y si se revisan las imagenes antes de eliminar copias.
 
 No se recuerda lo que cambia en cada consulta y no es una preferencia: los
-PDF de entrada, la ejecucion elegida en el historial y el rango de fechas de
-Web Reports abren en blanco, como siempre.
+PDF de entrada y la ejecucion elegida en el historial abren en blanco,
+como siempre. Web Reports conserva el rango de fechas elegido.
 
 Todo esto vive en `interfaz.json` y `airvault.json`, junto al programa. Son
 archivos de cada instalacion y no se suben al repositorio, asi que marcar

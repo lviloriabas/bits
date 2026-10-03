@@ -21,7 +21,7 @@ from app.airvault.correcciones import (
     resumen_del_plan,
 )
 from app.airvault.mapping import ResolutorFlota
-from app.airvault.web_reports import parsear_filas
+from app.airvault.web_reports import ConsultaCancelada, parsear_filas
 
 
 def _fila(matricula: str, detalle: str) -> list[dict[str, str]]:
@@ -325,6 +325,27 @@ def test_omitir_preview_no_abre_borrado(monkeypatch):
     correccion = planificar(_excepciones(("HP-9913CMP", "DUPLICATED 2008159(2x)")))[0]
     assert not corrector._borrar(pagina, correccion, copias_en(_REJILLA, "2008159"), False).hecho
     assert not any("onDeletePage" in orden for orden in pagina.ordenes)
+
+
+def test_cancelar_entre_copias_detiene_el_borrado_y_conserva_la_elegida(monkeypatch):
+    filas = _REJILLA[:2] + [
+        _fila_de_rejilla("3", "999", "2008159", "HP-9913CMP", "4/2/2025 8:00:00 AM")]
+    pagina = _PaginaFalsa(filas)
+    corrector = CorrectorLogPageAudit(AirVaultConfig(), ResolutorFlota())
+    correccion = planificar(_excepciones(("HP-9913CMP", "DUPLICATED 2008159(3x)")))[0]
+    borradas = []
+
+    def releer(*_):
+        if borradas:
+            raise ConsultaCancelada()
+        return copias_en(filas, "2008159")
+
+    monkeypatch.setattr(corrector, "_releer", releer)
+    monkeypatch.setattr(corrector, "_borrar_copia", lambda _pagina, copia: borradas.append(copia.clave))
+    with pytest.raises(ConsultaCancelada):
+        corrector._borrar(pagina, correccion, copias_en(filas, "2008159"), False)
+    assert borradas == [filas[0]["clave"]]
+    assert filas[1]["clave"] not in borradas
 
 
 def test_apagar_revision_conserva_la_mas_antigua_sin_descargar_imagenes(monkeypatch, tmp_path):

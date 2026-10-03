@@ -457,6 +457,7 @@ class ClienteLogPageAudit:
         cancelar: Callable[[], bool] | None = None,
         progreso: Callable[[int, int], None] | None = None,
         parametros: ParametrosLogPageAudit | None = None,
+        progreso_paginas: Callable[[int, int, int, int], None] | None = None,
     ) -> list[ExcepcionLogPageAudit]:
         """Trae las excepciones del reporte en el rango y los filtros dados.
 
@@ -465,6 +466,9 @@ class ClienteLogPageAudit:
         persona y la cuenta la usa el cronometro de la ventana, que necesita
         numeros y no texto. El primer aviso llega con cero hechos, en cuanto
         el formulario responde: es la senal de que la apertura termino.
+
+        ``progreso_paginas`` cuenta cada página leída para la barra y el
+        resumen. Un total de cero significa que SSRS todavía no lo confirmó.
         """
         hoy = date.today()
         hasta = hasta or hoy
@@ -526,7 +530,10 @@ class ClienteLogPageAudit:
                     )
                     notificar(f"Consultando páginas {nombre}")
                     filas = self._correr_reporte(
-                        pagina, desde, hasta, filtro, opciones, notificar
+                        pagina, desde, hasta, filtro, opciones, notificar,
+                        (lambda leidas, total, numero=numero: progreso_paginas(
+                            leidas, total, numero, len(filtros)
+                        )) if progreso_paginas is not None else None,
                     )
                     tipo = TIPO_MAL_INDEXADA if filtro == FILTRO_MAL_INDEXADAS else TIPO_DUPLICADA
                     resultado.extend(
@@ -574,6 +581,7 @@ class ClienteLogPageAudit:
         self, pagina: _Pagina, desde: date | None, hasta: date | None,
         filtro: str, parametros: ParametrosLogPageAudit | None = None,
         avisar: Callable[[str], None] | None = None,
+        progreso_paginas: Callable[[int, int], None] | None = None,
     ) -> list[list[object]]:
         opciones = parametros or ParametrosLogPageAudit()
         valores = self._valores(desde, hasta, filtro, opciones)
@@ -608,7 +616,7 @@ class ClienteLogPageAudit:
             raise RuntimeError(f"El formulario de Log Page Audit cambió: {lanzado}")
         esperados = dict(valores, **{f"{_CONTROL}ctl03_ddValue": opciones.repositorio})
         self._esperar_reporte(pagina, anterior, 1, esperados, nulos)
-        return self._leer_todas_paginas(pagina, esperados, nulos, avisar)
+        return self._leer_todas_paginas(pagina, esperados, nulos, avisar, progreso_paginas)
 
     @staticmethod
     def _estado_reporte(pagina: _Pagina) -> dict:
@@ -710,7 +718,7 @@ class ClienteLogPageAudit:
         return crudas
 
     @classmethod
-    def _leer_todas_paginas(cls, pagina, valores=None, nulos=None, avisar=None):
+    def _leer_todas_paginas(cls, pagina, valores=None, nulos=None, avisar=None, progreso=None):
         filas = []
         numero = 1
         notificar = avisar or (lambda _texto: None)
@@ -727,7 +735,12 @@ class ClienteLogPageAudit:
             if not estado.get("siguiente"):
                 if not total.isdigit() or int(total) != numero:
                     raise RuntimeError("El visor no confirmó la última página; el reporte está incompleto")
+                if progreso is not None:
+                    progreso(numero, numero)
                 return filas
+            if progreso is not None:
+                # Cero indica que SSRS todavía no confirmó cuántas páginas hay.
+                progreso(numero, int(total) if total.isdigit() else 0)
             anterior = estado["huella"]
             pulsado = pagina.evaluar(
                 """(function(){
