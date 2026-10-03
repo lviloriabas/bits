@@ -563,6 +563,12 @@ class SesionDeNavegador:
             # La anotacion sobrevivio al navegador (un cierre a la fuerza,
             # un apagon). No es un fallo: se abre uno nuevo.
             return None
+        if cierre_diferido_activo() and _sin_ventana(version):
+            # Al comenzar una sesión de BITS se retira el Edge sin ventana
+            # que pudo dejar otra ejecución. El nuevo admite abrir bitácoras
+            # a la vista durante las consultas y correcciones.
+            self._quitar_de_en_medio(puerto, version)
+            return None
         reutilizado = False
         if (
             cierre_diferido_activo()
@@ -786,12 +792,11 @@ class SesionDeNavegador:
             *_ARGUMENTOS,
         ]
         if not self.visible:
-            # El trabajo corre en segundo plano, tambien en la GUI: un Edge
-            # minimizado igual aparece en la barra de tareas y la persona lo
-            # ve abrirse. Si despues hace falta una ventana (entrar con el
-            # segundo factor, mirar una busqueda), ``_aprovechar`` quita de
-            # en medio a este y lanza uno con ventana.
-            orden.append("--headless=new")
+            # La GUI necesita poder mostrar una bitácora sin reiniciar Edge
+            # ni invalidar las pestañas de un trabajo en curso.
+            orden.append(
+                "--start-minimized" if cierre_diferido_activo() else "--headless=new"
+            )
         orden.append(url)
         # La salida de error de Edge se guarda: es lo unico que dice por que
         # no arranco (perfil tomado, bandera rechazada, politica de la

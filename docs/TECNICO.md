@@ -389,6 +389,8 @@ La lectura espera una representación nueva del reporte, la página solicitada y
 
 El plan sale entero del reporte y no consulta nada: una mal indexada ya trae las dos matrículas y una duplicada, cuántas copias hay. Lo que el reporte no diga con esas palabras queda como caso a revisar, con el motivo escrito.
 
+Los enlaces de página y libro se pueden abrir durante cualquier trabajo. Las aperturas adicionales usan hilos independientes y no sustituyen el hilo, el progreso ni el cronómetro de la consulta o corrección. El cierre de BITS espera todos esos hilos. En la GUI, el Edge compartido arranca minimizado con ventana, para poder mostrar una búsqueda sin reiniciar el navegador ni invalidar las pestañas que usa el corrector; la consola conserva su arranque sin ventana.
+
 | Acción | Operación interna |
 |---|---|
 | Consultar | Ejecuta los filtros 8 (mal indexadas) y/o 10 (duplicadas) con los parámetros elegidos. Recorre todas las páginas del visor y hereda los datos del libro en las filas de continuación. No escribe nada. |

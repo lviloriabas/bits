@@ -381,8 +381,8 @@ def test_la_gui_conserva_edge_y_cierra_todo_junto_al_salir(
         assert puerto in vivos
         assert "Browser.close" not in ws.pedidos
         assert "Target.closeTarget" not in ws.pedidos
-        assert "--headless=new" in lanzados[0]
-        assert "--start-minimized" not in lanzados[0]
+        assert "--headless=new" not in lanzados[0]
+        assert "--start-minimized" in lanzados[0]
 
         navegador.cerrar_navegadores_al_salir()
 
@@ -390,6 +390,54 @@ def test_la_gui_conserva_edge_y_cierra_todo_junto_al_salir(
         assert ws.pedidos.count("Browser.close") == 1
         assert "Target.closeTarget" not in ws.pedidos
         assert not _anotacion(tmp_path).exists()
+    finally:
+        navegador.cerrar_navegadores_al_salir()
+
+
+def test_mostrar_una_bitacora_no_reinicia_el_edge_de_la_gui(monkeypatch, tmp_path):
+    navegador.cerrar_navegadores_al_salir()
+    vivos = {}
+    lanzados, ws, _matados = _perfil_con(monkeypatch, vivos, tmp_path)
+    navegador.mantener_navegadores_hasta_el_cierre()
+    sesion = navegador.SesionDeNavegador(
+        tmp_path, edge=Path("msedge.exe"), visible=False,
+    )
+    try:
+        version = sesion.abrir("https://airvault/sso")
+        sesion.abrir_pestana("https://airvault/correccion")
+        lector = navegador.SesionDeNavegador(tmp_path, edge=Path("msedge.exe"))
+        assert lector.abrir_a_la_vista("https://airvault/bitacora") == version
+        assert lector.puerto == sesion.puerto
+        assert len(lanzados) == 1
+        assert "Browser.close" not in ws.pedidos
+        assert "Target.closeTarget" not in ws.pedidos
+        assert "Target.activateTarget" in ws.pedidos
+    finally:
+        navegador.cerrar_navegadores_al_salir()
+
+
+def test_la_gui_reemplaza_un_edge_sin_ventana_antes_de_trabajar(monkeypatch, tmp_path):
+    navegador.cerrar_navegadores_al_salir()
+    vivos = {4321: {
+        "Browser": "HeadlessChrome/151",
+        "User-Agent": "HeadlessChrome/151",
+        "webSocketDebuggerUrl": "ws://127.0.0.1:4321/x",
+    }}
+    lanzados, ws, _matados = _perfil_con(monkeypatch, vivos, tmp_path)
+    _anotacion(tmp_path).write_text("4321", encoding="ascii")
+    navegador.mantener_navegadores_hasta_el_cierre()
+    sesion = navegador.SesionDeNavegador(
+        tmp_path, edge=Path("msedge.exe"), visible=False,
+    )
+    try:
+        sesion.abrir("https://airvault/sso")
+        assert sesion.puerto != 4321
+        assert 4321 not in vivos
+        assert "--start-minimized" in lanzados[0]
+        lector = navegador.SesionDeNavegador(tmp_path, edge=Path("msedge.exe"))
+        lector.abrir_a_la_vista("https://airvault/bitacora")
+        assert ws.pedidos.count("Browser.close") == 1
+        assert len(lanzados) == 1
     finally:
         navegador.cerrar_navegadores_al_salir()
 

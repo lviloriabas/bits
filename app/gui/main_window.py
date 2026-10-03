@@ -5228,16 +5228,16 @@ class MainWindow(QMainWindow):
                 indexado = None
             if indexado is not None:
                 indexados.append(indexado)
-        consulta_web = None
+        consultas_web = []
         if self._web_reports_window is not None:
             try:
-                consulta_web = self._web_reports_window.hilo()
+                consultas_web = self._web_reports_window.hilos()
             except RuntimeError:
-                consulta_web = None
+                pass
         for worker in (
             self._worker, self._preprocess_worker, self._outputs_worker,
-            self._input_scan_worker, consulta_web, self._actualizar_worker,
-            *indexados,
+            self._input_scan_worker, self._actualizar_worker,
+            *consultas_web, *indexados,
         ):
             if worker is None:
                 continue

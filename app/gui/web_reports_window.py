@@ -341,6 +341,7 @@ class WebReportsWindow(QDialog):
         self._raiz = Path(raiz)
         self._config = AirVaultConfig.load(self._raiz / AIRVAULT_FILENAME)
         self._worker: Optional[_TrabajoEnEdge] = None
+        self._aperturas: set[WebSearchWorker] = set()
         self._revision_actual = None
         self._cerrar_al_terminar = False
         self._resultados: list[ExcepcionLogPageAudit] = []
@@ -1055,19 +1056,20 @@ class WebReportsWindow(QDialog):
         )
 
     def _abrir_en_web_search(self, url: str, etiqueta: str) -> None:
-        """Lleva el Edge del programa a esa búsqueda, sin colgar la ventana.
-
-        Con el mismo candado que el resto: Edge admite un navegador por
-        perfil, así que abrir esto mientras se consulta o se corrige le
-        quitaría la pestaña al trabajo que ya estaba corriendo. Las
-        búsquedas de una en una, entonces; abierta la primera, cada una
-        siguiente se suma a la misma ventana y ninguna cierra a la anterior.
-        """
-        if self.hilo() is not None:
-            self.resumen.setText("Espere a que termine el trabajo actual.")
+        """Abre otra pestaña incluso mientras se consulta, corrige o abre otra."""
+        config = AirVaultConfig.load(self._raiz / AIRVAULT_FILENAME)
+        worker = WebSearchWorker(config, url, etiqueta, self)
+        if self._worker is not None or self._aperturas:
+            # Las aperturas adicionales conservan su propio hilo. Sus señales
+            # no terminan el trabajo principal ni alteran su cuenta o reloj.
+            self._aperturas.add(worker)
+            worker.resultado.connect(self._al_abrir_paralela)
+            worker.fallo.connect(self._al_fallar_apertura_paralela)
+            worker.finished.connect(self._al_terminar_apertura)
+            worker.finished.connect(worker.deleteLater)
+            worker.start()
             return
-        self._config = AirVaultConfig.load(self._raiz / AIRVAULT_FILENAME)
-        worker = WebSearchWorker(self._config, url, etiqueta, self)
+        self._config = config
         worker.avance.connect(self._al_avanzar)
         worker.resultado.connect(self._al_abrir)
         worker.fallo.connect(self._al_fallar_al_abrir)
@@ -1081,6 +1083,19 @@ class WebReportsWindow(QDialog):
         # Sin unidades: abrir una búsqueda es la apertura y nada más.
         self._arrancar_cronometro(TAREA_BUSQUEDA, 0)
         worker.start()
+
+    def _al_abrir_paralela(self, etiqueta: object) -> None:
+        if self._worker is None:
+            self.resumen.setText(f"Abierto en Web Search: {etiqueta}.")
+
+    def _al_fallar_apertura_paralela(self, mensaje: str) -> None:
+        self.resumen.setText(f"No se pudo abrir Web Search: {mensaje}")
+
+    def _al_terminar_apertura(self) -> None:
+        self._aperturas.discard(self.sender())
+        if self._worker is None:
+            self._habilitar(not self._aperturas)
+        self._cerrar_si_termino()
 
     def _al_abrir(self, etiqueta: object) -> None:
         # La búsqueda no tiene unidades, así que la apertura no termina
@@ -1118,10 +1133,13 @@ class WebReportsWindow(QDialog):
         # detrás de un trabajo que ya no existe.
         self._cerrar_cronometro(aprender=False)
         self._worker = None
-        self._habilitar(True)
+        self._habilitar(not self._aperturas)
         self.progreso.setRange(0, 100)
         self.progreso.setValue(0)
-        if self._cerrar_al_terminar:
+        self._cerrar_si_termino()
+
+    def _cerrar_si_termino(self) -> None:
+        if self._cerrar_al_terminar and not self.hilos():
             self._cerrar_al_terminar = False
             self.close()
 
@@ -1162,23 +1180,30 @@ class WebReportsWindow(QDialog):
         self.resumen.setText("Cancelando…")
 
     def hilo(self) -> Optional[QThread]:
-        worker = self._worker
-        if worker is None:
-            return None
-        try:
-            return worker if worker.isRunning() else None
-        except RuntimeError:
-            return None
+        return next(iter(self.hilos()), None)
+
+    def hilos(self) -> list[QThread]:
+        """Todos los trabajos vivos, incluidas las aperturas simultáneas."""
+        vivos = []
+        for worker in (self._worker, *self._aperturas):
+            if worker is None:
+                continue
+            try:
+                if worker.isRunning():
+                    vivos.append(worker)
+            except RuntimeError:
+                pass
+        return vivos
 
     def detener(self) -> None:
-        worker = self.hilo()
-        if worker is not None:
+        for worker in self.hilos():
             worker.cancelar()
 
     def closeEvent(self, event) -> None:
         if self.hilo() is not None:
             self._cerrar_al_terminar = True
             self._cancelar()
+            self.detener()
             event.ignore()
             return
         super().closeEvent(event)
