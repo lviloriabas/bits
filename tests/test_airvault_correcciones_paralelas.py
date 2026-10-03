@@ -316,7 +316,6 @@ def test_cierra_solo_la_pestana_temporal_aunque_edge_se_conserve(monkeypatch):
     pagina.ws = Socket()
     pagina._version = {"webSocketDebuggerUrl": "ws://local"}
     pagina._target_id = "temporal"
-    monkeypatch.setattr(web_reports, "cierre_diferido_activo", lambda: True)
     monkeypatch.setattr(web_reports, "_WebSocket", Socket)
     pagina.cerrar(forzar=True)
     assert pedidos == [("Target.closeTarget", {"targetId": "temporal"})]

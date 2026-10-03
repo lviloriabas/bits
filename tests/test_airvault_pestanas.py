@@ -109,25 +109,35 @@ def test_la_segunda_busqueda_va_al_navegador_que_ya_estaba(
     assert sesion.puerto == 9222
 
 
-def test_uno_sin_ventana_no_vale_para_ensenar_una_busqueda(
+def test_una_busqueda_usa_otro_perfil_si_el_edge_trabaja_sin_ventana(
     monkeypatch, tmp_path
 ):
     """Sumarle una pestaña a un Edge sin ventana no enseña nada."""
     monkeypatch.setattr(navegador, "_WebSocket", _EdgeFalso)
-    monkeypatch.setattr(navegador, "_puerto_anotado", lambda _perfil: 9222)
+    monkeypatch.setattr(
+        navegador, "_puerto_anotado",
+        lambda perfil: 9222 if Path(perfil) == tmp_path else None,
+    )
     monkeypatch.setattr(
         navegador, "_version_en", lambda _puerto, timeout=2.0: SIN_VENTANA
     )
-    lanzados: list[str] = []
+    lanzados = []
+    version_lectura = {**VERSION, "webSocketDebuggerUrl": "ws://127.0.0.1:9333/x"}
+
+    def abrir(self, url, espera_s=30.0):
+        lanzados.append((self.perfil, url))
+        return version_lectura
+
     monkeypatch.setattr(
         SesionDeNavegador,
         "abrir",
-        lambda self, url, espera_s=30.0: lanzados.append(url),
+        abrir,
     )
 
     _sesion(tmp_path).abrir_a_la_vista("https://airvault/x")
 
-    assert lanzados == ["https://airvault/x"]
+    assert lanzados == [(tmp_path.with_name(tmp_path.name + "-lectura"), "about:blank")]
+    assert "Browser.close" not in _EdgeFalso.metodos()
 
 
 def test_sin_nadie_en_el_perfil_se_abre_el_navegador(monkeypatch, tmp_path):

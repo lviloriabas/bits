@@ -58,10 +58,12 @@ from app.airvault.navegador import (
     PERFIL_POR_DEFECTO,
     ErrorDeNavegador,
     SesionDeNavegador,
+    registrar_pestana,
+    cerrar_pestana,
     cookies_de,
+    _CANDADO_PESTANAS,
     _edges_del_perfil,
     _puerto_anotado,
-    _sin_ventana,
     _version_en,
     _WebSocket,
 )
@@ -128,9 +130,9 @@ class _NavegadorDeCorrecciones:
     """Abre pestañas temporales sin tocar las que abrió la persona.
 
     El corrector comparte el perfil de AirVault para usar la sesión iniciada.
-    Si ese perfil ya está abierto en una ventana visible, trabaja en pestañas
-    de fondo y deja la ventana abierta. Si el perfil está libre, usa el Edge
-    oculto habitual y lo cierra al terminar.
+    Reutiliza el Edge del perfil, con o sin ventana, y protege cada pestaña
+    temporal antes de conectar su controlador. Si el perfil está libre, abre
+    Edge sin ventana. Cada caso cierra su pestaña al terminar o cancelarse.
     """
 
     def __init__(self, perfil: Path) -> None:
@@ -145,7 +147,7 @@ class _NavegadorDeCorrecciones:
             self._sesion.cerrar()
 
     def abrir(self, url: str, espera_s: float) -> dict:
-        version = self._edge_visible()
+        version = self._edge_del_perfil()
         if version is not None:
             return version
         self._sesion = SesionDeNavegador(self.perfil, visible=False)
@@ -156,9 +158,13 @@ class _NavegadorDeCorrecciones:
         # fuera de la GUI, donde abrir_pestana de la sesión limpia las demás.
         ws = _WebSocket(version["webSocketDebuggerUrl"])
         try:
-            creada = ws.pedir(
-                "Target.createTarget", url=url, background=True
-            )
+            with _CANDADO_PESTANAS:
+                creada = ws.pedir(
+                    "Target.createTarget", url=url, background=True
+                )
+                target_id = str(creada.get("targetId", ""))
+                if target_id:
+                    registrar_pestana(version, target_id)
         finally:
             ws.cerrar()
         target_id = str(creada.get("targetId", ""))
@@ -171,30 +177,23 @@ class _NavegadorDeCorrecciones:
     @staticmethod
     def cerrar_pestana(version: dict, target_id: str) -> None:
         """Retira una pestaña cuyo controlador no llegó a abrirse."""
-        try:
-            ws = _WebSocket(version["webSocketDebuggerUrl"], timeout=5.0)
-            try:
-                ws.pedir("Target.closeTarget", targetId=target_id)
-            finally:
-                ws.cerrar()
-        except (KeyError, OSError, RuntimeError, ValueError):
-            pass
+        cerrar_pestana(version, target_id, crear_socket=_WebSocket)
 
     def cookies(self, version: dict) -> dict:
         """Las cookies del perfil, sea propio el navegador o prestado."""
         return cookies_de(version)
 
-    def _edge_visible(self) -> dict | None:
+    def _edge_del_perfil(self) -> dict | None:
         anotado = _puerto_anotado(self.perfil)
         if anotado is not None:
             version = _version_en(anotado)
-            if version is not None and not _sin_ventana(version):
+            if version is not None:
                 return version
         for _pid, puerto in _edges_del_perfil(self.perfil):
             if puerto is None or puerto == anotado:
                 continue
             version = _version_en(puerto)
-            if version is not None and not _sin_ventana(version):
+            if version is not None:
                 return version
         return None
 
@@ -415,6 +414,24 @@ _LEER_REJILLA = r"""(function(){
     });
   });
   return salida;
+})()"""
+
+# Solo se consulta en la discrepancia que puede dejar una limpieza previa.
+# Una fila visible no demuestra que sea la unica si hay paginas sin leer.
+_REJILLA_CON_UNA_FILA = r"""(function(){
+  var tablas = document.querySelectorAll('.ui-jqgrid-btable');
+  if (tablas.length !== 1) return false;
+  var tabla = tablas[0];
+  try {
+    var total = jQuery(tabla).jqGrid('getGridParam', 'records');
+    var visibles = jQuery(tabla).jqGrid('getGridParam', 'reccount');
+    if (!/^\d+$/.test(String(total)) || !/^\d+$/.test(String(visibles))) {
+      return false;
+    }
+    var filas = tabla.querySelectorAll('tr.jqgrow').length;
+    return Number(total) === 1 && Number(visibles) === 1 && filas === 1
+      && !(tabla.grid && tabla.grid.hDiv && tabla.grid.hDiv.loading);
+  } catch (e) { return false; }
 })()"""
 
 # Se selecciona la fila y se llama a la misma funcion que AirVault cuelga de
@@ -895,6 +912,10 @@ class CorrectorLogPageAudit:
         """Deja una sola copia: la mas antigua."""
         esperadas = correccion.sobran + 1
         if len(copias) != esperadas:
+            if len(copias) == 1 and esperadas >= 2:
+                return self._comprobar_reporte_desactualizado(
+                    pagina, correccion, copias[0], esperadas,
+                )
             return Resultado(
                 correccion,
                 detalle=(
@@ -983,6 +1004,58 @@ class CorrectorLogPageAudit:
             detalle=(
                 f"{'Borrada' if una else 'Borradas'} {cuantas}; queda la "
                 f"del {se_queda.cuando:%d/%m/%Y}."
+            ),
+        )
+
+    def _comprobar_reporte_desactualizado(
+        self,
+        pagina: _Pagina,
+        correccion: Correccion,
+        copia: Copia,
+        esperadas: int,
+    ) -> Resultado:
+        """Confirma solo el caso raro: el reporte duplica una pagina ya limpia.
+
+        No se consulta toda la lista ni se recuerda una ausencia para futuras
+        corridas. Cada discrepancia se verifica de nuevo sin abrir imagenes.
+        """
+        detalle = (
+            f"El reporte indica {esperadas} copias; Web Search muestra 1."
+        )
+        if (
+            not copia.clave
+            or copia.imagenes != 1
+            or copia.tipo.upper() != "LOG PAGE"
+            or pagina.evaluar(_REJILLA_CON_UNA_FILA) is not True
+        ):
+            return Resultado(
+                correccion,
+                detalle=(
+                    detalle + " No se pudo confirmar que sea la única copia; "
+                    "no se elimina nada."
+                ),
+            )
+        actuales = self._releer(pagina, correccion.log_number)
+        if (
+            len(actuales) != 1
+            or not self._misma_copia(actuales[0], copia)
+            or pagina.evaluar(_REJILLA_CON_UNA_FILA) is not True
+        ):
+            return Resultado(
+                correccion,
+                detalle=(
+                    detalle + " La búsqueda cambió o quedó incompleta al "
+                    "comprobarla; no se elimina nada. Vuelva a consultar "
+                    "el reporte."
+                ),
+            )
+        return Resultado(
+            correccion,
+            detalle=(
+                f"Reporte desactualizado: indica {esperadas} copias, pero "
+                "Web Search confirma una sola después de volver a cargar "
+                "la búsqueda. Ya no aparece duplicada; no se elimina nada. "
+                "Vuelva a consultar el reporte con Actualizar en YES."
             ),
         )
 

@@ -238,6 +238,8 @@ Solo se eliminan documentos de tipo **LOG PAGE** con **Images = 1**. Si cualquie
 
 Una mal indexada se pasa a la aeronave de su libro. Antes de escribir, cada caso se contrasta con lo que Web Search muestra en ese momento: si el reporte quedó viejo y alguien ya lo corrigió, la bitácora se deja como está.
 
+Si una duplicada del reporte aparece una sola vez en Web Search, BITS comprueba que la búsqueda esté completa y vuelve a cargarla una vez. Solo si sigue apareciendo el mismo documento de una sola imagen, muestra **Reporte desactualizado** en el aviso de corrección incompleta y deja esa bitácora sin modificar. La comprobación adicional se hace únicamente al encontrar esa diferencia durante la corrección; consultar el reporte no revisa cada fila en Web Search. Si la búsqueda cambia, queda incompleta o no permite identificar el documento, informa que no pudo confirmarlo.
+
 Mientras algo corre en Edge, el cronómetro junto a la barra de progreso dice lo mismo que el de la ventana principal: **Estimado**, **Restante** y **Transcurrido**. La cuenta va por bitácora, no por página, y se ajusta con lo que tardan de verdad las de esta corrida. La primera vez parte de una estimación de fábrica; a partir de ahí usa lo que costó la última consulta o corrección completa en este equipo. Una corrida cancelada no cuenta para eso.
 
 Los casos se corrigen uno a uno y son independientes. Que uno falle no detiene los demás: al terminar, el resumen dice cuántas se corrigieron y cuántas no, y un aviso enumera cada bitácora que quedó sin cambiar con el motivo que dio AirVault. Los motivos habituales son que la página esté tomada por otro usuario y que Web Search ya no muestre lo que decía el reporte.

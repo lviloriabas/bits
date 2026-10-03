@@ -24,6 +24,19 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
+@pytest.fixture(autouse=True)
+def _navegadores_sin_heredar(monkeypatch):
+    """Los puertos e identificadores simulados no pasan de una prueba a otra."""
+    from app.airvault import navegador
+
+    for nombre in (
+        "_NAVEGADORES_ABIERTOS", "_PESTANAS_EN_USO", "_PESTANAS_LIBERADAS",
+        "_PESTANAS_DE_LECTURA", "_PESTANAS_ANCLA",
+    ):
+        monkeypatch.setattr(navegador, nombre, {})
+    monkeypatch.setattr(navegador, "_CIERRE_DIFERIDO", False)
+
+
 def _aplicacion():
     """La ``QApplication`` viva, o nada si la prueba no toco la interfaz.
 

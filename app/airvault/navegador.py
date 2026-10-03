@@ -7,9 +7,11 @@ lo haga una persona), pero lo que sigue despues si.
 El programa abre Edge con **un perfil propio**, dentro de ``portable/``,
 apuntando a AirVault. La persona entra una vez, con su usuario y su segundo
 factor, y en cuanto la sesion queda abierta el programa se la pide al propio
-navegador por su protocolo de depuracion. En la aplicacion ese Edge y sus
-pestanas se conservan hasta que BITS termina; la linea de comandos lo cierra
-al acabar su trabajo.
+navegador por su protocolo de depuracion. El Edge automatico SIEMPRE trabaja
+sin ventana, tambien en la GUI. Esta regla no se cambia para mostrar enlaces:
+las lecturas solicitadas usan otro perfil y no reinician el Edge de trabajo.
+La aplicacion conserva el navegador hasta salir, pero cada tarea cierra sus
+pestanas al terminar; la linea de comandos cierra tambien el navegador.
 
 Por que por el protocolo y no leyendo el archivo de cookies: un Edge moderno
 las cifra con la identidad del navegador (``v20``), que no se deshace desde
@@ -106,10 +108,48 @@ _ESPERA_ENTRE_BARRIDOS_S = 0.5
 _CIERRE_DIFERIDO = False
 _NAVEGADORES_ABIERTOS: dict[str, "SesionDeNavegador"] = {}
 _CANDADO_NAVEGADORES = threading.RLock()
+_CANDADO_PESTANAS = threading.RLock()
+_PESTANAS_EN_USO: dict[str, set[str]] = {}
+_PESTANAS_LIBERADAS: dict[str, set[str]] = {}
+_PESTANAS_DE_LECTURA: dict[str, set[str]] = {}
+_PESTANAS_ANCLA: dict[str, str] = {}
+
+
+def registrar_pestana(version: dict, target_id: str) -> None:
+    """Protege la pagina desde su creacion, antes de conectar su controlador."""
+    with _CANDADO_PESTANAS:
+        clave = version["webSocketDebuggerUrl"]
+        _PESTANAS_EN_USO.setdefault(clave, set()).add(target_id)
+        _PESTANAS_LIBERADAS.get(clave, set()).discard(target_id)
+
+
+def cerrar_pestana(version: dict, target_id: str, crear_socket=None) -> None:
+    """Suelta solo esta pagina; un fallo queda pendiente para el proximo barrido."""
+    if not target_id:
+        return
+    with _CANDADO_PESTANAS:
+        clave = version.get("webSocketDebuggerUrl", "")
+        _PESTANAS_EN_USO.get(clave, set()).discard(target_id)
+        _PESTANAS_LIBERADAS.setdefault(clave, set()).add(target_id)
+        try:
+            ws = (crear_socket or _WebSocket)(clave, timeout=5.0)
+            try:
+                respuesta = ws.pedir("Target.closeTarget", targetId=target_id)
+                if respuesta.get("success", True):
+                    _PESTANAS_LIBERADAS[clave].discard(target_id)
+            finally:
+                ws.cerrar()
+        except (KeyError, OSError, RuntimeError, ValueError) as exc:
+            logger.debug("No se pudo cerrar la pestana {}: {}", target_id, exc)
+
+
+def _hay_trabajo(version: dict) -> bool:
+    with _CANDADO_PESTANAS:
+        return bool(_PESTANAS_EN_USO.get(version["webSocketDebuggerUrl"]))
 
 
 def mantener_navegadores_hasta_el_cierre() -> None:
-    """Hace que la GUI conserve Edge y sus pestanas hasta salir de BITS."""
+    """Conserva Edge hasta salir; las pestanas temporales se cierran por tarea."""
     global _CIERRE_DIFERIDO
     with _CANDADO_NAVEGADORES:
         _CIERRE_DIFERIDO = True
@@ -462,7 +502,7 @@ class SesionDeNavegador:
     """Una ventana de Edge con perfil propio, abierta por el programa."""
 
     def __init__(self, perfil: Path, edge: Optional[Path] = None,
-                 visible: bool = True):
+                 visible: bool = False):
         self.perfil = _absoluta(perfil)
         self.edge = Path(edge) if edge else ruta_de_edge()
         self.visible = visible
@@ -476,6 +516,9 @@ class SesionDeNavegador:
         # hay proceso propio que esperar, pero si hay que cerrarlo al
         # terminar: es lo que suelta el perfil para la vez siguiente.
         self._adoptado = False
+        self._pestanas: set[str] = set()
+        self._pestana_entrada = ""
+        self._clave_limpieza = ""
 
     def abrir(self, url: str, espera_s: float = 30.0) -> dict:
         """Deja un navegador abierto sobre este perfil y lo devuelve.
@@ -563,10 +606,12 @@ class SesionDeNavegador:
             # La anotacion sobrevivio al navegador (un cierre a la fuerza,
             # un apagon). No es un fallo: se abre uno nuevo.
             return None
-        if cierre_diferido_activo() and _sin_ventana(version):
-            # Al comenzar una sesión de BITS se retira el Edge sin ventana
-            # que pudo dejar otra ejecución. El nuevo admite abrir bitácoras
-            # a la vista durante las consultas y correcciones.
+        if self.visible == _sin_ventana(version):
+            if _hay_trabajo(version):
+                raise ErrorDeNavegador(
+                    "Edge tiene un trabajo activo; no se puede reiniciar "
+                    "para cambiar la visibilidad."
+                )
             self._quitar_de_en_medio(puerto, version)
             return None
         reutilizado = False
@@ -591,6 +636,11 @@ class SesionDeNavegador:
             self._version = version
             self._adoptado = True
             return version
+        if _hay_trabajo(version):
+            raise ErrorDeNavegador(
+                "Edge no respondio a la nueva apertura; se conserva el "
+                "navegador porque otro trabajo lo esta utilizando."
+            )
         logger.info(
             "Un Edge de otra ejecucion tenia tomado el perfil {}; se le pide "
             "paso para abrir el propio", self.perfil,
@@ -616,10 +666,8 @@ class SesionDeNavegador:
                       timeout: float = 15.0, insistir: bool = False) -> str:
         """Abre una pagina de trabajo y devuelve su identificador.
 
-        La linea de comandos conserva su limpieza anterior. En la GUI las
-        pestanas permanecen abiertas mientras BITS siga abierto: cada trabajo
-        conduce la suya por identificador y ninguna operacion invalida el
-        socket o la pagina que otro hilo todavia esta usando.
+        Cada pagina se protege antes de soltar el candado. La limpieza nunca
+        retira paginas de otro trabajo, ni las lecturas de la persona.
 
         Con ``insistir`` se vuelve a barrer mientras se siga cerrando algo.
         Es para el navegador recien lanzado: cuando su puerto empieza a
@@ -632,18 +680,38 @@ class SesionDeNavegador:
         direccion, que es como se acababa pilotando una copia vieja.
         """
         version = version or self._version or {}
+        diferido = cierre_diferido_activo()
         ws = _WebSocket(version["webSocketDebuggerUrl"], timeout=timeout)
         try:
-            creada = ws.pedir("Target.createTarget", url=url)
-            target_id = str(creada.get("targetId", ""))
-            if not target_id:
-                raise ErrorDeNavegador(
-                    f"Edge no abrio {url} y no dijo por que."
+            with _CANDADO_PESTANAS:
+                clave = version["webSocketDebuggerUrl"]
+                self._clave_limpieza = clave
+                if diferido and clave not in _PESTANAS_ANCLA:
+                    ancla = ws.pedir(
+                        "Target.createTarget", url="about:blank", background=True
+                    ).get("targetId")
+                    if not ancla:
+                        raise ErrorDeNavegador("Edge no creo su pagina de espera")
+                    _PESTANAS_ANCLA[clave] = str(ancla)
+                creada = ws.pedir(
+                    "Target.createTarget", url=url, background=not self.visible
                 )
-            if not cierre_diferido_activo():
-                self._cerrar_otras_pestanas(ws, target_id)
-                for _ in range(_BARRIDOS_TRAS_RESTAURAR if insistir else 0):
-                    time.sleep(_ESPERA_ENTRE_BARRIDOS_S)
+                target_id = str(creada.get("targetId", ""))
+                if not target_id:
+                    raise ErrorDeNavegador(
+                        f"Edge no abrio {url} y no dijo por que."
+                    )
+                registrar_pestana(version, target_id)
+                self._pestanas.add(target_id)
+                if self._pestana_entrada and self._pestana_entrada != target_id:
+                    cerrar_pestana(version, self._pestana_entrada)
+                    self._pestanas.discard(self._pestana_entrada)
+                    self._pestana_entrada = ""
+                solo_liberadas = diferido and not insistir
+                self._cerrar_otras_pestanas(ws, target_id, solo_liberadas)
+            for _ in range(_BARRIDOS_TRAS_RESTAURAR if insistir else 0):
+                time.sleep(_ESPERA_ENTRE_BARRIDOS_S)
+                with _CANDADO_PESTANAS:
                     if not self._cerrar_otras_pestanas(ws, target_id):
                         break
             return target_id
@@ -661,12 +729,16 @@ class SesionDeNavegador:
         version = version or self._version or {}
         ws = _WebSocket(version["webSocketDebuggerUrl"], timeout=timeout)
         try:
-            creada = ws.pedir("Target.createTarget", url=url)
-            target_id = str(creada.get("targetId", ""))
-            if not target_id:
-                raise ErrorDeNavegador(
-                    f"Edge no abrio {url} y no dijo por que."
-                )
+            with _CANDADO_PESTANAS:
+                creada = ws.pedir("Target.createTarget", url=url)
+                target_id = str(creada.get("targetId", ""))
+                if not target_id:
+                    raise ErrorDeNavegador(
+                        f"Edge no abrio {url} y no dijo por que."
+                    )
+                _PESTANAS_DE_LECTURA.setdefault(
+                    version["webSocketDebuggerUrl"], set()
+                ).add(target_id)
             try:
                 ventana = ws.pedir(
                     "Browser.getWindowForTarget", targetId=target_id
@@ -690,17 +762,60 @@ class SesionDeNavegador:
     def abrir_a_la_vista(self, url: str, espera_s: float = 30.0) -> dict:
         """Deja esa pagina a la vista, sumandola a lo que ya estuviera.
 
-        Es para las paginas que se abren para mirarlas. Si el perfil ya lo
-        tiene un Edge con ventana, la pagina se le suma como una pestana mas
-        y las que hubiera se quedan: es lo unico que permite abrir dos
-        busquedas y compararlas. Si no hay ninguno, o el que hay es uno sin
-        ventana (que no ensenaria nada) o ya no contesta, se cae en
-        :meth:`abrir`, que se encarga de dejar el perfil libre y lanzar el
-        navegador propio.
+        Si el perfil esta trabajando sin ventana, se usa un perfil portable
+        de lectura con las mismas cookies. Nunca reinicia el Edge de trabajo.
         """
-        self.perfil.mkdir(parents=True, exist_ok=True)
+        with _CANDADO_NAVEGADORES:
+            self.visible = True
+            return self._abrir_lectura(url, espera_s)
+
+    def _abrir_lectura(self, url: str, espera_s: float) -> dict:
         puerto = _puerto_anotado(self.perfil)
         version = _version_en(puerto) if puerto is not None else None
+        if version is not None and (_sin_ventana(version) or _hay_trabajo(version)):
+            # Mostrar un enlace nunca reinicia el navegador que consulta o
+            # corrige. Otro perfil portable recibe las cookies por CDP, sin
+            # copiar bases de datos bloqueadas ni guardar cookies en Python.
+            cookies = [c for lista in cookies_de(version).values() for c in lista]
+            lector = SesionDeNavegador(
+                self.perfil.with_name(self.perfil.name + "-lectura"),
+                self.edge, visible=True,
+            )
+            puerto_lectura = _puerto_anotado(lector.perfil)
+            version_lectura = (
+                _version_en(puerto_lectura) if puerto_lectura is not None else None
+            )
+            if version_lectura is None:
+                version_lectura = lector.abrir("about:blank", espera_s)
+            else:
+                lector.puerto = int(puerto_lectura)
+                lector._version = version_lectura
+                lector._adoptado = True
+                _recordar_navegador(lector)
+            ws = _WebSocket(version_lectura["webSocketDebuggerUrl"])
+            try:
+                permitidos = {
+                    "name", "value", "url", "domain", "path", "secure",
+                    "httpOnly", "sameSite", "expires", "priority",
+                    "sameParty", "sourceScheme", "sourcePort", "partitionKey",
+                }
+                ws.pedir("Storage.setCookies", cookies=[
+                    {
+                        k: v for k, v in cookie.items()
+                        if k in permitidos
+                        and not (k == "expires" and cookie.get("session", False))
+                    }
+                    for cookie in cookies
+                ])
+            finally:
+                ws.cerrar()
+            lector.sumar_pestana(url, version=version_lectura)
+            for target_id in tuple(lector._pestanas):
+                cerrar_pestana(version_lectura, target_id)
+            lector._pestanas.clear()
+            lector._pestana_entrada = ""
+            self.puerto = lector.puerto
+            return version_lectura
         if version is not None and not _sin_ventana(version):
             try:
                 self.sumar_pestana(url, version=version)
@@ -714,8 +829,17 @@ class SesionDeNavegador:
                 self.puerto = int(puerto)
                 self._version = version
                 self._adoptado = True
+                _recordar_navegador(self)
                 return version
-        return self.abrir(url, espera_s=espera_s)
+        version = self.abrir(url, espera_s=espera_s)
+        if version:
+            with _CANDADO_PESTANAS:
+                clave = version["webSocketDebuggerUrl"]
+                _PESTANAS_EN_USO.get(clave, set()).difference_update(self._pestanas)
+                _PESTANAS_DE_LECTURA.setdefault(clave, set()).update(self._pestanas)
+                self._pestanas.clear()
+                self._pestana_entrada = ""
+        return version
 
     def _abrir_pagina(self, version: dict, url: str,
                       timeout: float = 5.0, insistir: bool = False) -> bool:
@@ -731,7 +855,7 @@ class SesionDeNavegador:
         esperarlo. Por eso se le da poco tiempo: uno colgado no mejora.
         """
         try:
-            self.abrir_pestana(
+            self._pestana_entrada = self.abrir_pestana(
                 url, version=version, timeout=timeout, insistir=insistir
             )
             return True
@@ -740,8 +864,8 @@ class SesionDeNavegador:
             return False
 
     def _cerrar_otras_pestanas(self, ws: _WebSocket,
-                               conservar: str = "") -> int:
-        """Deja el navegador con una sola pagina abierta y dice cuantas cerro.
+                               conservar: str = "", solo_liberadas: bool = False) -> int:
+        """Retira paginas sobrantes, respetando todos los trabajos activos.
 
         ``conservar`` es la pagina recien creada, la que se va a usar. Sin
         ella se conserva la ultima de la lista: esto se llama tambien justo
@@ -758,20 +882,32 @@ class SesionDeNavegador:
         except (ErrorDeNavegador, OSError, ValueError) as exc:
             logger.debug("No se pudieron listar las pestanas de Edge: {}", exc)
             return 0
+        clave = self._clave_limpieza
+        presentes = {str(objetivo.get("targetId", "")) for objetivo in objetivos}
+        _PESTANAS_LIBERADAS.get(clave, set()).intersection_update(presentes)
+        _PESTANAS_DE_LECTURA.get(clave, set()).intersection_update(presentes)
+        protegidas = set(_PESTANAS_EN_USO.get(clave, ()))
+        protegidas.update(_PESTANAS_DE_LECTURA.get(clave, ()))
+        protegidas.add(_PESTANAS_ANCLA.get(clave, ""))
         paginas = [
             str(objetivo.get("targetId", ""))
             for objetivo in objetivos
             if objetivo.get("type") == "page" and objetivo.get("targetId")
+            and not objetivo.get("attached", False)
         ]
         if not conservar and paginas:
             conservar = paginas[-1]
         cerradas = 0
         for target_id in paginas:
-            if target_id == conservar:
+            if target_id == conservar or target_id in protegidas:
+                continue
+            if solo_liberadas and target_id not in _PESTANAS_LIBERADAS.get(clave, ()):
                 continue
             try:
-                ws.pedir("Target.closeTarget", targetId=target_id)
-                cerradas += 1
+                respuesta = ws.pedir("Target.closeTarget", targetId=target_id)
+                if respuesta.get("success", True):
+                    cerradas += 1
+                    _PESTANAS_LIBERADAS.get(clave, set()).discard(target_id)
             except (ErrorDeNavegador, OSError, ValueError) as exc:
                 logger.debug(
                     "No se pudo cerrar la pestana {}: {}", target_id, exc,
@@ -792,12 +928,10 @@ class SesionDeNavegador:
             *_ARGUMENTOS,
         ]
         if not self.visible:
-            # La GUI necesita poder mostrar una bitácora sin reiniciar Edge
-            # ni invalidar las pestañas de un trabajo en curso.
-            orden.append(
-                "--start-minimized" if cierre_diferido_activo() else "--headless=new"
-            )
-        orden.append(url)
+            # INVARIANTE: el Edge automatico SIEMPRE queda sin ventana.
+            # No sustituir por --start-minimized ni cambiarlo por modo GUI.
+            orden.append("--headless=new")
+        orden.append("about:blank")
         # La salida de error de Edge se guarda: es lo unico que dice por que
         # no arranco (perfil tomado, bandera rechazada, politica de la
         # empresa) y tirarla dejaba el fallo en «Edge se cerro», que no se
@@ -906,7 +1040,26 @@ class SesionDeNavegador:
         siguiente apertura del mismo perfil se encuentra un candado que ya
         no tiene dueno.
         """
-        if cierre_diferido_activo() and not definitivo:
+        version = version or self._version
+        # El acceso interactivo se cierra al terminar, aunque la GUI conserve
+        # su navegador automatico. No debe quedar una ventana vacia visible.
+        diferido = cierre_diferido_activo() and not self.visible
+        if version:
+            with _CANDADO_PESTANAS:
+                clave = version["webSocketDebuggerUrl"]
+                propias = self._pestanas & (
+                    _PESTANAS_EN_USO.get(clave, set())
+                    | _PESTANAS_LIBERADAS.get(clave, set())
+                )
+                otros = _PESTANAS_EN_USO.get(clave, set()) - self._pestanas
+                if diferido or otros:
+                    for target_id in propias:
+                        cerrar_pestana(version, target_id)
+                else:
+                    _PESTANAS_EN_USO.get(clave, set()).difference_update(propias)
+            self._pestanas.clear()
+            self._pestana_entrada = ""
+        if diferido and not definitivo:
             # El archivo temporal solo recoge el arranque. Edge ya heredo el
             # descriptor y conservarlo aqui no aporta nada durante la sesion.
             if self._quejas is not None:
@@ -915,7 +1068,9 @@ class SesionDeNavegador:
             return
         if self._proceso is None and not self._adoptado:
             return
-        version = version or self._version
+        if version and _hay_trabajo(version):
+            logger.info("Se conserva Edge porque otro trabajo sigue activo")
+            return
         if version:
             self._pedir_que_se_cierre(
                 version,
@@ -946,6 +1101,14 @@ class SesionDeNavegador:
         # buscarlo; dejarla despues de cerrarlo la manda a un puerto mudo.
         if _version_en(self.puerto) is None:
             _olvidar_puerto(self.perfil)
+            if version:
+                with _CANDADO_PESTANAS:
+                    clave = version["webSocketDebuggerUrl"]
+                    for registro in (
+                        _PESTANAS_EN_USO, _PESTANAS_LIBERADAS,
+                        _PESTANAS_DE_LECTURA, _PESTANAS_ANCLA,
+                    ):
+                        registro.pop(clave, None)
         else:
             logger.warning(
                 "No se pudo cerrar el Edge del perfil {}; queda anotado su "
@@ -997,7 +1160,9 @@ class SesionDeNavegador:
             # navegador todavia en pie, porque es el unico momento en que
             # estan todas: al abrir, la restauracion puede no haber acabado.
             if limpiar_pestanas:
-                self._cerrar_otras_pestanas(ws)
+                with _CANDADO_PESTANAS:
+                    self._clave_limpieza = version["webSocketDebuggerUrl"]
+                    self._cerrar_otras_pestanas(ws)
             ws.pedir("Browser.close")
         except (ErrorDeNavegador, OSError, ValueError) as exc:
             # El navegador se va mientras contesta: que no llegue la

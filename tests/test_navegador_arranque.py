@@ -160,7 +160,7 @@ def test_al_abrir_deja_una_sola_pestana_y_no_toca_otros_objetivos(
         "https://airvault/sso",
     )
     assert pedidos[:2] == [
-        ("Target.createTarget", {"url": "https://airvault/sso"}),
+        ("Target.createTarget", {"url": "https://airvault/sso", "background": True}),
         ("Target.getTargets", {}),
     ]
     assert [
@@ -260,13 +260,17 @@ def _perfil_con(monkeypatch, vivos, tmp_path, colgados=()):
     """
     lanzados = []
     matados = []
+    perfiles = {puerto: str(tmp_path) for puerto in vivos}
+    paginas = {puerto: {} for puerto in vivos}
 
     class _Lanzador:
         def __init__(self, orden, **_k):
             lanzados.append(orden)
             # Con el perfil tomado, Chromium no abre nada: le entrega la
             # orden al que ya esta y se va con codigo 21.
-            self.tomado = bool(vivos)
+            perfil = next(p.split("=", 1)[1] for p in orden
+                          if p.startswith("--user-data-dir="))
+            self.tomado = any(perfiles.get(p) == perfil for p in vivos)
             self.returncode = 21 if self.tomado else 0
             if self.tomado:
                 return
@@ -276,8 +280,11 @@ def _perfil_con(monkeypatch, vivos, tmp_path, colgados=()):
                     puerto = int(parte.split("=", 1)[1])
                     vivos[puerto] = {
                         "Browser": "Edg/151",
+                        "User-Agent": "HeadlessChrome/151" if "--headless=new" in orden else "Edg/151",
                         "webSocketDebuggerUrl": f"ws://127.0.0.1:{puerto}/x",
                     }
+                    perfiles[puerto] = perfil
+                    paginas[puerto] = {}
 
         def poll(self):
             return self.returncode if self.tomado else None
@@ -294,7 +301,7 @@ def _perfil_con(monkeypatch, vivos, tmp_path, colgados=()):
             filas = [
                 f"{7000 + puerto} \"msedge.exe\" "
                 f"--remote-debugging-port={puerto} "
-                f"--user-data-dir=\"{tmp_path}\" --no-first-run"
+                f"--user-data-dir=\"{perfiles[puerto]}\" --no-first-run"
                 for puerto in vivos
             ]
             return types.SimpleNamespace(stdout="\n".join(filas))
@@ -333,6 +340,8 @@ def _perfil_con(monkeypatch, vivos, tmp_path, colgados=()):
 
     class _WSPostizo:
         pedidos: list = []
+        detalles: list = []
+        contador = 0
 
         def __init__(self, url, timeout=15.0):
             self.puerto = int(str(url).rsplit(":", 1)[1].split("/", 1)[0])
@@ -341,12 +350,20 @@ def _perfil_con(monkeypatch, vivos, tmp_path, colgados=()):
 
         def pedir(self, metodo, **_p):
             _WSPostizo.pedidos.append(metodo)
+            _WSPostizo.detalles.append((self.puerto, metodo, _p))
             if metodo == "Browser.close":
                 vivos.pop(self.puerto, None)
             if metodo == "Target.createTarget":
                 # Edge siempre contesta con el identificador de la pestana,
                 # que es por donde se la conduce y se cierra despues.
-                return {"targetId": "pestana-de-trabajo"}
+                _WSPostizo.contador += 1
+                target_id = f"pestana-{_WSPostizo.contador}"
+                paginas[self.puerto][target_id] = {"targetId": target_id, "type": "page"}
+                return {"targetId": target_id}
+            if metodo == "Target.getTargets":
+                return {"targetInfos": list(paginas[self.puerto].values())}
+            if metodo == "Target.closeTarget":
+                paginas[self.puerto].pop(_p["targetId"], None)
             return {}
 
         def cerrar(self):
@@ -380,15 +397,14 @@ def test_la_gui_conserva_edge_y_cierra_todo_junto_al_salir(
 
         assert puerto in vivos
         assert "Browser.close" not in ws.pedidos
-        assert "Target.closeTarget" not in ws.pedidos
-        assert "--headless=new" not in lanzados[0]
-        assert "--start-minimized" in lanzados[0]
+        assert "Target.closeTarget" in ws.pedidos
+        assert "--headless=new" in lanzados[0]
+        assert "--start-minimized" not in lanzados[0]
 
         navegador.cerrar_navegadores_al_salir()
 
         assert puerto not in vivos
         assert ws.pedidos.count("Browser.close") == 1
-        assert "Target.closeTarget" not in ws.pedidos
         assert not _anotacion(tmp_path).exists()
     finally:
         navegador.cerrar_navegadores_al_salir()
@@ -406,17 +422,19 @@ def test_mostrar_una_bitacora_no_reinicia_el_edge_de_la_gui(monkeypatch, tmp_pat
         version = sesion.abrir("https://airvault/sso")
         sesion.abrir_pestana("https://airvault/correccion")
         lector = navegador.SesionDeNavegador(tmp_path, edge=Path("msedge.exe"))
-        assert lector.abrir_a_la_vista("https://airvault/bitacora") == version
-        assert lector.puerto == sesion.puerto
-        assert len(lanzados) == 1
+        assert lector.abrir_a_la_vista("https://airvault/bitacora") != version
+        assert lector.puerto != sesion.puerto
+        assert len(lanzados) == 2
         assert "Browser.close" not in ws.pedidos
-        assert "Target.closeTarget" not in ws.pedidos
         assert "Target.activateTarget" in ws.pedidos
+        assert "--headless=new" in lanzados[0]
+        assert "--headless=new" not in lanzados[1]
+        assert f"--user-data-dir={tmp_path}-lectura" in lanzados[1]
     finally:
         navegador.cerrar_navegadores_al_salir()
 
 
-def test_la_gui_reemplaza_un_edge_sin_ventana_antes_de_trabajar(monkeypatch, tmp_path):
+def test_la_gui_reutiliza_el_edge_sin_ventana(monkeypatch, tmp_path):
     navegador.cerrar_navegadores_al_salir()
     vivos = {4321: {
         "Browser": "HeadlessChrome/151",
@@ -431,13 +449,63 @@ def test_la_gui_reemplaza_un_edge_sin_ventana_antes_de_trabajar(monkeypatch, tmp
     )
     try:
         sesion.abrir("https://airvault/sso")
-        assert sesion.puerto != 4321
-        assert 4321 not in vivos
-        assert "--start-minimized" in lanzados[0]
-        lector = navegador.SesionDeNavegador(tmp_path, edge=Path("msedge.exe"))
-        lector.abrir_a_la_vista("https://airvault/bitacora")
-        assert ws.pedidos.count("Browser.close") == 1
-        assert len(lanzados) == 1
+        assert sesion.puerto == 4321
+        assert 4321 in vivos
+        assert "Browser.close" not in ws.pedidos
+        assert not lanzados
+    finally:
+        navegador.cerrar_navegadores_al_salir()
+
+
+def test_el_acceso_interactivo_cierra_su_ventana_tambien_en_la_gui(monkeypatch, tmp_path):
+    vivos = {}
+    lanzados, ws, _ = _perfil_con(monkeypatch, vivos, tmp_path)
+    navegador.mantener_navegadores_hasta_el_cierre()
+    acceso = navegador.SesionDeNavegador(tmp_path, edge=Path("msedge.exe"), visible=True)
+    try:
+        acceso.abrir("https://airvault/login")
+        puerto = acceso.puerto
+        acceso.cerrar()
+        assert puerto not in vivos
+        assert "Browser.close" in ws.pedidos
+        automatico = navegador.SesionDeNavegador(tmp_path, edge=Path("msedge.exe"))
+        automatico.abrir("https://airvault/sso")
+        automatico.cerrar()
+        assert "--headless=new" in lanzados[-1]
+    finally:
+        navegador.cerrar_navegadores_al_salir()
+
+
+def test_las_lecturas_reusan_otro_perfil_y_reciben_las_cookies(monkeypatch, tmp_path):
+    vivos = {}
+    lanzados, ws, _ = _perfil_con(monkeypatch, vivos, tmp_path)
+    navegador.mantener_navegadores_hasta_el_cierre()
+    sesion = navegador.SesionDeNavegador(tmp_path, edge=Path("msedge.exe"))
+    monkeypatch.setattr(navegador, "cookies_de", lambda _version: {"local": [{
+        "name": "sesion-prueba", "value": "solo-prueba", "domain": "local",
+        "path": "/", "httpOnly": True, "secure": True, "size": 10,
+        "session": True, "expires": -1,
+    }]})
+    try:
+        version = sesion.abrir("about:blank")
+        activo = sesion.abrir_pestana("https://airvault/reporte")
+        for url in ("https://airvault/bitacora", "https://airvault/libro"):
+            lector = navegador.SesionDeNavegador(tmp_path, edge=Path("msedge.exe"))
+            lector.abrir_a_la_vista(url)
+        assert len(lanzados) == 2
+        assert sesion.puerto in vivos
+        assert "Browser.close" not in ws.pedidos
+        assert not any(m == "Target.closeTarget" and p["targetId"] == activo
+                       for puerto, m, p in ws.detalles if puerto == sesion.puerto)
+        entregas = [(puerto, p) for puerto, m, p in ws.detalles if m == "Storage.setCookies"]
+        assert len(entregas) == 2
+        assert all(puerto != sesion.puerto for puerto, _p in entregas)
+        assert entregas[0][1]["cookies"] == [{
+            "name": "sesion-prueba", "value": "solo-prueba", "domain": "local",
+            "path": "/", "httpOnly": True, "secure": True,
+        }]
+        assert navegador._hay_trabajo(version)
+        sesion.cerrar()
     finally:
         navegador.cerrar_navegadores_al_salir()
 
@@ -450,7 +518,7 @@ def test_se_habla_con_el_edge_que_ya_tenia_tomado_el_perfil(monkeypatch,
     las del perfil— y se le manda a la pagina de entrada, que es lo que
     rehace el acceso federado.
     """
-    vivos = {4321: {"Browser": "Edg/151",
+    vivos = {4321: {"Browser": "Edg/151", "User-Agent": "HeadlessChrome/151",
                     "webSocketDebuggerUrl": "ws://127.0.0.1:4321/x"}}
     lanzados, ws, _matados = _perfil_con(monkeypatch, vivos, tmp_path)
     _anotacion(tmp_path).write_text("4321", encoding="ascii")
@@ -599,7 +667,7 @@ def test_se_encuentra_al_edge_que_no_dejo_anotado_su_puerto(monkeypatch,
     persona— y se trabaja con el que aparezca. Antes no habia salida: el
     acceso moria igual ejecucion tras ejecucion.
     """
-    vivos = {4321: {"Browser": "Edg/151",
+    vivos = {4321: {"Browser": "Edg/151", "User-Agent": "HeadlessChrome/151",
                     "webSocketDebuggerUrl": "ws://127.0.0.1:4321/x"}}
     lanzados, ws, matados = _perfil_con(monkeypatch, vivos, tmp_path)
     assert not _anotacion(tmp_path).exists()

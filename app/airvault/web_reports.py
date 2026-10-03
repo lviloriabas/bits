@@ -23,7 +23,8 @@ from app.airvault.config import AirVaultConfig
 from app.airvault.navegador import (
     PERFIL_POR_DEFECTO,
     SesionDeNavegador,
-    cierre_diferido_activo,
+    registrar_pestana,
+    cerrar_pestana,
     _del_dominio,
     _WebSocket,
 )
@@ -227,15 +228,15 @@ def abrir_en_web_search(
 ) -> None:
     """Deja una busqueda de Web Search a la vista, para leerla.
 
-    Va por el Edge del programa y no por el navegador de la persona: la
-    sesion de AirVault vive en ese perfil, asi que la misma direccion en
-    otro navegador acaba en la pantalla de acceso.
+    Usa un perfil portable de lectura con la sesion del Edge de trabajo.
+    Abrirlo nunca reinicia el navegador que consulta o corrige en segundo
+    plano, ni depende de las cookies del navegador personal.
 
     Cada busqueda se suma como una pestana mas y las anteriores se quedan
     donde estaban. Estas paginas se abren para leerlas, y quien mira una
     bitacora casi siempre quiere ver ademas el libro al que pertenece:
-    dejarle una sola pestana obligaba a elegir. Se cierran a mano, o cuando
-    la consulta o la correccion siguientes reaprovechen este navegador.
+    dejarle una sola pestana obligaba a elegir. Se cierran a mano o al salir
+    de BITS; la limpieza automatica no retira las lecturas de la persona.
     """
     if not url:
         raise ValueError("Esa fila no trae ninguna búsqueda que abrir")
@@ -361,6 +362,7 @@ class _Pagina:
         self._cancelar = cancelar
         self._version = version
         self._target_id = target_id
+        registrar_pestana(version, target_id)
         self.ws: _WebSocket | None = None
         limite = time.monotonic() + 45.0
         while time.monotonic() < limite:
@@ -428,18 +430,7 @@ class _Pagina:
         if self.ws is not None:
             self.ws.cerrar()
             self.ws = None
-        if cierre_diferido_activo() and not forzar:
-            return
-        try:
-            navegador = _WebSocket(
-                self._version["webSocketDebuggerUrl"], timeout=5.0
-            )
-            try:
-                navegador.pedir("Target.closeTarget", targetId=self._target_id)
-            finally:
-                navegador.cerrar()
-        except (KeyError, OSError, RuntimeError, ValueError):
-            pass
+        cerrar_pestana(self._version, self._target_id, crear_socket=_WebSocket)
 
 
 class ClienteLogPageAudit:
@@ -488,6 +479,7 @@ class ClienteLogPageAudit:
         perfil = _perfil_de(self.config)
         notificar("Abriendo Log Page Audit en Edge")
         pagina: _Pagina | None = None
+        target_id = ""
         with SesionDeNavegador(perfil, visible=False) as navegador:
             # Se entra por el enlace federado y no por el reporte: el
             # reporte vive en el servidor de informes, y su enlace lleva a
@@ -500,11 +492,8 @@ class ClienteLogPageAudit:
             )
             esperar_acceso(lambda: navegador.cookies(version), self.config)
             try:
-                # La pestana la abre la sesion, que ademas cierra las que
-                # hubieran quedado de una consulta anterior: el visor pesa, y
-                # dejar copias abiertas cargaba el perfil ejecucion tras
-                # ejecucion. Se conduce por su identificador, no por su
-                # direccion, para no pilotar una restaurada.
+                # La sesion protege esta pagina y retira solo las liberadas.
+                # Otro trabajo puede seguir usando el mismo navegador.
                 target_id = navegador.abrir_pestana(LOG_PAGE_AUDIT_URL)
                 pagina = _Pagina(version, target_id, esta_cancelado)
                 if not pagina.esperar(
@@ -545,6 +534,8 @@ class ClienteLogPageAudit:
             finally:
                 if pagina is not None:
                     pagina.cerrar()
+                elif target_id:
+                    cerrar_pestana(version, target_id)
 
     @staticmethod
     def _elegir_repositorio(pagina: _Pagina, repositorio: str = "1") -> None:

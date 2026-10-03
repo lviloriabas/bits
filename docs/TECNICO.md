@@ -389,7 +389,11 @@ La lectura espera una representación nueva del reporte, la página solicitada y
 
 El plan sale entero del reporte y no consulta nada: una mal indexada ya trae las dos matrículas y una duplicada, cuántas copias hay. Lo que el reporte no diga con esas palabras queda como caso a revisar, con el motivo escrito.
 
-Los enlaces de página y libro se pueden abrir durante cualquier trabajo. Las aperturas adicionales usan hilos independientes y no sustituyen el hilo, el progreso ni el cronómetro de la consulta o corrección. El cierre de BITS espera todos esos hilos. En la GUI, el Edge compartido arranca minimizado con ventana, para poder mostrar una búsqueda sin reiniciar el navegador ni invalidar las pestañas que usa el corrector; la consola conserva su arranque sin ventana.
+**Regla permanente: el Edge de trabajo siempre funciona en segundo plano, sin ventana (`--headless=new`), tanto en la GUI como en la consola. No se permite sustituirlo por una ventana minimizada ni cambiar esta configuración para mostrar enlaces.** Solo el inicio de sesión interactivo y las lecturas solicitadas por la persona pueden mostrar una ventana.
+
+Los enlaces de página y libro se pueden abrir durante cualquier trabajo. Las aperturas adicionales usan hilos independientes y no sustituyen el hilo, el progreso ni el cronómetro de la consulta o corrección. Si el Edge de trabajo está ocupado o sin ventana, las lecturas usan otro perfil portable, con sufijo `-lectura`, y reciben las cookies mediante el protocolo local de Edge. No reinician el navegador de trabajo ni copian su base de datos abierta. El cierre de BITS espera todos esos hilos y cierra los navegadores registrados.
+
+Cada pestaña de trabajo se registra bajo un candado desde su creación, antes de conectar el controlador. La limpieza respeta las pestañas activas, las lecturas de la persona, los objetivos conectados a otro controlador y los procesos de servicio. Al terminar, fallar o cancelarse una tarea se retiran solo sus pestañas. Si el cierre falla, quedan pendientes para la siguiente apertura y el error no interrumpe el trabajo. En la GUI se mantiene una página vacía para que cerrar la última pestaña temporal no cierre el navegador compartido. Las páginas restauradas se limpian al arrancar, sin acumular copias de reportes ni retirar trabajos activos.
 
 | Acción | Operación interna |
 |---|---|

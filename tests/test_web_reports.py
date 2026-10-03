@@ -40,10 +40,17 @@ def _fila(
     ]
 
 
-def test_la_gui_suelta_el_socket_sin_cerrar_la_pestana(monkeypatch):
+def test_la_gui_cierra_la_pestana_del_reporte_terminado(monkeypatch):
     cerrados: list[str] = []
 
     class _SocketFalso:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def pedir(self, metodo, **params):
+            cerrados.append((metodo, params))
+            return {"success": True}
+
         def cerrar(self):
             cerrados.append("socket")
 
@@ -53,16 +60,17 @@ def test_la_gui_suelta_el_socket_sin_cerrar_la_pestana(monkeypatch):
         "webSocketDebuggerUrl": "ws://127.0.0.1:4321/devtools/browser/x"
     }
     pagina._target_id = "reporte"
-    monkeypatch.setattr(web_reports, "cierre_diferido_activo", lambda: True)
     monkeypatch.setattr(
         web_reports,
         "_WebSocket",
-        lambda *_a, **_k: pytest.fail("no debe cerrar la pestana"),
+        _SocketFalso,
     )
 
     pagina.cerrar()
 
-    assert cerrados == ["socket"]
+    assert cerrados == [
+        "socket", ("Target.closeTarget", {"targetId": "reporte"}), "socket",
+    ]
 
 
 def test_parsea_duplicadas_y_mal_indexadas() -> None:
