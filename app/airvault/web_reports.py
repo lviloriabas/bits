@@ -112,6 +112,10 @@ class ConsultaCancelada(RuntimeError):
     """La consulta fue detenida desde la interfaz."""
 
 
+class ErrorDePaginaAirVault(RuntimeError):
+    """Un fallo de la página explicado sin términos internos de Edge."""
+
+
 @dataclass(frozen=True)
 class ExcepcionLogPageAudit:
     """Una pagina señalada por Log Page Audit."""
@@ -337,7 +341,7 @@ def _puerto_de(version: dict) -> int:
         r"://[^:]+:(\d+)/", str(version.get("webSocketDebuggerUrl", ""))
     )
     if hallado is None:
-        raise RuntimeError("Edge no informó su puerto de control")
+        raise ErrorDePaginaAirVault("No se pudo establecer la comunicación con Edge para abrir AirVault")
     return int(hallado.group(1))
 
 
@@ -379,7 +383,7 @@ class _Pagina:
                 )
                 return
             self._dormir(0.5)
-        raise RuntimeError("No apareció la pestaña de Log Page Audit en Edge")
+        raise ErrorDePaginaAirVault("La pestaña de AirVault no terminó de abrirse en Edge")
 
     def _comprobar_cancelacion(self) -> None:
         if self._cancelar():
@@ -401,7 +405,7 @@ class _Pagina:
 
     def _evaluar(self, expresion: str):
         if self.ws is None:
-            raise RuntimeError("La pestaña de Log Page Audit ya no está abierta")
+            raise ErrorDePaginaAirVault("La pestaña de AirVault ya no está abierta en Edge")
         respuesta = self.ws.pedir(
             "Runtime.evaluate",
             expression=expresion,
@@ -409,7 +413,7 @@ class _Pagina:
             awaitPromise=True,
         )
         if respuesta.get("exceptionDetails"):
-            raise RuntimeError("El visor de Log Page Audit rechazó la consulta")
+            raise ErrorDePaginaAirVault("La página de AirVault no pudo completar la operación solicitada")
         return respuesta.get("result", {}).get("value")
 
     def esperar(

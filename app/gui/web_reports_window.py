@@ -8,6 +8,8 @@ from threading import Event, Lock
 from typing import Optional
 from urllib.parse import parse_qs, urlsplit
 
+from loguru import logger
+
 from PySide6.QtCore import QDate, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
@@ -35,6 +37,7 @@ from app.airvault.correcciones import (
     ACCION_REVISAR,
     Correccion,
     CorrectorLogPageAudit,
+    mensaje_error_correccion,
     planificar,
     resumen_del_plan,
 )
@@ -185,6 +188,9 @@ class _TrabajoEnEdge(QThread):
         """Lo propio de cada hilo. Devuelve lo que se emite al terminar."""
         raise NotImplementedError
 
+    def _mensaje_fallo(self, error: Exception) -> str:
+        return str(error)
+
     def run(self) -> None:  # noqa: D102 - lo describe la clase
         try:
             hecho = self._trabajar()
@@ -195,7 +201,7 @@ class _TrabajoEnEdge(QThread):
         except ConsultaCancelada:
             self.cancelado.emit()
         except Exception as exc:  # noqa: BLE001 - llega a la interfaz
-            self.fallo.emit(str(exc))
+            self.fallo.emit(self._mensaje_fallo(exc))
 
 
 class WebReportsWorker(_TrabajoEnEdge):
@@ -235,6 +241,10 @@ class CorreccionWorker(_TrabajoEnEdge):
     """Aplica el plan en AirVault fuera del hilo de la interfaz."""
 
     previa = Signal(object, object, object)
+
+    def _mensaje_fallo(self, error: Exception) -> str:
+        logger.exception("Se interrumpió la corrección de bitácoras")
+        return mensaje_error_correccion(error)
 
     def __init__(
         self,
@@ -796,14 +806,14 @@ class WebReportsWindow(QDialog):
         total = len(intentados)
         unidad = "bitácora" if total == 1 else "bitácoras"
         if fallidos:
-            sin_cambiar = (
-                "1 no se modificó"
+            pendientes = (
+                "1 quedó pendiente de corrección"
                 if len(fallidos) == 1
-                else f"{len(fallidos)} no se modificaron"
+                else f"{len(fallidos)} quedaron pendientes de corrección"
             )
             texto = (
                 f"Corregidas {len(hechos)} de {total} {unidad}. "
-                f"{sin_cambiar}."
+                f"{pendientes}."
             )
         else:
             texto = f"Corregidas {len(hechos)} {unidad}."

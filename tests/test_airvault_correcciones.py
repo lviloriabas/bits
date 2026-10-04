@@ -439,7 +439,8 @@ def test_un_borrado_que_no_borro_no_se_da_por_hecho() -> None:
     )
 
     assert not resultado.hecho
-    assert "todavía aparecen 2" in resultado.detalle
+    assert "Web Search muestra 2 copias" in resultado.detalle
+    assert "no se pudo confirmar" in resultado.detalle.casefold()
 
 
 def test_el_reindexado_escribe_la_matricula_y_la_flota_que_le_toca() -> None:
@@ -565,7 +566,8 @@ def test_un_aviso_de_airvault_detiene_ese_caso_sin_tocar_nada() -> None:
             ensayo=False,
         )
 
-    assert "locked by another user" in str(fallo.value)
+    assert "bitácora está bloqueada por otro usuario" in str(fallo.value)
+    assert "desbloquee" in str(fallo.value)
     # Y no se llegó a escribir nada: el aviso llega en lugar del cuadro.
     assert not any("C_ACREG" in orden for orden in pagina.ordenes)
 

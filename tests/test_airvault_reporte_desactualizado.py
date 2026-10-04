@@ -202,7 +202,7 @@ def test_el_aviso_existente_muestra_el_motivo_sin_contarlo_como_borrado(
         ventana._al_corregir([resultado])
 
         assert "Corregidas 0 de 1" in ventana.resumen.text()
-        assert "no se modificó" in ventana.resumen.text()
+        assert "quedó pendiente de corrección" in ventana.resumen.text()
         assert len(avisos) == 1
         assert "2008159: Reporte desactualizado:" in avisos[0]
     finally:
