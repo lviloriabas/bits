@@ -91,6 +91,10 @@ La aplicación ajusta internamente la alineación, los recortes y el uso del pro
 
 Haga doble clic en una fila para localizar su página. También puede buscar un número de bitácora, matrícula u otro texto y recorrer las coincidencias.
 
+En **Plantilla -> Visor de CSV…**, escriba los **siete dígitos** de una bitácora y pulse **Buscar** o Intro. La consulta recorre todos los reportes locales de `output/`, `input/` (incluido `processed/`) y las carpetas abiertas en ese visor, aunque la ejecución ya no aparezca entre las 25 del historial. Funciona sin abrir primero un CSV. El CSV mínimo y su compañero completo cuentan como un solo reporte; las copias en distintos batches se conservan como coincidencias distintas.
+
+Las flechas **‹ / ›**, o Intro repetido, recorren las coincidencias y abren su batch y página. El texto junto al buscador identifica la bitácora, el batch, el archivo y la página. Para buscar parte del número use `bit:12345`; una matrícula, un archivo u otro texto sigue buscando en las columnas visibles del CSV abierto. La búsqueda usa los datos ya reconocidos: un PDF sin reporte todavía necesita procesarse. Si un reporte cambia, desaparece o no se puede leer, el visor lo indica; pulse **Buscar** de nuevo para actualizar la consulta.
+
 | Dato o estado | Qué significa                                                                                                   |
 | ------------- | --------------------------------------------------------------------------------------------------------------- |
 | `OK`          | Los datos principales se leyeron sin dudas pendientes.                                                          |

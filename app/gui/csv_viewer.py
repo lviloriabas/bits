@@ -70,6 +70,16 @@ from app.gui.csv_model import (
     STATUS_COLORS,
     CsvTableModel,
 )
+from app.gui.csv_search import (
+    FileStamp,
+    LocalLogbookIndex,
+    LogbookMatch,
+    LogbookQuery,
+    LogbookSearchResult,
+    SearchCancelled,
+    file_stamp,
+    logbook_query,
+)
 from app.gui.depuracion_dialog import DEPURAR_TOOLTIP, DepurarPaginasDialog
 from app.gui.export_options import ExportOptionsGroup
 from app.gui.field_selector import ImportantFieldsDialog
@@ -129,7 +139,7 @@ _HISTORY_LIMIT = 25
 # El mismo texto que en la ventana principal; el botón lo recupera cuando
 # deja de explicar por qué no se puede exportar.
 # Lo que dice el indicador de búsqueda mientras no hay nada que buscar.
-_SEARCH_HINT = "La búsqueda abre cada coincidencia en el visor."
+_SEARCH_HINT = "Siete dígitos buscan una bitácora en todos los batches locales."
 _EXPORT_TOOLTIP = (
     "Volver a generar CSV, JSON y PDF con las opciones actuales, sin "
     "reprocesar. Los PDF repetidos se numeran (-2, -3…)"
@@ -1558,6 +1568,38 @@ class EmbeddedPdfViewer(QFrame):
         self._sync_zoom_controls()
 
 
+class LogbookSearchWorker(QThread):
+    """Consulta los reportes sin dejar la ventana esperando al disco."""
+
+    found = Signal(int, object)
+    failed = Signal(int, str)
+
+    def __init__(
+        self, index: LocalLogbookIndex, roots: list[Path], query: LogbookQuery,
+        preferred: Path | None, generation: int, parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.index = index
+        self.roots = roots
+        self.query = query
+        self.preferred = preferred
+        self.generation = generation
+
+    def run(self) -> None:
+        try:
+            result = self.index.search(
+                self.roots, self.query, self.preferred, self.isInterruptionRequested
+            )
+        except SearchCancelled:
+            return
+        except Exception as exc:  # noqa: BLE001 - se informa sin cerrar el visor
+            logger.exception("No se pudo buscar la bitacora local")
+            self.failed.emit(self.generation, str(exc))
+        else:
+            if not self.isInterruptionRequested():
+                self.found.emit(self.generation, result)
+
+
 class CsvViewerWindow(QMainWindow):
     """Ventana independiente que visualiza CSV de ejecuciones procesadas."""
 
@@ -1590,6 +1632,15 @@ class CsvViewerWindow(QMainWindow):
         self._search_matches: list[tuple[int, str]] = []
         self._search_position = -1
         self._search_query = ""
+        self._local_index = LocalLogbookIndex()
+        self._local_matches: tuple[LogbookMatch, ...] = ()
+        self._search_worker: LogbookSearchWorker | None = None
+        self._pending_search: LogbookQuery | None = None
+        self._search_generation = 0
+        self._search_note = ""
+        self._opening_search_match = False
+        self._local_search_folders: set[Path] = set()
+        self._loaded_csv_stamp: FileStamp | None = None
         # El criterio de orden se guarda por nombre de columna, no por
         # índice: al reescribir la ejecución sin unas páginas el CSV se
         # vuelve a leer entero, y la vista resumida puede dejar otras
@@ -1740,13 +1791,17 @@ class CsvViewerWindow(QMainWindow):
         search_row.setSpacing(SPACE_S)
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText(
-            "Bitácora, matrícula, archivo, página… cualquier texto del CSV"
+            "Bitácora de 7 dígitos en todos los batches; otro texto en este CSV"
         )
-        self.search_edit.setAccessibleName("Texto que se busca en el CSV")
+        self.search_edit.setAccessibleName("Buscar bitácoras locales o texto en el CSV")
         self.search_edit.setToolTip(
-            "Busca en las columnas visibles; con el CSV completo, también en "
-            "las ocultas. Cada coincidencia abre su página en el visor."
+            "Un número de siete dígitos busca en todos los reportes de output, "
+            "input y las carpetas abiertas, sin límite de antigüedad. "
+            "Use bit:12345 para buscar un fragmento del número. "
+            "Otro texto busca en las columnas visibles del CSV abierto. "
+            "Cada coincidencia abre su batch y página en el visor."
         )
+        self.search_edit.textChanged.connect(self._reset_search)
         self.search_edit.returnPressed.connect(self._find_in_csv)
         search_row.addWidget(self.search_edit, 1)
         search = QPushButton("Buscar")
@@ -1923,6 +1978,13 @@ class CsvViewerWindow(QMainWindow):
         destruir la ventana. La exportación no se puede interrumpir a mitad
         de escritura, así que se la espera.
         """
+        self._reset_search()
+        if self._search_worker is not None:
+            if not self._search_worker.wait(3000):
+                self.search_context.setText("Cancelando la búsqueda antes de cerrar…")
+                self._search_worker.finished.connect(self.close)
+                event.ignore()
+                return
         self.pdf_viewer.shutdown()
         worker = self._outputs_worker
         if worker is not None and worker.isRunning():
@@ -2006,8 +2068,7 @@ class CsvViewerWindow(QMainWindow):
                 "No se encontraron archivos CSV en la carpeta seleccionada.",
             )
             return False
-        self._show_csv_choices(Path(folder), csv_paths, csv_paths[0])
-        return True
+        return self._show_csv_choices(Path(folder), csv_paths, csv_paths[0])
 
     def load_csv_file(self, csv_path: Path) -> bool:
         """Abre un CSV concreto y deja a mano los demás de su carpeta."""
@@ -2022,12 +2083,11 @@ class CsvViewerWindow(QMainWindow):
         siblings = find_csv_files(csv_path.parent)
         if not any(path == csv_path for path in siblings):
             siblings = [csv_path, *siblings]
-        self._show_csv_choices(csv_path.parent, siblings, csv_path)
-        return True
+        return self._show_csv_choices(csv_path.parent, siblings, csv_path)
 
     def _show_csv_choices(
         self, folder: Path, csv_paths: list[Path], current: Path
-    ) -> None:
+    ) -> bool:
         """Publica los CSV disponibles y abre el indicado."""
         self._folder = Path(folder)
         self.folder_edit.setText(str(self._folder))
@@ -2052,8 +2112,11 @@ class CsvViewerWindow(QMainWindow):
         self.csv_combo.setCurrentIndex(index)
         self.csv_combo.blockSignals(False)
         self.csv_combo.setEnabled(True)
-        self._load_csv(csv_paths[index])
+        loaded = self._load_csv(csv_paths[index])
         self._sync_history_selection()
+        if loaded:
+            self._local_search_folders.add(Path(folder).resolve())
+        return loaded
 
     def _on_csv_changed(self, index: int) -> None:
         if index >= 0:
@@ -2061,18 +2124,22 @@ class CsvViewerWindow(QMainWindow):
             if path:
                 self._load_csv(Path(path))
 
-    def _load_csv(self, path: Path) -> None:
+    def _load_csv(self, path: Path) -> bool:
+        if not self._opening_search_match:
+            self._reset_search()
         try:
             # El archivo principal es deliberadamente corto. Para consultar,
             # ordenar y elegir columnas se usa su companero completo, sin
             # cambiar cual archivo eligio la persona ni ninguna salida.
-            columns, rows = read_csv_file(csv_path_for_view(path))
+            source = csv_path_for_view(path)
+            stamp = file_stamp(source)
+            columns, rows = read_csv_file(source)
             columns, rows = restore_run_columns(path, columns, rows)
         except (OSError, ValueError, csv.Error) as exc:
             QMessageBox.critical(
                 self, "No se pudo abrir el CSV", f"{path}\n\n{exc}"
             )
-            return
+            return False
 
         self._export_note = ""
         # Otro CSV es otra ejecución: su orden no es el que alguien puso
@@ -2081,6 +2148,7 @@ class CsvViewerWindow(QMainWindow):
         if self._loaded_csv_path != path:
             self._sort_state = None
         self._loaded_csv_path = path
+        self._loaded_csv_stamp = stamp
         self._columns = columns
         self._field_id_by_column = {
             column: csv_field_id(column, columns) for column in columns
@@ -2124,13 +2192,10 @@ class CsvViewerWindow(QMainWindow):
         )
         self._apply_column_mode()
         self._load_pdf_paths(path)
-        self._search_matches = []
-        self._search_position = -1
-        self._search_query = ""
-        self.search_context.setText(_SEARCH_HINT)
         self._sync_search_controls()
         self._sync_export_button()
         self.setWindowTitle(f"Visor de resultados CSV - {path.name}")
+        return True
 
     def _statuses_from_companion(self) -> dict[tuple[str, str], dict[str, str]]:
         """Mapa de estados del JSON compañero, leído una sola vez por CSV."""
@@ -2727,13 +2792,15 @@ class CsvViewerWindow(QMainWindow):
             if source_row < len(self._row_pdf_paths)
             else None
         )
+        # Tambien las filas cuyo PDF falta ocupan una posicion en el visor.
+        # Pedirla limpia la imagen anterior y muestra el motivo de la falta.
+        self.pdf_viewer.show_page(source_row + 1)
         if path is not None and page > 0 and path.is_file():
             # ``_row_pdf_paths`` y ``_execution_pages`` nacen juntas y en el
             # mismo orden. Navegar por la posición de la fila evita inferirla
             # otra vez a partir de (ruta, página), que podría repetirse.
-            self.pdf_viewer.show_page(source_row + 1)
             return f"{path.name}, página {page}"
-        return f"{row.get('file', 'PDF desconocido')}, página {page or '?'}"
+        return f"{row.get('file', 'PDF desconocido')}, página {page or '?'} (PDF no disponible)"
 
     def _searchable_columns(self) -> list[str]:
         """Columnas donde busca el texto: las que la tabla está mostrando.
@@ -2781,15 +2848,21 @@ class CsvViewerWindow(QMainWindow):
         pulsar Intro sobre lo que ya se buscó.
         """
         value = self.search_edit.text().strip()
-        if value and value.casefold() == self._search_query and self._search_matches:
-            self._move_search(1)
-            return
+        if value and value.casefold() == self._search_query:
+            if self._search_matches or self._local_matches:
+                self._move_search(1)
+                return
+            if self._search_worker is not None or self._pending_search is not None:
+                return
+        self._reset_search()
         self._search_query = value.casefold()
-        self._search_matches = []
-        self._search_position = -1
         if not value:
-            self.search_context.setText(_SEARCH_HINT)
-            self._sync_search_controls()
+            return
+        query = logbook_query(value)
+        if query is not None:
+            self._pending_search = query
+            self.search_context.setText(f"Buscando bitácora «{query.number}» en los batches locales…")
+            self._start_local_search()
             return
         if not self._rows:
             self.search_context.setText("Abra un CSV para buscar en él.")
@@ -2804,15 +2877,60 @@ class CsvViewerWindow(QMainWindow):
         self._show_search_match()
 
     def _move_search(self, offset: int) -> None:
-        if not self._search_matches:
+        total = len(self._local_matches) or len(self._search_matches)
+        if not total:
             return
         self._search_position = (
             self._search_position + offset
-        ) % len(self._search_matches)
+        ) % total
         self._show_search_match()
 
     def _show_search_match(self) -> None:
-        source_row, column = self._search_matches[self._search_position]
+        if self._local_matches:
+            match = self._local_matches[self._search_position]
+            try:
+                stamp = file_stamp(match.csv_path)
+            except OSError:
+                stamp = None
+            if stamp != match.stamp:
+                self._reset_search()
+                self.search_context.setText("El reporte cambió o ya no está disponible. Pulse Buscar de nuevo.")
+                return
+            loaded = self._loaded_csv_path
+            if (
+                loaded is None or csv_path_for_view(loaded).resolve() != match.csv_path
+                or self._loaded_csv_stamp != stamp
+            ):
+                self._opening_search_match = True
+                try:
+                    opened = self.load_csv_file(match.csv_path)
+                finally:
+                    self._opening_search_match = False
+                if not opened:
+                    self._reset_search()
+                    self.search_context.setText("No se pudo abrir la coincidencia. Pulse Buscar de nuevo.")
+                    return
+            source_row, column = match.source_row, "log_number"
+            if not 0 <= source_row < len(self._rows) or any(
+                (self._rows[source_row].get(key) or "").strip() != expected
+                for key, expected in (
+                    ("log_number", match.number), ("file", match.filename), ("page", match.page)
+                )
+            ):
+                self._reset_search()
+                self.search_context.setText("La página cambió. Pulse Buscar de nuevo para localizarla.")
+                return
+            batch = run_dir_for_csv(match.csv_path)
+            context = (
+                f"Bitácora {match.number} - coincidencia {self._search_position + 1} "
+                f"de {len(self._local_matches)} - {batch.name if batch else match.csv_path.stem}"
+            )
+        else:
+            source_row, column = self._search_matches[self._search_position]
+            context = (
+                f"Coincidencia {self._search_position + 1} de "
+                f"{len(self._search_matches)} en «{column}»"
+            )
         display_row = self.table_model.display_row(source_row)
         if display_row >= 0:
             target = self._column_to_focus(column)
@@ -2822,11 +2940,69 @@ class CsvViewerWindow(QMainWindow):
             self.table.scrollTo(index)
 
         location = self._show_row_in_pdf(source_row)
-        self.search_context.setText(
-            f"Coincidencia {self._search_position + 1} de "
-            f"{len(self._search_matches)} en «{column}» · {location}"
-        )
+        self.search_context.setText(f"{context} · {location}{self._search_note}")
         self._sync_search_controls()
+
+    def _reset_search(self, _text: str = "") -> None:
+        """Invalida tambien resultados que un hilo aun no haya entregado."""
+        self._search_generation += 1
+        self._pending_search = None
+        if self._search_worker is not None:
+            self._search_worker.requestInterruption()
+        self._local_matches = ()
+        self._search_matches = []
+        self._search_position = -1
+        self._search_query = ""
+        self._search_note = ""
+        self.search_context.setText(_SEARCH_HINT)
+        self._sync_search_controls()
+
+    def _start_local_search(self) -> None:
+        if self._search_worker is not None or self._pending_search is None:
+            return
+        query = self._pending_search
+        self._pending_search = None
+        roots = [
+            self._start_folder, _PROGRAM_DIR / "output", _PROGRAM_DIR / "input",
+            *sorted(self._local_search_folders),
+        ]
+        current = self._loaded_csv_path
+        preferred = csv_path_for_view(current) if current is not None else None
+        worker = LogbookSearchWorker(
+            self._local_index, roots, query, preferred, self._search_generation, self
+        )
+        self._search_worker = worker
+        worker.found.connect(self._on_local_search_found)
+        worker.failed.connect(self._on_local_search_failed)
+        worker.finished.connect(self._on_local_search_finished)
+        worker.start()
+
+    def _on_local_search_found(self, generation: int, result: LogbookSearchResult) -> None:
+        if generation != self._search_generation:
+            return
+        if result.unavailable:
+            self._search_note = f" · {len(result.unavailable)} archivo(s) o carpeta(s) sin consultar"
+        self._local_matches = result.matches
+        if not result.matches:
+            self.search_context.setText(
+                f"«{self.search_edit.text().strip()}»: sin coincidencias en "
+                f"{result.reports} reporte(s) local(es).{self._search_note}"
+            )
+            self._sync_search_controls()
+            return
+        self._search_position = 0
+        self._show_search_match()
+
+    def _on_local_search_failed(self, generation: int, _message: str) -> None:
+        if generation == self._search_generation:
+            self.search_context.setText("No se pudieron consultar los reportes locales. Pulse Buscar de nuevo.")
+
+    def _on_local_search_finished(self) -> None:
+        worker = self._search_worker
+        self._search_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        self._start_local_search()
 
     def _column_to_focus(self, column: str) -> int:
         """Columna sobre la que se posa el cursor al mostrar una coincidencia.
@@ -2848,7 +3024,7 @@ class CsvViewerWindow(QMainWindow):
         )
 
     def _sync_search_controls(self) -> None:
-        multiple = len(self._search_matches) > 1
+        multiple = (len(self._local_matches) or len(self._search_matches)) > 1
         self.search_prev.setEnabled(multiple)
         self.search_next.setEnabled(multiple)
 

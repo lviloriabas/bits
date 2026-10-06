@@ -595,18 +595,24 @@ def _viewer_for_search(tmp_path: Path) -> CsvViewerWindow:
     return viewer
 
 
-def test_search_finds_the_logbook_by_its_number(tmp_path: Path):
+def test_search_finds_the_logbook_by_its_number(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("app.gui.csv_viewer._PROGRAM_DIR", tmp_path)
     app = QApplication.instance() or QApplication([])
     viewer = _viewer_for_search(tmp_path)
-
-    viewer.search_edit.setText("1234501")
-    viewer._find_in_csv()
-
-    assert viewer._search_matches == [(1, "log_number")]
-    assert viewer.table.currentIndex().row() == 1
-    assert "b.pdf, página 7" in viewer.search_context.text()
-    viewer.close()
-    app.processEvents()
+    try:
+        viewer.search_edit.setText("1234501")
+        viewer._find_in_csv()
+        deadline = time.monotonic() + 5
+        while viewer._search_worker is not None and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.005)
+        assert viewer._search_worker is None
+        assert [match.source_row for match in viewer._local_matches] == [1]
+        assert viewer.table.currentIndex().row() == 1
+        assert "b.pdf, página 7" in viewer.search_context.text()
+    finally:
+        viewer.close()
+        app.processEvents()
 
 
 def test_search_covers_any_column_of_the_csv(tmp_path: Path):
