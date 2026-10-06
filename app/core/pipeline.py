@@ -57,6 +57,7 @@ from app.ocr.regional import ocr_regions
 from app.ocr.month_evidence import resolve_month_cells
 from app.ocr.month_retry import retry_month
 from app.templates.schema import FieldType, Template
+from app.utils.date_window import year_is_possible
 from app.utils.postprocess import (
     _OCR_LETTER_TO_DIGIT_DICT,
     AMBIGUOUS_MATRICULA_NOTE,
@@ -1215,7 +1216,11 @@ def _join_char_fields(page: PageResult) -> None:
                     (round((left_score + right_score) / 2.0, 3), left + right)
                     for left, left_score in per_cell[0].items()
                     for right, right_score in per_cell[1].items()
-                    if component == "year" or 1 <= int(left + right) <= 31
+                    if (
+                        year_is_possible(2000 + int(left + right))
+                        if component == "year"
+                        else 1 <= int(left + right) <= 31
+                    )
                 ),
                 reverse=True,
             )

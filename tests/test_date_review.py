@@ -1,9 +1,8 @@
 """Qué fechas pasan a revisión y cuáles se indexan tal como se leyeron.
 
-La antigüedad es el único motivo temporal que aparta una página, y solo
-cuando su libro no respalda ese año con otra bitácora. Una lectura posterior
-a la ejecución se aparta y la sustituye el libro, así que la bitácora se
-indexa en vez de pasar a REVISAR por un día mal leído.
+Una lectura posterior a hoy se aparta y el libro intenta sustituirla. Una
+fecha futura que sigue guardada requiere revisión. La antigüedad aparta una
+página cuando su libro no respalda ese año con otra bitácora.
 """
 
 from datetime import date
@@ -71,6 +70,33 @@ def test_january_accepts_the_previous_year_backlog():
     page = PageResult(page_number=1, date="2025/12/31")
     assert not review_date_window(page, reference)
     assert not page.date_review
+
+
+@pytest.mark.parametrize("year", ["28", "2028"])
+@pytest.mark.parametrize("month_end", [False, True])
+def test_saved_future_year_requires_review_even_if_book_supports_it(year, month_end):
+    page = _page(1, "2147301", "31", "JUL", year)
+    page.date = "2028/07/31"
+    if month_end:
+        _field_of(page, "day").inference_method = "month_end_policy"
+
+    assert review_date_window(page, supported_years={2028})
+    assert page.date_review
+    assert not ready_for_auto_index(page)
+    assert "Año futuro: 2028" in page.comment
+
+    _field_of(page, "year").value = "26"
+    page.date = "2026/07/31"
+    assert not review_date_window(page)
+    assert not page.date_review
+    assert page.comment == ""
+
+
+def test_saved_future_year_requires_review_without_month_or_day():
+    page = _page(1, "2147301", None, None, "28")
+    assert review_date_window(page)
+    assert page.date_review
+    assert "Año futuro: 2028" in page.comment
 
 
 def test_a_year_that_cannot_be_the_delivery_is_reviewed():
@@ -141,10 +167,10 @@ def test_tomorrow_is_replaced_by_the_book_instead_of_going_to_review():
     day = _field_of(page, "day")
     assert stats["after_the_run"] == 1
     assert "07" in day.alternatives
-    assert day.value == "06"
+    assert day.value == "30"
     assert day.inference_method == "month_end_fallback"
     assert "Fecha futura: 2026/09/07" in day.comment
-    assert page.date == "2026/09/06"
+    assert page.date == "2026/09/30"
     assert not page.date_review
 
 
@@ -159,17 +185,15 @@ def test_future_month_stays_pending_but_is_not_a_reason_to_review():
     assert not page.date_review
 
 
-def test_unread_day_is_never_filled_after_today():
+def test_unread_day_uses_month_end_as_fallback():
     page = _page(1, "2147301", None, "SEP", "26")
     correct_dates_by_book([_report(page)])
-    assert page.date == "2026/09/06"
+    assert page.date == "2026/09/30"
     assert not page.date_review
 
 
-def test_an_unread_day_filled_by_the_book_is_checked_by_month():
-    # El día lo escribió el relleno del libro, no la página: con el mes y el
-    # año bien leídos, unos días por delante de hoy no son un motivo de
-    # revisión, y tratarlos como escritos apartaba la bitácora entera.
+def test_saved_month_end_fallback_does_not_require_review():
+    # El fin del mes actual es un respaldo admitido, no una lectura futura.
     page = PageResult(page_number=1, date="2026/09/30")
     page.add_field(FieldResult(
         page_number=1, field_id="day", field_type="ocr", value="30",
@@ -183,7 +207,7 @@ def test_an_unread_day_filled_by_the_book_is_checked_by_month():
     assert review_date_window(page)
 
 
-def test_month_end_policy_does_not_claim_a_future_handwritten_day():
+def test_month_end_policy_keeps_current_month_end():
     page = _page(1, "2147301", None, "SEP", "26")
     day = _field_of(page, "day")
     day.inference_method = "month_end_policy"
@@ -191,6 +215,40 @@ def test_month_end_policy_does_not_claim_a_future_handwritten_day():
     correct_dates_by_book([_report(page)])
     assert page.date == "2026/09/30"
     assert not page.date_review
+
+
+def test_saved_month_end_day_keeps_its_source():
+    page = _page(1, "2147301", "30", "SEP", "26")
+    day = _field_of(page, "day")
+    day.inference_method = "month_end_policy"
+    day.source = "csv_date_policy"
+
+    correct_dates_by_book([_report(page)])
+
+    assert page.date == "2026/09/30"
+    assert day.value == "30"
+    assert day.inference_method == "month_end_policy"
+    assert day.source == "csv_date_policy"
+    assert not page.date_review
+
+
+@pytest.mark.parametrize("value", ["2026/09/07", "2026/09/30", "2026/10/01"])
+def test_saved_future_day_or_month_requires_review(value):
+    page = PageResult(page_number=1, date=value)
+    assert review_date_window(page)
+    assert page.date_review
+    assert "Fecha futura" in page.comment
+
+
+@pytest.mark.parametrize("value", ["2026/09/07", "2026/10/31"])
+def test_month_end_fallback_does_not_allow_other_future_dates(value):
+    page = PageResult(page_number=1, date=value)
+    page.add_field(FieldResult(
+        page_number=1, field_id="day", field_type="ocr",
+        value=value[-2:], inference_method="month_end_fallback", source="inferred",
+    ))
+    assert review_date_window(page)
+    assert page.date_review
 
 
 def test_correcting_the_date_clears_only_the_temporal_warning():
@@ -229,16 +287,16 @@ def test_a_pending_future_reading_is_not_a_reason_to_review():
     assert not page.date_review
 
 
-def test_no_page_keeps_a_date_after_the_run():
-    # La garantía que permite no revisar las fechas futuras: ninguna llega a
-    # escribirse, ni la que el propio libro podría reintroducir.
+def test_no_page_keeps_a_future_reading_but_month_end_fallback_is_allowed():
     pages = [_page(1, "2147301", "05", "SEP", "26"),
              _page(2, "2147302", "09", "SEP", "26"),
              _page(3, "2147303", None, "SEP", "26")]
     correct_dates_by_book([_report(*pages)])
     assert [page.date for page in pages] == [
-        "2026/09/05", "2026/09/06", "2026/09/06",
+        "2026/09/05", "2026/09/30", "2026/09/30",
     ]
+    assert _field_of(pages[1], "day").inference_method == "month_end_fallback"
+    assert _field_of(pages[2], "day").inference_method == "month_end_fallback"
     assert not any(page.date_review for page in pages)
 
 

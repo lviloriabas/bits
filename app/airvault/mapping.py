@@ -10,7 +10,6 @@ from __future__ import annotations
 import csv
 import json
 import re
-from calendar import monthrange
 from datetime import date
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Sequence
@@ -30,6 +29,7 @@ from app.airvault.config import (
 )
 from app.airvault.fechas import fechas_inferidas
 from app.airvault.model import Registro
+from app.utils.date_window import date_is_possible, month_end_date
 
 FLOTA_CACHE_FILENAME = "airvault_flota.json"
 
@@ -77,8 +77,10 @@ def fecha_airvault(fecha_csv: str) -> str:
         return ""
     anio, mes, dia = match.groups()
     try:
-        date(int(anio), int(mes), int(dia))
+        value = date(int(anio), int(mes), int(dia))
     except ValueError:
+        return ""
+    if not date_is_possible(value, allow_month_end=True):
         return ""
     return f"{mes}/{dia}/{anio}"
 
@@ -108,13 +110,13 @@ def fecha_desde_airvault(valor: object) -> str:
 
 
 def fecha_a_fin_de_mes(fecha_csv: str) -> str:
-    """La misma fecha con el dia puesto en el ultimo del mes.
+    """La misma fecha a fin de mes, sin admitir meses ni años futuros.
 
     Es la unica forma de representar la fecha que AirVault recibe cuando se
     indexa a fin de mes. Se aplica sobre lo que trae el CSV, asi que una
     ejecucion exportada con el dia exacto puede indexarse a fin de mes sin
-    volver a procesarla; una que ya venia a fin de mes no cambia, porque su
-    dia ya es el ultimo.
+    volver a procesarla. El fin del mes actual se admite como respaldo,
+    pero un mes o año futuro no se puede indexar.
 
     Lo que no sea una fecha del CSV se devuelve tal cual: aqui no se
     inventa una fecha que no estaba.
@@ -123,11 +125,8 @@ def fecha_a_fin_de_mes(fecha_csv: str) -> str:
     if encontrada is None:
         return str(fecha_csv or "").strip()
     anio, mes, _dia = (int(parte) for parte in encontrada.groups())
-    try:
-        ultimo = monthrange(anio, mes)[1]
-    except (ValueError, IndexError):
-        return str(fecha_csv or "").strip()
-    return f"{anio:04d}/{mes:02d}/{ultimo:02d}"
+    ultimo = month_end_date(anio, mes)
+    return ultimo.strftime("%Y/%m/%d") if ultimo is not None else ""
 
 
 def normalizar_matricula(valor: str) -> str:
@@ -339,13 +338,16 @@ def _registro_de_fila(
 
     ``inferidas`` trae las fechas deducidas para las bitacoras que llegaron
     sin ella (ver :mod:`app.airvault.fechas`). Solo se usa cuando la fila no
-    trae una fecha propia: una lectura nunca se pisa con una deduccion.
+    trae una fecha propia posible. Una fecha futura o invalida se descarta
+    antes de buscar evidencia en el libro.
     """
     matricula = normalizar_matricula(fila.get("matricula", ""))
     fleet, lessor, inferido = resolutor.resolver(matricula)
     archivo = str(fila.get("file", "")).strip()
     pagina = int(str(fila.get("page", "0")).strip() or 0)
     fecha = str(fila.get("date", "")).strip()
+    if fecha and not fecha_airvault(fecha):
+        fecha = ""
     fecha_inferida = ""
     if fecha_dudosa:
         fecha = ""

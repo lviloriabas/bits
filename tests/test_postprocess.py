@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import unittest
+from datetime import date
+from unittest.mock import patch
 
 from app.utils.postprocess import AMBIGUOUS_MATRICULA_NOTE, \
     WEAK_MATRICULA_NOTE, apply_postprocess, combine_date
@@ -119,6 +121,20 @@ class TestMonth(unittest.TestCase):
 
 
 class TestYear(unittest.TestCase):
+    @patch("app.utils.date_window.reference_date", return_value=date(2026, 10, 6))
+    def test_future_years_are_rejected_in_every_ocr_format(self, _clock):
+        for raw in ("27", "28", "96", "2027", "2096", "2|8", "Year YR 28"):
+            with self.subTest(raw=raw):
+                value, note = apply_postprocess("year", "year", raw)
+                self.assertEqual(value, "")
+                self.assertIn("invalid year", note)
+
+    @patch("app.utils.date_window.reference_date", return_value=date(2027, 1, 2))
+    def test_new_year_accepts_current_and_previous_year(self, _clock):
+        for raw in ("26", "2026", "27", "2027"):
+            self.assertEqual(apply_postprocess("year", "year", raw), (raw, ""))
+        self.assertEqual(apply_postprocess("year", "year", "28")[0], "")
+
     def test_valid(self):
         self.assertEqual(apply_postprocess("x", "year", "26"), ("26", ""))
         self.assertEqual(apply_postprocess("x", "year", "2026"), ("2026", ""))

@@ -9,13 +9,14 @@ mirarla una persona. Fuera de enero solo admite el año de la ejecución. En
 enero también admite el anterior, porque una entrega puede conservar la cola
 del cierre de diciembre.
 
-Ninguna fecha manuscrita puede ser futura; la representación a fin de mes se
-comprueba por mes porque su día se genera para el reporte, no se lee de la
-página.
+Ninguna fecha leída puede ser futura. El último día del mes actual se
+admite como representación de respaldo cuando el día no se leyó; ese
+respaldo nunca puede usar un mes ni un año futuro.
 """
 
 from __future__ import annotations
 
+from calendar import monthrange
 from datetime import date, timedelta
 from typing import Optional
 
@@ -38,9 +39,8 @@ def month_is_possible(
 ) -> bool:
     """Mes completo que una bitácora puede llevar escrito.
 
-    Se compara por mes y no por día para no chocar con la política de fin
-    de mes del CSV, que escribe el último día del mes en curso y por tanto
-    una fecha unos días por delante de hoy.
+    Un mes es posible si ya empezó, incluso cuando su último día se usa
+    como representación de respaldo y todavía no llegó.
     """
     reference = reference_date(today)
     return 1 <= month <= 12 and year_is_possible(year, today) and (
@@ -48,9 +48,27 @@ def month_is_possible(
     )
 
 
-def date_is_possible(value: date, today: Optional[date] = None) -> bool:
-    """Fecha que una página pudo llevar escrita cuando se escaneó."""
-    return year_is_possible(value.year, today) and value <= reference_date(today)
+def date_is_possible(
+    value: date, today: Optional[date] = None, *, allow_month_end: bool = False
+) -> bool:
+    """Fecha leída posible, o fin de mes si se autoriza ese respaldo."""
+    reference = reference_date(today)
+    if not year_is_possible(value.year, reference):
+        return False
+    return value <= reference or (
+        allow_month_end
+        and value == month_end_date(value.year, value.month, reference)
+    )
+
+
+def month_end_date(
+    year: int, month: int, today: Optional[date] = None
+) -> Optional[date]:
+    """Fin de mes de respaldo, sin aceptar meses ni años futuros."""
+    reference = reference_date(today)
+    if not month_is_possible(year, month, reference):
+        return None
+    return date(year, month, monthrange(year, month)[1])
 
 
 def usual_start(today: Optional[date] = None) -> date:

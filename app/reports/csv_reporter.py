@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import csv
 import re
-from calendar import monthrange
+from datetime import date
 from pathlib import Path
 from typing import List, Optional, Union
 
@@ -12,6 +12,7 @@ from loguru import logger
 
 from app.models.schemas import PageResult, Status, ValidationReport
 from app.templates.schema import FieldType, Template
+from app.utils.date_window import date_is_possible, month_end_date, year_is_possible
 from app.utils.postprocess import MONTH_WORDS
 from app.validation.duplicates import detect_duplicate_log_pages
 from app.validation.page_status import needs_review
@@ -354,13 +355,16 @@ class CsvReporter:
         year_text = str(year_value)
         if len(year_text) == 2:
             year = 2000 + int(year_text)
-        elif len(year_text) == 4 and 2000 <= int(year_text) <= 2100:
+        elif len(year_text) == 4:
             year = int(year_text)
         else:
             return None
-        if month is None:
+        if month is None or not year_is_possible(year):
             return None
-        last_day = monthrange(year, month)[1]
+        last_date = month_end_date(year, month)
+        if last_date is None:
+            return None
+        last_day = last_date.day
         detected_day = (
             int(str(day_value))
             if day_value is not None and str(day_value).isdigit()
@@ -370,6 +374,11 @@ class CsvReporter:
             detected_day = None
 
         if date_mode == CSV_DATE_SPECIFIC and detected_day is not None:
+            month_end = getattr(day_field, "inference_method", None) in {
+                "month_end_policy", "month_end_fallback",
+            }
+            if not date_is_possible(date(year, month, detected_day), allow_month_end=month_end):
+                return None
             selected_day = detected_day
             changed = False
             reason = ""
@@ -411,10 +420,9 @@ class CsvReporter:
         if field_id == "month":
             return value if _MONTH_RE.fullmatch(value) else ""
         if field_id == "year":
-            if len(value) == 2 and value.isdigit():
-                return value
-            if len(value) == 4 and value.isdigit() and 2000 <= int(value) <= 2100:
-                return value
+            if len(value) in (2, 4) and value.isdigit():
+                year = 2000 + int(value) if len(value) == 2 else int(value)
+                return value if year_is_possible(year) else ""
             return ""
         if _CHAR_DIGIT_CELL_RE.match(field_id):
             return value if value.isdigit() and len(value) == 1 else ""
@@ -458,6 +466,14 @@ class CsvReporter:
     @staticmethod
     def _date(page) -> str:
         """Fecha normalizada (YYYY/MM/dd) de la página, si está disponible."""
-        if page.date and _DATE_RE.match(page.date):
-            return page.date
+        if page.date and _DATE_RE.fullmatch(page.date):
+            try:
+                value = date(*(int(part) for part in page.date.split("/")))
+            except ValueError:
+                return ""
+            day = next((field for field in page.fields if field.field_id == "day"), None)
+            month_end = bool(day and day.inference_method in {
+                "month_end_policy", "month_end_fallback",
+            })
+            return page.date if date_is_possible(value, allow_month_end=month_end) else ""
         return ""

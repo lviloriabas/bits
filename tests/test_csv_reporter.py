@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import csv
+from datetime import date
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from app.models.schemas import FieldResult, PageResult, ValidationReport
@@ -76,6 +78,66 @@ class TestCsvGates(unittest.TestCase):
             page.add_field(_field("year", bad_year))
             row = self._rows(page)
             self.assertEqual(row["year"], "")
+
+    @patch("app.utils.date_window.reference_date", return_value=date(2026, 10, 6))
+    def test_future_year_never_reappears_from_fields_or_saved_date(self, _clock):
+        for year in ("27", "28", "96", "2027", "2096"):
+            for mode in (CSV_DATE_SPECIFIC, CSV_DATE_MONTH_END):
+                with self.subTest(year=year, mode=mode):
+                    full_year = 2000 + int(year) if len(year) == 2 else int(year)
+                    page = PageResult(page_number=1, date=f"{full_year}/07/16")
+                    page.add_field(_field("day", "16"))
+                    page.add_field(_field("month", "JUL"))
+                    page.add_field(_field("year", year))
+                    row = self._rows(page, mode)
+                    self.assertEqual(row["year"], "")
+                    self.assertEqual(row["date"], "")
+                    self.assertEqual(page.date, f"{full_year}/07/16")
+
+        saved = PageResult(page_number=1, date="2028/07/16")
+        self.assertEqual(self._rows(saved)["date"], "")
+
+    @patch("app.utils.date_window.reference_date", return_value=date(2026, 1, 2))
+    def test_january_keeps_previous_december_in_both_csv_modes(self, _clock):
+        page = PageResult(page_number=1, date="2025/12/30")
+        page.add_field(_field("day", "30"))
+        page.add_field(_field("month", "DIC"))
+        page.add_field(_field("year", "25"))
+        self.assertEqual(self._rows(page, CSV_DATE_SPECIFIC)["date"], "2025/12/30")
+        self.assertEqual(self._rows(page, CSV_DATE_MONTH_END)["date"], "2025/12/31")
+
+    @patch("app.utils.date_window.reference_date", return_value=date(2026, 10, 6))
+    def test_current_month_end_remains_an_accepted_fallback(self, _clock):
+        for day in ("01", None, "31"):
+            page = PageResult(page_number=1)
+            page.add_field(_field("day", day))
+            page.add_field(_field("month", "OCT"))
+            page.add_field(_field("year", "26"))
+            row = self._rows(page, CSV_DATE_MONTH_END)
+            self.assertEqual(row["date"], "2026/10/31")
+            self.assertEqual(row["day"], "31")
+
+    @patch("app.utils.date_window.reference_date", return_value=date(2026, 10, 6))
+    def test_future_day_or_month_cannot_reappear_from_saved_date(self, _clock):
+        for month, day in (("OCT", "07"), ("OCT", "31"), ("NOV", "01")):
+            number = 10 if month == "OCT" else 11
+            page = PageResult(page_number=1, date=f"2026/{number:02d}/{day}")
+            page.add_field(_field("day", day))
+            page.add_field(_field("month", month))
+            page.add_field(_field("year", "26"))
+            self.assertEqual(self._rows(page, CSV_DATE_SPECIFIC)["date"], "")
+            saved = PageResult(page_number=1, date=page.date)
+            self.assertEqual(self._rows(saved)["date"], "")
+            if month == "NOV":
+                self.assertEqual(self._rows(page, CSV_DATE_MONTH_END)["date"], "")
+
+    @patch("app.utils.date_window.reference_date", return_value=date(2026, 10, 6))
+    def test_specific_mode_accepts_month_end_for_unread_day(self, _clock):
+        page = PageResult(page_number=1)
+        page.add_field(_field("day", None))
+        page.add_field(_field("month", "OCT"))
+        page.add_field(_field("year", "26"))
+        self.assertEqual(self._rows(page, CSV_DATE_SPECIFIC)["date"], "2026/10/31")
 
     def test_date_column_from_page_date(self):
         page = PageResult(page_number=1, date="2026/07/16")

@@ -5,12 +5,15 @@ anterior)."""
 from __future__ import annotations
 
 import json
+import csv
+from datetime import date
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from app.models.schemas import FieldResult, PageResult, ValidationReport
-from app.reports.outputs import OutputOptions, write_outputs
+from app.reports.outputs import OutputOptions, complete_csv_path, write_outputs
 from app.templates.manager import TemplateManager
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -106,6 +109,38 @@ class TestReexport(unittest.TestCase):
             self.assertTrue((primer / "stats.json").exists())
             self.assertTrue((primer / "HP-1534CMP.pdf").exists())
             self.assertTrue((primer / "HP-1538CMP.pdf").exists())
+
+    @patch("app.utils.date_window.reference_date", return_value=date(2026, 10, 6))
+    def test_reexport_descarta_anos_futuros_aunque_dos_paginas_los_respalden(self, _clock):
+        pages = [_page(1, "2147337", "HP-1534CMP"),
+                 _page(2, "2147338", "HP-1534CMP")]
+        for page in pages:
+            page.date = "2028/08/23"
+            for field_id, value in (("day", "23"), ("month", "AGO"), ("year", "28")):
+                page.add_field(FieldResult(
+                    page_number=page.page_number, field_id=field_id,
+                    field_type="ocr", value=value, confidence=.9,
+                ))
+        reports = [_reporte("test.pdf", *pages)]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run = root / "BITS guardado"
+            (run / "datos").mkdir(parents=True)
+            write_outputs(reports, self._options(root, run_dir=run, skip_pdfs=True))
+
+            minimal = run / "datos" / f"{run.name}.CSV"
+            for path in (minimal, complete_csv_path(minimal)):
+                with path.open(encoding="utf-8-sig", newline="") as fh:
+                    rows = list(csv.DictReader(fh))
+                self.assertEqual(len(rows), 2)
+                for row in rows:
+                    self.assertEqual(row["date"], "")
+                    self.assertEqual(row["review"], "true")
+                    if "year" in row:
+                        self.assertEqual(row["year"], "")
+            self.assertTrue(all(page.date_review for page in pages))
+            self.assertTrue(all("Año futuro" in page.comment for page in pages))
 
     def test_conserva_los_pdfs_ya_exportados(self):
         """Un re-export nunca destruye la entrega anterior."""

@@ -298,7 +298,8 @@ def _year(value: str) -> Tuple[str, str]:
 
     Prefiere un run de 4 dígitos en la ventana plausible (de 2000 al año
     de la ejecución, ver ``app.utils.date_window``), luego
-    el último run de 2; un run de 3 dígitos ('216') se conserva como ERROR
+    el último run de 2, con el mismo límite de año; un run de 3 dígitos
+    ('216') se conserva como ERROR
     para que el corrector por libro lo normalice contra el ganador del
     libro. Los runs de 4 dígitos absurdos (p. ej. '8313', '5102', restos
     del log_number) se rechazan devolviendo un valor vacío.
@@ -334,7 +335,10 @@ def _year(value: str) -> Tuple[str, str]:
         return "", f"invalid year: {value}"
     twos = [r for r in runs if len(r) == 2]
     if twos:
-        return twos[-1], ""
+        year = twos[-1]
+        if year_is_possible(2000 + int(year)):
+            return year, ""
+        return "", f"invalid year: {value}"
     threes = [r for r in runs if len(r) == 3]
     if threes:
         return threes[-1], f"invalid year: {threes[-1]}"

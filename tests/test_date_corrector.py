@@ -644,6 +644,33 @@ class TestRunWindow(unittest.TestCase):
         self.assertEqual(ahead.date, "2026/07/21")
         self.assertEqual(stats["after_the_run"], 1)
 
+    @patch("app.utils.date_window.reference_date", return_value=date(2026, 10, 6))
+    def test_future_year_already_in_error_is_cleared_and_recovered(self, _clock):
+        for value in ("28", "2028"):
+            with self.subTest(value=value):
+                first = _page(1, "2147301", "20", "JUL", "26")
+                ahead = _page(2, "2147302", "21", "JUL", value,
+                              year_status=Status.ERROR)
+                last = _page(3, "2147303", "22", "JUL", "26")
+
+                stats = correct_dates_by_book([_report(first, ahead, last)])
+
+                year = _field_of(ahead, "year")
+                self.assertEqual(year.value, "26")
+                self.assertIn(value, year.alternatives)
+                self.assertEqual(ahead.date, "2026/07/21")
+                self.assertEqual(stats["after_the_run"], 1)
+
+    @patch("app.utils.date_window.reference_date", return_value=date(2026, 10, 6))
+    def test_future_year_in_error_without_evidence_stays_empty(self, _clock):
+        page = _page(1, "2147301", "21", "JUL", "28", year_status=Status.ERROR)
+
+        correct_dates_by_book([_report(page)])
+
+        self.assertIsNone(_field_of(page, "year").value)
+        self.assertIn("28", _field_of(page, "year").alternatives)
+        self.assertIsNone(page.date)
+
     def test_year_after_the_run_never_anchors_the_book(self):
         # Sin nada que leer alrededor, la página se queda sin fecha y va a
         # revisión: es preferible a indexarla setenta años fuera de sitio.

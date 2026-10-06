@@ -32,10 +32,11 @@ aprobar.
 from __future__ import annotations
 
 import re
-from calendar import monthrange
 from collections import Counter
 from datetime import date
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+from app.utils.date_window import date_is_possible, month_end_date
 
 _FECHA_RE = re.compile(r"^(\d{4})/(\d{2})/(\d{2})$")
 _LOG_RE = re.compile(r"^\d{7}$")
@@ -72,7 +73,9 @@ def _fecha(fila: Mapping[str, str]) -> Optional[date]:
     if not match:
         return None
     try:
-        return date(*(int(parte) for parte in match.groups()))
+        value = date(*(int(parte) for parte in match.groups()))
+        # El CSV puede representar un día no leído con el fin del mes actual.
+        return value if date_is_possible(value, allow_month_end=True) else None
     except ValueError:
         return None
 
@@ -90,8 +93,8 @@ def _libro(log_number: int) -> Tuple[int, int]:
     return log_number // 100, 0 if log_number % 100 < 50 else 1
 
 
-def _fin_de_mes(dia: date) -> date:
-    return date(dia.year, dia.month, monthrange(dia.year, dia.month)[1])
+def _fin_de_mes(dia: date) -> Optional[date]:
+    return month_end_date(dia.year, dia.month)
 
 
 def _del_libro(
@@ -122,7 +125,8 @@ def _del_libro(
         # Detras de la ultima fechada no hay techo que respetar: el ultimo
         # dia de ese mes es lo mas tarde que la bitacora pudo llenarse sin
         # cambiar de mes.
-        return _fin_de_mes(antes[-1][1]), METODO_FIN_MES_LIBRO
+        ultimo = _fin_de_mes(antes[-1][1])
+        return (ultimo, METODO_FIN_MES_LIBRO) if ultimo is not None else None
     # Antes de la primera fechada: su fecha es el techo y tambien lo unico
     # que se sabe del libro.
     return despues[0][1], METODO_ENTRE_ANCLAS
@@ -135,7 +139,8 @@ def _del_mes_dominante(meses: Counter, metodo: str) -> Optional[Propuesta]:
     (anio, mes), _cuantas = max(
         meses.items(), key=lambda par: (par[1], par[0])
     )
-    return _fin_de_mes(date(anio, mes, 1)), metodo
+    ultimo = _fin_de_mes(date(anio, mes, 1))
+    return (ultimo, metodo) if ultimo is not None else None
 
 
 def fechas_inferidas(

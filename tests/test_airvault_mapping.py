@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import date
+from unittest.mock import patch
+
 from app.airvault.config import (
     CAMPO_AUDIT_STATUS,
     CAMPO_DESCRIPCION,
@@ -31,7 +34,41 @@ def test_fecha_del_csv_a_airvault():
 def test_no_envia_fechas_imposibles():
     for valor in ("2026/02/29", "2026/04/31", "2026/13/01", "2026/00/12"):
         assert fecha_airvault(valor) == ""
-    assert fecha_airvault("2028/02/29") == "02/29/2028"
+    assert fecha_airvault("2024/02/29") == "02/29/2024"
+
+
+@patch("app.utils.date_window.reference_date", return_value=date(2026, 10, 6))
+def test_no_envia_lecturas_futuras_pero_admite_fin_de_mes_actual(_clock):
+    for value in ("2026/10/07", "2026/11/01", "2028/02/29"):
+        assert fecha_airvault(value) == ""
+    assert fecha_airvault("2026/10/06") == "10/06/2026"
+    assert fecha_a_fin_de_mes("2026/10/01") == "2026/10/31"
+    assert fecha_airvault("2026/10/31") == "10/31/2026"
+    assert fecha_a_fin_de_mes("2026/11/01") == ""
+
+
+@patch("app.utils.date_window.reference_date", return_value=date(2026, 10, 6))
+def test_indexado_admite_fin_del_mes_actual_como_respaldo(_clock):
+    registro = registros_desde_csv([_fila(date="2026/10/02")], fin_de_mes=True)[0]
+    assert registro.fecha == "2026/10/31"
+    assert valores_de_indice(registro, "Log Page", "PUBLISHED")[CAMPO_END_DATE] == "10/31/2026"
+
+
+@patch("app.utils.date_window.reference_date", return_value=date(2026, 10, 6))
+def test_fecha_futura_solo_se_recupera_con_evidencia_posible(_clock):
+    filas = [
+        _fila(page="1", log_number="2287310", date="2026/10/02"),
+        _fila(page="2", log_number="2287311", date="2026/10/07"),
+        _fila(page="3", log_number="2287312", date="2026/10/05"),
+    ]
+    registro = registros_desde_csv(filas)[1]
+    assert registro.fecha == "2026/10/05"
+    assert registro.fecha_inferida == "entre bitacoras del libro"
+    assert valores_de_indice(registro, "Log Page", "PUBLISHED")[CAMPO_END_DATE] == "10/05/2026"
+
+    registro_solo = registros_desde_csv([filas[1]])[0]
+    assert registro_solo.fecha == ""
+    assert valores_de_indice(registro_solo, "Log Page", "PUBLISHED")[CAMPO_END_DATE] == ""
 
 
 def test_fecha_invalida_queda_vacia():

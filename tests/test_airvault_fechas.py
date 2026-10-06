@@ -7,6 +7,9 @@ le pone y, sobre todo, hasta donde llega la deduccion.
 
 from __future__ import annotations
 
+from datetime import date
+from unittest.mock import patch
+
 from app.airvault.fechas import (
     METODO_ENTRE_ANCLAS,
     METODO_FIN_MES_AVION,
@@ -20,6 +23,31 @@ from app.airvault.fechas import (
 def _fila(page, log_number, date="", matricula="HP-1848CMP", file="A.pdf"):
     return {"file": file, "page": str(page), "log_number": log_number,
             "matricula": matricula, "date": date}
+
+
+@patch("app.utils.date_window.reference_date", return_value=date(2026, 10, 6))
+def test_todos_los_rellenos_del_mes_actual_admiten_fin_de_mes(_clock):
+    filas = [
+        _fila(1, "2287310", "2026/10/02"),
+        _fila(2, "2287311"),
+        _fila(3, "3344500"),
+        _fila(4, "4455600", matricula="HP-1534CMP"),
+    ]
+    inferidas = fechas_inferidas(filas)
+    assert inferidas[("A.pdf", 2)] == ("2026/10/31", METODO_FIN_MES_LIBRO)
+    assert inferidas[("A.pdf", 3)] == ("2026/10/31", METODO_FIN_MES_AVION)
+    assert inferidas[("A.pdf", 4)] == ("2026/10/31", METODO_FIN_MES_EJECUCION)
+
+
+@patch("app.utils.date_window.reference_date", return_value=date(2026, 10, 6))
+def test_fechas_futuras_no_anclan_el_libro_ni_la_ejecucion(_clock):
+    filas = [
+        _fila(1, "2287310", "2026/10/07"),
+        _fila(2, "2287311", "2026/11/01"),
+        _fila(3, "2287312", "2028/02/29"),
+        _fila(4, "2287313"),
+    ]
+    assert fechas_inferidas(filas) == {}
 
 
 def test_sin_fecha_entre_dos_fechadas_del_libro():
@@ -143,12 +171,12 @@ def test_sin_una_sola_fecha_en_la_ejecucion_no_se_inventa():
 
 def test_febrero_de_un_ano_bisiesto_termina_el_29():
     filas = [
-        _fila(1, "2287310", "2028/02/03"),
-        _fila(2, "2287311", "2028/02/04"),
+        _fila(1, "2287310", "2024/02/03"),
+        _fila(2, "2287311", "2024/02/04"),
         _fila(3, "2287320"),
     ]
     inferidas = fechas_inferidas(filas)
-    assert inferidas[("A.pdf", 3)] == ("2028/02/29", METODO_FIN_MES_LIBRO)
+    assert inferidas[("A.pdf", 3)] == ("2024/02/29", METODO_FIN_MES_LIBRO)
 
 
 def test_las_anclas_se_buscan_en_toda_la_ejecucion():

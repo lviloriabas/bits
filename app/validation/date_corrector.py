@@ -54,6 +54,7 @@ from app.utils.date_window import (
     date_is_possible,
     reference_date,
     month_is_possible,
+    month_end_date,
     review_start,
     year_is_possible,
     years_outside_usual,
@@ -735,16 +736,15 @@ def _flag_readings_after_the_run(book: Sequence[PageResult]) -> int:
     la bitacora se indexa igual y solo va a revision si el indice no se
     puede completar. Lo que no pasa nunca es escribir la fecha imposible.
 
-    El mes se mira con el ano ya validado y a resolucion de mes: la
-    politica de fin de mes del CSV escribe el ultimo dia del mes en curso,
-    que son unos dias por delante de hoy y siguen siendo correctos.
+    El mes se mira con el ano ya validado. El ultimo dia del mes actual
+    se admite cuando lo genero la politica de fin de mes o el respaldo.
     """
     invalid = 0
     for page in book:
         if page.blank:
             continue
         year_field = _field(page, YEAR_FIELD_ID)
-        if year_field is not None and year_field.status is not Status.ERROR:
+        if year_field is not None:
             year_read = _year_reading(year_field.value)
             if year_read is not None and not year_is_possible(year_read):
                 _discard_reading(
@@ -777,13 +777,15 @@ def _flag_readings_after_the_run(book: Sequence[PageResult]) -> int:
         resolved = _resolved_date(page)
         if page.blank or day_field is None or resolved is None:
             continue
-        if day_field.inference_method == "month_end_policy":
-            continue
         try:
             parsed = date(*resolved)
         except ValueError:
             continue
-        if not date_is_possible(parsed):
+        if not date_is_possible(
+            parsed, allow_month_end=day_field.inference_method in {
+                "month_end_policy", "month_end_fallback",
+            },
+        ):
             _discard_reading(day_field, "day_out_of_window",
                              f"Fecha futura: {parsed:%Y/%m/%d}")
             invalid += 1
@@ -1530,10 +1532,10 @@ def _fill_days_to_month_end(book: Sequence[PageResult]) -> int:
         if month is None or year is None:
             continue
         full_year = 2000 + int(year)
-        last_day = monthrange(full_year, month)[1]
-        reference = reference_date()
-        if (full_year, month) == (reference.year, reference.month) and field.inference_method != "month_end_policy":
-            last_day = min(last_day, reference.day)
+        last_date = month_end_date(full_year, month)
+        if last_date is None:
+            continue
+        last_day = last_date.day
         same_month = (full_year, month)
         after = _neighbour_day(dates, index, 1, same_month)
         before = _neighbour_day(dates, index, -1, same_month)

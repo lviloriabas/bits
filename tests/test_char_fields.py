@@ -223,6 +223,37 @@ def test_join_recovers_multilingual_shapes_as_numeric_candidates():
     assert "20" in by_id["year"].alternatives
 
 
+@patch("app.utils.date_window.reference_date", return_value=date(2026, 10, 6))
+def test_join_chooses_possible_year_over_stronger_future_reading(_clock):
+    page = _page_result(
+        _char_field("year", ""),
+        _char_field("year_1", "2", 0.9),
+        _char_field("year_2", "B", 0.9),
+    )
+
+    _join_char_fields(page)
+
+    year = next(field for field in page.fields if field.field_id == "year")
+    assert year.value == "26"
+    assert year.source == "date_cells"
+    assert year.status is Status.OK
+
+
+@patch("app.utils.date_window.reference_date", return_value=date(2026, 10, 6))
+def test_join_does_not_promote_unambiguous_future_year(_clock):
+    page = _page_result(
+        _char_field("year", ""),
+        _char_field("year_1", "2", 0.9),
+        _char_field("year_2", "8", 0.9),
+    )
+
+    _join_char_fields(page)
+
+    year = next(field for field in page.fields if field.field_id == "year")
+    assert not year.value
+    assert year.source != "date_cells"
+
+
 def test_join_month_from_two_unambiguous_slots():
     page = _page_result(
         _char_field("month", ""),

@@ -8,6 +8,7 @@ from app.utils.date_window import (
     date_is_possible,
     days_outside_usual,
     is_usual,
+    month_end_date,
     needs_review_for_age,
     review_start,
     year_is_possible,
@@ -38,12 +39,29 @@ def test_la_fecha_no_puede_superar_el_dia_de_ejecucion():
     assert not date_is_possible(date(2027, 1, 1), HOY)
 
 
+def test_fin_de_mes_admite_el_mes_actual_pero_no_meses_futuros():
+    assert month_end_date(2026, 8, HOY) == date(2026, 8, 31)
+    assert month_end_date(2026, 9, HOY) == date(2026, 9, 30)
+    assert month_end_date(2026, 10, HOY) is None
+    assert month_end_date(2027, 1, HOY) is None
+    assert month_end_date(2024, 2, HOY) == date(2024, 2, 29)
+    assert month_end_date(2026, 0, HOY) is None
+
+
 def test_el_mes_actual_y_el_anterior_son_lo_habitual():
     assert is_usual(HOY, HOY)
     assert is_usual(date(2026, 8, 20), HOY)
     assert is_usual(date(2026, 8, 1), HOY)
     assert not is_usual(date(2026, 7, 22), HOY)
     assert not is_usual(date(2026, 6, 1), HOY)
+
+
+def test_solo_el_fin_de_mes_puede_ser_un_respaldo_adelantado():
+    assert not date_is_possible(date(2026, 9, 30), HOY)
+    assert date_is_possible(date(2026, 9, 30), HOY, allow_month_end=True)
+    assert not date_is_possible(date(2026, 9, 6), HOY, allow_month_end=True)
+    assert not date_is_possible(date(2026, 10, 31), HOY, allow_month_end=True)
+    assert not date_is_possible(date(2027, 1, 31), HOY, allow_month_end=True)
 
 
 def test_lo_antiguo_se_ordena_por_detras_pero_no_se_descarta():
