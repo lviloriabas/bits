@@ -100,6 +100,8 @@ from app.gui.table_sort import ColumnSortController
 from app.gui.actualizacion import (
     ActualizarWorker,
     BuscarActualizacionWorker,
+    BuscarRamasWorker,
+    mensaje_de_git,
     confirmar_novedades_instaladas,
     leer_novedades_instaladas,
     recuperar_aviso_del_pull,
@@ -795,6 +797,7 @@ class MainWindow(QMainWindow):
         # ``vigilar_actualizaciones``; construir la ventana no va a la red.
         self._buscar_actualizacion_worker: BuscarActualizacionWorker | None = None
         self._actualizar_worker: ActualizarWorker | None = None
+        self._buscar_ramas_worker: BuscarRamasWorker | None = None
         self._actualizacion_timer = QTimer(self)
         self._actualizacion_timer.setInterval(_CONSULTA_ACTUALIZACION_MS)
         self._actualizacion_timer.timeout.connect(self._buscar_actualizacion)
@@ -893,6 +896,59 @@ class MainWindow(QMainWindow):
         self._actualizar_worker = worker
         worker.start()
 
+    def _elegir_rama(self) -> None:
+        """Consulta origin sin detener la interfaz."""
+        if self._actualizar_worker is not None or self._buscar_ramas_worker is not None:
+            return
+        if self._running_workers():
+            QMessageBox.information(self, "Cambiar rama", "Espere a que terminen los procesos o cancélelos antes de cambiar de rama.")
+            return
+        worker = BuscarRamasWorker(SCRIPT_DIR, self)
+        worker.terminado.connect(self._al_encontrar_ramas)
+        self._buscar_ramas_worker = worker
+        self.btn_rama.setEnabled(False)
+        worker.start()
+
+    def _al_encontrar_ramas(self, actual: str, ramas: list, error: str) -> None:
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox
+        worker = self._buscar_ramas_worker
+        if worker is not None:
+            worker.wait()
+            worker.deleteLater()
+        self._buscar_ramas_worker = None
+        self.btn_rama.setEnabled(True)
+        if self._closing:
+            return
+        if error or not ramas:
+            QMessageBox.warning(self, "Ramas disponibles", error or "No hay ramas disponibles en origin.")
+            return
+        cuadro = QDialog(self)
+        cuadro.setWindowTitle("Versión de BITS")
+        layout = QVBoxLayout(cuadro)
+        layout.addWidget(QLabel(f"Rama actual: {actual or 'sin rama'}"))
+        selector = QComboBox()
+        selector.addItems(ramas)
+        selector.setCurrentText(actual if actual in ramas else ramas[0])
+        configure_combo_box(selector)
+        layout.addWidget(selector)
+        nota = QLabel("Al aplicar, BITS guarda un respaldo local, instala la rama elegida y se reinicia.")
+        nota.setWordWrap(True)
+        layout.addWidget(nota)
+        botones = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        botones.button(QDialogButtonBox.StandardButton.Ok).setText("Aplicar y reiniciar")
+        botones.button(QDialogButtonBox.StandardButton.Cancel).setText("Cancelar")
+        botones.accepted.connect(cuadro.accept)
+        botones.rejected.connect(cuadro.reject)
+        layout.addWidget(botones)
+        if cuadro.exec() != QDialog.DialogCode.Accepted or self._running_workers():
+            return
+        self.btn_actualizar.setEnabled(False)
+        self.btn_rama.setEnabled(False)
+        worker = ActualizarWorker(SCRIPT_DIR, self, rama=selector.currentText())
+        worker.terminado.connect(self._on_actualizacion_terminada)
+        self._actualizar_worker = worker
+        worker.start()
+
     def _on_actualizacion_terminada(self, ok: bool, salida: str) -> None:
         """Reinicia con la versión nueva o explica por qué no se pudo."""
         worker = self._actualizar_worker
@@ -900,6 +956,7 @@ class MainWindow(QMainWindow):
             worker.wait()
             worker.deleteLater()
         self._actualizar_worker = None
+        self.btn_rama.setEnabled(True)
         if salida:
             logger.info(f"git pull: {salida}")
         if not ok:
@@ -908,7 +965,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "No se pudo actualizar",
-                "No se pudo actualizar BITS. Vuelva a intentarlo.",
+                "No se pudo actualizar BITS. " + mensaje_de_git(salida),
             )
             return
         self.btn_actualizar.setText("Reiniciando…")
@@ -1393,6 +1450,9 @@ class MainWindow(QMainWindow):
         grid.addWidget(btn_tpl, 1, 2)
 
         template_menu = QMenu(group)
+        self.btn_rama = template_menu.addAction("Elegir rama de actualización…")
+        self.btn_rama.triggered.connect(self._elegir_rama)
+        template_menu.addSeparator()
         template_menu.setToolTipsVisible(True)
         self.btn_editor = template_menu.addAction("Editor de plantilla…")
         self.btn_editor.setToolTip("Abrir el editor visual de plantillas")
@@ -5254,6 +5314,7 @@ class MainWindow(QMainWindow):
         for worker in (
             self._worker, self._preprocess_worker, self._outputs_worker,
             self._input_scan_worker, self._actualizar_worker,
+            self._buscar_ramas_worker,
             *consultas_web, *indexados,
         ):
             if worker is None:

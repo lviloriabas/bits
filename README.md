@@ -13,6 +13,8 @@ Es una aplicación de escritorio para Windows. El OCR corre local, en CPU y sin 
 
 En **Indexar en AirVault**, marque las casillas del selector de ejecuciones y pulse **Subir a AirVault** para enviar varias entregas juntas. Cada ejecución conserva su nombre y fecha de indexado; los batches ya subidos se retoman. Pulse el nombre de una ejecución para volver a trabajar solo con ella. La cola muestra todos los batches seleccionados y tiene más espacio en pantallas de 720x768.
 
+Para elegir otra versión, abra **Herramientas**, **Elegir rama de actualización**. La aplicación consulta las ramas de origin, guarda un respaldo antes de cambiar y se reinicia. Los cambios locales inesperados y los commits anteriores quedan conservados; los datos de entrada, salida y las preferencias ignoradas se protegen. Debe terminar o cancelar los procesos antes de cambiar de rama.
+
 ## Uso
 
 Abra `BITS.exe` desde la carpeta completa del programa. No requiere instalación: el intérprete, las bibliotecas y los modelos van en `portable/`.

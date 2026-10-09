@@ -117,6 +117,7 @@ def test_el_pull_que_falla_devuelve_lo_que_dijo_git(repositorio, monkeypatch):
         "pull": _respuesta(codigo=1, error="Not possible to fast-forward"),
     })
 
+    monkeypatch.setattr(actualizacion, "sincronizar_rama", lambda _raiz: (False, "Not possible to fast-forward"))
     assert actualizacion.traer_version_nueva(repositorio) == (
         False, "Not possible to fast-forward"
     )
