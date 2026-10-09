@@ -1151,8 +1151,9 @@ def test_un_indexado_cortado_dice_que_lo_que_falta_se_retoma(ventana):
 
     ventana._al_indexar({"resultado": Cortado(), "validas": 2, "total": 5})
     texto = ventana.resumen.text()
-    assert "Indexado cortado" in texto and "caduco" in texto
-    assert "sin repetir lo escrito" in texto
+    assert ventana.estado_label.text() == "Indexado cortado"
+    assert "Inicie sesión" in texto
+    assert "2 de 5" in texto
 
 
 def test_con_paginas_amarillas_el_proceso_sigue_vigilando(ventana):
@@ -1537,7 +1538,7 @@ def test_si_airvault_no_deja_cerrarlo_se_dice_por_que(ventana):
     })
     texto = ventana.resumen.text()
     assert "No se pudo completar" in texto
-    assert "no estan en verde" in texto
+    assert "Quedan páginas por revisar" in texto
 
 
 def test_si_hubo_que_quitar_separadores_se_dice(ventana):
@@ -1561,7 +1562,7 @@ def test_sin_completar_marcado_no_se_dice_nada_de_cerrar(ventana):
 
 def test_el_fallo_se_cuenta_donde_se_lee(ventana):
     ventana._al_fallar("La sesion de AirVault caduco.")
-    assert "caduco" in ventana.resumen.text()
+    assert "Inicie sesión" in ventana.resumen.text()
 
 
 def test_la_barra_cuenta_la_cola_entera_y_no_el_paso(ventana):
@@ -2623,7 +2624,9 @@ def test_un_mensaje_de_varios_parrafos_se_apunta_por_su_primera_frase(ventana):
     )
 
     ultima = ventana.bitacora.item(ventana.bitacora.count() - 1).text()
-    assert ultima.endswith("Se detuvo: No se pudo abrir la sesion.")
+    assert "Se detuvo: Inicie sesión" in ultima
+    assert "Total:" in ultima
+    assert "configuracion" not in ultima
 
 
 def test_una_carga_que_no_salio_no_se_cuenta_como_subida(ventana):
@@ -2638,7 +2641,8 @@ def test_una_carga_que_no_salio_no_se_cuenta_como_subida(ventana):
         ventana.bitacora.item(i).text()
         for i in range(ventana.bitacora.count())
     ]
-    assert any("dejaría 4 páginas amarillas" in linea for linea in anotado)
+    assert any("Quedan páginas por revisar" in linea for linea in anotado)
+    assert all("Total:" in linea for linea in anotado)
 
 
 def test_la_tabla_permite_elegir_varias_filas(ventana):
@@ -2782,7 +2786,7 @@ def test_la_vista_previa_avisa_de_la_ejecucion_sin_exportar(app, tmp_path, monke
     )
     ventana._vista_previa()
 
-    assert avisos and "exportar" in avisos[0]
+    assert avisos and "Exporte" in avisos[0]
 
 
 # ── que lo automático no salga de la ejecución elegida ─────────────

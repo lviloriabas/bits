@@ -111,7 +111,7 @@ def test_el_aviso_no_tapa_el_estado_de_la_pagina(app):
     assert cuadro.tabla.item(0, ESTADO).text() == "Por indexar"
     assert cuadro.tabla.item(0, AVISOS).text() == ""
     assert cuadro.tabla.item(1, ESTADO).text() == "Por indexar"
-    assert cuadro.tabla.item(1, AVISOS).text() == "sin matricula"
+    assert cuadro.tabla.item(1, AVISOS).text() == "Falta la matrícula."
     assert cuadro.tabla.item(2, ESTADO).text() == "Indexada"
     assert cuadro.tabla.item(3, AVISOS).text() == "duplicada; discrepancia"
 

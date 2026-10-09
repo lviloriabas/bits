@@ -10,6 +10,8 @@ sin volver a ejecutar el procesamiento.
 
 from __future__ import annotations
 
+from app.utils.mensajes import mensaje_error
+
 import sys
 import time
 from pathlib import Path
@@ -522,7 +524,19 @@ class QtLogSink(QObject):
     message = Signal(str)
 
     def __call__(self, msg) -> None:
-        self.message.emit(str(msg))
+        texto_original = msg.record["message"]
+        if (msg.record["level"].no >= 30 or msg.record["exception"]
+                or any(marca in texto_original.casefold() for marca in (
+                    "no se pudo", "rechazo", "se corto", "no se cierra", "no se completa",
+                )) or texto_original.casefold().startswith(("fallo", "error"))):
+            texto = mensaje_error(texto_original)
+            if texto == getattr(self, "_ultimo_aviso", None):
+                return
+            self._ultimo_aviso = texto
+            self.message.emit(f"{msg.record['time']:%H:%M:%S} | {texto}")
+        else:
+            self._ultimo_aviso = None
+            self.message.emit(str(msg))
 
 
 class PreviewLoader(QObject):
@@ -894,8 +908,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "No se pudo actualizar",
-                "Git no pudo traer la versión nueva y la carpeta quedó como "
-                "estaba.\n\n" + (salida or "Sin detalle."),
+                "No se pudo actualizar BITS. Vuelva a intentarlo.",
             )
             return
         self.btn_actualizar.setText("Reiniciando…")
@@ -2935,7 +2948,9 @@ class MainWindow(QMainWindow):
         )
 
         if failed:
-            details = "\n".join(f"- {path.name}: {error}" for path, error in failed)
+            details = "\n".join(f"- {path.name}" for path, error in failed[:5])
+            for path, error in failed:
+                logger.warning("No se pudo enviar a la Papelera {}: {}", path, error)
             QMessageBox.warning(
                 self,
                 "Vaciado incompleto",
@@ -3003,8 +3018,10 @@ class MainWindow(QMainWindow):
 
         if failed:
             details = "\n".join(
-                f"- {path.name}: {error}" for path, error in failed
+                f"- {path.name}" for path, error in failed[:5]
             )
+            for path, error in failed:
+                logger.warning("No se pudo enviar a la Papelera {}: {}", path, error)
             QMessageBox.warning(
                 self,
                 "Vaciado incompleto",
@@ -3026,7 +3043,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Editor no disponible",
-                f"No se encontró el editor de plantillas:\n{editor_script}",
+                "Falta el editor de plantillas. Copie de nuevo la carpeta completa de BITS.",
             )
             return
 
@@ -3797,7 +3814,7 @@ class MainWindow(QMainWindow):
         self._set_time_summary(elapsed, None, None)
         self.status_label.setText("Preprocesamiento con errores.")
         logger.error(f"Fallo de preprocesamiento: {message}")
-        QMessageBox.critical(self, "Error de preprocesamiento", message)
+        QMessageBox.critical(self, "Preparar PDF", mensaje_error(message, "No se pudieron preparar los PDF. Revise los archivos y vuelva a intentarlo."))
 
     def _on_preprocess_thread_finished(self) -> None:
         self._preprocess_worker = None
@@ -4212,7 +4229,7 @@ class MainWindow(QMainWindow):
                 else "Error al exportar"
             )
             self.status_label.setText(f"{titulo}.")
-            details = message.splitlines()[0] if message else "Error desconocido"
+            details = mensaje_error(message, "No se pudieron guardar los cambios. Cierre los archivos y vuelva a intentarlo.")
             QMessageBox.critical(self, titulo, details)
         else:
             self.status_label.setText(
@@ -4409,7 +4426,7 @@ class MainWindow(QMainWindow):
         if partial:
             self._populate_times(list(partial))
         logger.error(f"Fallo: {message}")
-        QMessageBox.critical(self, "Error de procesamiento", message)
+        QMessageBox.critical(self, "Procesar PDF", mensaje_error(message, "No se pudieron procesar los PDF. Revise los archivos y vuelva a intentarlo."))
 
     def _populate_table(self, reports: list[ValidationReport]) -> None:
         """Prepara las filas y las inserta por batches para no congelar la UI.

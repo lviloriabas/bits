@@ -61,7 +61,7 @@ def test_confirma_la_misma_copia_antes_de_avisar_del_reporte(copias):
 
     assert resultado.detalle.startswith("Reporte desactualizado:")
     assert f"indica {copias} copias" in resultado.detalle
-    assert "Ya no aparece duplicada" in resultado.detalle
+    assert "Web Search muestra una sola" in resultado.detalle
     assert sum("location.reload()" in orden for orden in pagina.ordenes) == 1
     assert pagina.ordenes.count(modulo._REJILLA_CON_UNA_FILA) == 2
 

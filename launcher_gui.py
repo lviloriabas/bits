@@ -54,27 +54,26 @@ def main() -> int:
     interpreter = _pythonw(root)
 
     if not target.exists():
-        return _show_error(f"No se encontró: {target}")
+        return _show_error("La carpeta de BITS está incompleta. Copie de nuevo la carpeta completa.")
     if interpreter is None:
         return _show_error(
-            "No se encontró el Python portable en:\n"
-            f"{root}\\portable\\python312\\tools\\"
+            "La carpeta de BITS está incompleta. Copie de nuevo la carpeta completa."
         )
 
-    proc = subprocess.Popen(
-        [str(interpreter), str(target)],
-        cwd=str(root),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    try:
+        proc = subprocess.Popen(
+            [str(interpreter), str(target)],
+            cwd=str(root),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return _show_error("BITS no pudo iniciarse. Copie de nuevo la carpeta completa.")
     # Si el intérprete muere al instante con error, se informa al usuario.
     time.sleep(1.5)
     if proc.poll() is not None and proc.returncode != 0:
         return _show_error(
-            "La aplicación no pudo iniciarse (código "
-            f"{proc.returncode}).\n\n"
-            "Pruebe a ejecutar desde la consola:\n"
-            f'"{interpreter}" "{target}"'
+            "BITS no pudo iniciarse. Cierre la aplicación y vuelva a abrirla."
         )
     return 0
 

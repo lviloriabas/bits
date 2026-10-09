@@ -24,6 +24,8 @@ es lo que hace el reporte de revisión.
 
 from __future__ import annotations
 
+from app.utils.mensajes import mensaje_aviso
+
 from pathlib import Path
 from typing import Sequence
 
@@ -151,7 +153,7 @@ def _estado_de(registro: Registro, completado: bool = False) -> str:
 
 def _avisos_de(registro: Registro) -> str:
     """Lo que deja la página bloqueada, que es lo que hay que resolver."""
-    partes = list(registro.avisos)
+    partes = list(dict.fromkeys(mensaje_aviso(aviso) for aviso in registro.avisos))
     if registro.duplicado:
         partes.append("duplicada")
     if registro.discrepancia:

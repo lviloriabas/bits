@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.utils.mensajes import mensaje_error
+
 import csv
 import json
 from functools import lru_cache
@@ -1594,7 +1596,7 @@ class LogbookSearchWorker(QThread):
             return
         except Exception as exc:  # noqa: BLE001 - se informa sin cerrar el visor
             logger.exception("No se pudo buscar la bitacora local")
-            self.failed.emit(self.generation, str(exc))
+            self.failed.emit(self.generation, "No se pudo buscar la bitácora. Vuelva a intentarlo.")
         else:
             if not self.isInterruptionRequested():
                 self.found.emit(self.generation, result)
@@ -2136,8 +2138,9 @@ class CsvViewerWindow(QMainWindow):
             columns, rows = read_csv_file(source)
             columns, rows = restore_run_columns(path, columns, rows)
         except (OSError, ValueError, csv.Error) as exc:
+            logger.exception("No se pudo abrir el CSV {}", path)
             QMessageBox.critical(
-                self, "No se pudo abrir el CSV", f"{path}\n\n{exc}"
+                self, "Abrir resultados", mensaje_error(exc, "No se pudo abrir el CSV. Seleccione otro archivo.")
             )
             return False
 
@@ -2446,8 +2449,7 @@ class CsvViewerWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Plantilla no disponible",
-                "No se encontró la plantilla con la que se procesó esta "
-                "ejecución, y sin ella no se pueden volver a escribir sus datos.",
+                "Falta la plantilla de esta ejecución. Vuelva a seleccionarla.",
             )
             return None
         try:
@@ -2457,15 +2459,14 @@ class CsvViewerWindow(QMainWindow):
             QMessageBox.critical(
                 self,
                 "No se pudieron eliminar las páginas",
-                f"El JSON de la ejecución no se pudo leer:\n\n{exc}",
+                "No se pudieron leer los datos de esta ejecución. Vuelva a procesarla.",
             )
             return None
         if not reports:
             QMessageBox.warning(
                 self,
                 "Sin datos de la ejecución",
-                "Esta ejecución no trae el JSON con sus páginas, así que no se "
-                "puede reescribir sin él.",
+                "Faltan los datos de esta ejecución. Vuelva a procesarla.",
             )
             return None
         return csv_path, run_dir, template, reports
@@ -2637,9 +2638,7 @@ class CsvViewerWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Plantilla no disponible",
-                "No se encontró la plantilla con la que se procesó esta "
-                "ejecución, y sin ella no se pueden volver a generar las "
-                "salidas.",
+                "Falta la plantilla de esta ejecución. Vuelva a seleccionarla.",
             )
             return
         try:
@@ -2649,17 +2648,14 @@ class CsvViewerWindow(QMainWindow):
             QMessageBox.critical(
                 self,
                 "No se pudo exportar",
-                f"El JSON de la ejecución no se pudo leer:\n\n{exc}",
+                "No se pudieron leer los datos de esta ejecución. Vuelva a procesarla.",
             )
             return
         if missing or not reports:
             QMessageBox.warning(
                 self,
                 "Faltan los PDF de origen",
-                "No se encontraron los PDF de los que proviene esta ejecución "
-                f"({_join_names(missing) or 'ninguno disponible'}). Las "
-                "páginas se rehacen desde ellos, así que indique dónde están "
-                "con «Ubicar PDF…» antes de exportar.",
+                "Faltan los PDF originales. Selecciónelos con «Ubicar PDF…» antes de exportar.",
             )
             return
 
@@ -2759,7 +2755,7 @@ class CsvViewerWindow(QMainWindow):
         QMessageBox.critical(
             self,
             "Error al eliminar las páginas" if eliminando else "Error al exportar",
-            message.splitlines()[0] if message else "Error desconocido",
+            mensaje_error(message, "No se pudieron guardar los cambios. Cierre los archivos y vuelva a intentarlo."),
         )
 
     def _on_outputs_finished(self) -> None:

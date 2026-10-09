@@ -64,6 +64,7 @@ from app.gui.widgets import (ElidedLabel, IconoAyuda, SpinBoxWithButtons,
                              pintar_celda_del_tema, pintar_del_tema, style_data_table,
                              window_stylesheet)
 from app.utils.io import send_to_trash
+from app.utils.mensajes import mensaje_error
 
 
 # Los mismos colores con los que la ventana principal escribe las líneas de
@@ -96,7 +97,9 @@ def color_indexando() -> str:
 TEXTO_INDEXANDO = "Indexando"
 
 
-def papel_de_estado(estado: str, indexando: bool = False) -> Optional[str]:
+def papel_de_estado(
+    estado: str, indexando: bool = False, revisar: bool = False,
+) -> Optional[str]:
     """El color con el que la cola escribe un estado, por su papel en el tema.
 
     ``None`` es el texto normal de la tabla. La tabla y la leyenda lo sacan
@@ -108,6 +111,8 @@ def papel_de_estado(estado: str, indexando: bool = False) -> Optional[str]:
 
     if estado in (COMPLETADO, AUTOCOMPLETADO):
         return "STATUS_OK"
+    if revisar and not indexando and estado in (INDEXADO, INCOMPLETO):
+        return "STATUS_WARNING"
     if indexando or estado in (INDEXADO, INCOMPLETO):
         return "acento"
     if estado in (SIN_SUBIR, CANCELADO, POSIBLE_DUPLICADO):
@@ -143,8 +148,10 @@ def leyenda_de_estados() -> list[tuple[str, Optional[str], str]]:
         (LISTO, "Está completo en AirVault; falta colocar la información "
                 "en las páginas."),
         (None, "Se está colocando la información en las páginas."),
-        (INDEXADO, "Todas las páginas tienen su información y están en "
-                   "verde. Falta cerrarlo con «Complete»."),
+        (INDEXADO, "En los batches normales, todas las páginas están en "
+                   "verde y falta cerrar con «Complete». REVISAR conserva "
+                   "el amarillo: sus datos están guardados y las "
+                   "incidencias quedan para revisión manual."),
         (INCOMPLETO, "Quedan páginas en amarillo: se reintentan solas o se "
                      "corrigen a mano."),
         (COMPLETADO, "Se cerró con «Complete» y pasó a Web Search."),
@@ -626,7 +633,7 @@ class TrabajoAirVaultWorker(QThread):
             logger.opt(exception=exc).error(
                 "El trabajo de AirVault ({}) se detuvo: {}", self.modo, exc
             )
-            self.fallo.emit(str(exc))
+            self.fallo.emit(mensaje_error(exc, "No se pudo continuar el indexado. Vuelva a revisar en AirVault."))
 
     def _avisar(self, texto: str, hechas: int, total: int) -> None:
         """Cuenta en qué va y, de paso, mira si hay que parar."""
@@ -1230,7 +1237,7 @@ class TrabajoAirVaultWorker(QThread):
             if validas != total:
                 resultado.detalles.extend(_problemas)
                 for problema in _problemas[:5]:
-                    self._avisar(problema, 0, 0)
+                    self._avisar(mensaje_error(problema, "Quedan páginas por revisar en AirVault."), 0, 0)
             # La casilla sigue activa mientras se escribe. Se consulta al
             # llegar al cierre para que un cambio hecho durante el indexado
             # se aplique a este mismo trabajo.
@@ -1778,6 +1785,7 @@ class AirVaultWindow(QDialog):
         se explica por qué no hay números en vez de enseñar tres ceros, que
         se leerían como una ejecución vacía.
         """
+        self._total_ejecucion = sum(reparto) if reparto is not None else 0
         aviso = ""
         if reparto is None:
             aviso = (
@@ -1942,7 +1950,8 @@ class AirVaultWindow(QDialog):
                 fin_de_mes=self.fin_de_mes(),
             )
         except (ErrorDeCorrida, OSError, ValueError) as error:
-            QMessageBox.warning(self, "Vista previa", str(error))
+            logger.opt(exception=error).warning("No se pudo preparar la vista previa: {}", error)
+            QMessageBox.warning(self, "Vista previa", mensaje_error(error, "No se pudo preparar la vista previa. Vuelva a exportar la ejecución."))
             return
         if not previstos:
             QMessageBox.information(
@@ -2585,16 +2594,12 @@ class AirVaultWindow(QDialog):
         dialogo.setIcon(QMessageBox.Icon.Question)
         dialogo.setWindowTitle("Páginas sin un campo obligatorio")
         dialogo.setText(
-            f"Esto subiría {cuantas} páginas que quedarían amarillas en "
-            "AirVault: les falta algún campo obligatorio y habría que "
-            "completarlas a mano en Web Index."
+            f"{cuantas} páginas tienen datos sin confirmar. Requerirán revisión en AirVault."
         )
         dialogo.setInformativeText(
-            f"{detalle}\n\nLo limpio es volver a exportar la ejecución para "
-            "que esas bitácoras vayan al batch REVISAR. Si el archivo ya "
-            "está hecho y prefiere subirlo así, se sube y esas páginas se "
-            "terminan a mano."
+            "Vuelva a exportar para enviarlas a REVISAR, o elija «Subir así» para corregirlas a mano."
         )
+        logger.info("Páginas sin confirmar antes de subir: {}", detalle)
         # «Subir así» es el botón por omisión a propósito: la pregunta
         # existe para que se pueda decir que sí, no para desanimar.
         subir = dialogo.addButton(
@@ -2787,8 +2792,10 @@ class AirVaultWindow(QDialog):
         movidos, fallidos = send_to_trash(rutas) if rutas else ([], [])
         if fallidos:
             detalle = "\n".join(
-                f"- {ruta.name}: {error}" for ruta, error in fallidos
+                f"- {ruta.name}" for ruta, error in fallidos[:5]
             )
+            for ruta, error in fallidos:
+                logger.warning("No se pudo enviar a la Papelera {}: {}", ruta, error)
             QMessageBox.warning(
                 self,
                 "No se pudo eliminar el batch",
@@ -3450,6 +3457,11 @@ class AirVaultWindow(QDialog):
         self._actualizar_boton_eliminar_registros()
         self.boton_reiniciar.setEnabled(bool(self._trabajos))
         self._ajustar_vigilancia()
+        # Los manifiestos conservan la verificacion y el cierre. Al volver
+        # a abrir una ejecucion terminada no falta otro clic para reconocer
+        # ese final, ni debe quedarse la barra en 99 %.
+        self._fin_pendiente = self._firma_de_fin() is not None
+        self._anunciar_fin()
 
     def _carpeta_del_registro(
         self, corrida: Path | str = ""
@@ -3686,8 +3698,10 @@ class AirVaultWindow(QDialog):
 
         if fallidos:
             detalle = "\n".join(
-                f"- {ruta.name}: {error}" for ruta, error in fallidos
+                f"- {ruta.name}" for ruta, error in fallidos[:5]
             )
+            for ruta, error in fallidos:
+                logger.warning("No se pudo enviar a la Papelera {}: {}", ruta, error)
             QMessageBox.warning(
                 self,
                 "Registro eliminado parcialmente",
@@ -3771,8 +3785,10 @@ class AirVaultWindow(QDialog):
         movidos, fallidos = send_to_trash(objetivos)
         if fallidos:
             detalle = "\n".join(
-                f"- {ruta.name}: {error}" for ruta, error in fallidos
+                f"- {ruta.name}" for ruta, error in fallidos[:5]
             )
+            for ruta, error in fallidos:
+                logger.warning("No se pudo enviar a la Papelera {}: {}", ruta, error)
             QMessageBox.warning(
                 self,
                 "No se pudo eliminar la ejecución",
@@ -3811,8 +3827,7 @@ class AirVaultWindow(QDialog):
             )
         else:
             self.resumen.setText(
-                "Le falta el índice de páginas. Vuelva a exportarla para "
-                "indexarla."
+                "Faltan datos de la entrega. Vuelva a exportarla antes de indexar."
             )
 
     # ── la lista de batches ──────────────────────────────────────────
@@ -3869,7 +3884,9 @@ class AirVaultWindow(QDialog):
             # (cuántas páginas, por qué se paró) queda al posar el puntero.
             estado = TEXTO_INDEXANDO if indexando else parte.titulo
             celdas = (parte.batch_id, nombre, str(esperadas), estado)
-            papel = papel_de_estado(parte.estado, indexando)
+            papel = papel_de_estado(
+                parte.estado, indexando, revisar=parte.trabajo.manifiesto.solo_subir,
+            )
             for columna, texto in enumerate(celdas):
                 item = QTableWidgetItem(texto)
                 if columna == 1:
@@ -3880,7 +3897,12 @@ class AirVaultWindow(QDialog):
                         | Qt.AlignmentFlag.AlignVCenter
                     )
                 if columna == 3:
-                    item.setToolTip(str(parte))
+                    from app.airvault.flujo import DESCUADRADO, INCOMPLETO, POSIBLE_DUPLICADO, SIN_SUBIR, TOMADO
+                    item.setToolTip(
+                        mensaje_error(str(parte), parte.titulo)
+                        if parte.estado in (DESCUADRADO, INCOMPLETO, POSIBLE_DUPLICADO, SIN_SUBIR, TOMADO)
+                        else str(parte)
+                    )
                 if papel:
                     pintar_celda_del_tema(item, papel)
                 tabla.setItem(fila, columna, item)
@@ -4751,6 +4773,49 @@ class AirVaultWindow(QDialog):
 
     # ── la línea viva de la bitácora ───────────────────────────────
 
+    def _totales_bitacoras(self) -> str:
+        """Cuenta bitácoras reales, sin separadores ni reintentos repetidos."""
+        from app.airvault.model import EstadoRegistro
+
+        conocidos = {str(t.carpeta): t for t in self._trabajos}
+        conocidos.update({
+            str(t.carpeta): t for t in self._estado.get("trabajos") or []
+        })
+        trabajos = self._filtrar_trabajos(conocidos.values())
+        total = 0 if trabajos else getattr(self, "_total_ejecucion", 0)
+        subidas = indexadas = 0
+        for trabajo in trabajos:
+            manifiesto = trabajo.manifiesto
+            if manifiesto.cancelado:
+                continue
+            registros = manifiesto.bitacoras()
+            cantidad = len(registros)
+            total += cantidad
+            completado = manifiesto.etapa_hecha("completar")
+            if manifiesto.etapa_hecha("subir") or manifiesto.batch_id or completado:
+                subidas += cantidad
+            confirmado = completado or manifiesto.etapa_hecha("verificar")
+            indexadas += cantidad if confirmado else sum(
+                r.estado is EstadoRegistro.ESCRITA for r in registros
+            )
+        return f"Total: {subidas} de {total} bitácoras subidas, {indexadas} de {total} indexadas"
+
+    def _nombre_del_paso(self, texto: str) -> str:
+        """Identifica el batch por su nombre en los avisos de trabajo."""
+        from app.airvault.flujo import _prefijo
+
+        for trabajo in self._estado.get("trabajos") or self._trabajos:
+            prefijo = _prefijo(trabajo)
+            if prefijo and texto.startswith(prefijo):
+                paso = texto[len(prefijo):]
+                if paso.startswith("Posible duplicado:"):
+                    paso = (
+                        "Posible duplicado; se continúa la subida autorizada."
+                        if "se continúa" in paso else "Posible duplicado; no se sube."
+                    )
+                return f"Batch «{trabajo.manifiesto.nombre_batch}»: {paso}"
+        return texto
+
     def _actualizar_latido(self) -> None:
         """Pone, cambia o quita la línea viva según lo que esté en marcha.
 
@@ -4818,7 +4883,7 @@ class AirVaultWindow(QDialog):
             restante = max(0, self._vigilante.remainingTime()) / 1000
             texto = f"En espera: se revisa AirVault en {_minutos(restante)}"
             color = color_ayuda()
-        linea.setText(texto)
+        linea.setText(f"{texto} - {self._totales_bitacoras()}")
         linea.setForeground(QColor(color))
         linea.setIcon(self._icono_de_latido(color, girando=worker is not None))
 
@@ -4855,8 +4920,9 @@ class AirVaultWindow(QDialog):
     # ── respuestas del hilo ────────────────────────────────────────
 
     def _mostrar_paso(self, texto: str, hechas: int, total: int) -> None:
-        self.estado_label.setText(texto)
-        self.estado_label.setToolTip(texto)
+        visible = self._nombre_del_paso(texto)
+        self.estado_label.setText(visible)
+        self.estado_label.setToolTip(visible)
         # La barra no se vuelve «en marcha continua» en los pasos sin
         # cuenta: es la de toda la cola y se queda donde va. Que el trabajo
         # sigue vivo lo dice la línea «En curso» de la bitácora.
@@ -4869,7 +4935,7 @@ class AirVaultWindow(QDialog):
         if texto != self._ultimo_paso:
             self._ultimo_paso = texto
             self._inicio_paso = time.monotonic()
-            self._anotar(texto)
+            self._anotar(visible)
 
     def _anotar(self, texto: str, detalles: Sequence[str] = ()) -> None:
         """Apunta el paso en la bitácora, con su hora.
@@ -4881,7 +4947,7 @@ class AirVaultWindow(QDialog):
         """
         hora = time.strftime("%H:%M:%S")
         sangria = " " * (len(hora) + 2)
-        lineas = [f"{hora}  {texto}"]
+        lineas = [f"{hora}  {texto} - {self._totales_bitacoras()}"]
         lineas += [f"{sangria}{detalle}" for detalle in detalles]
         # Por encima de la línea viva, que es siempre la última: como el
         # cursor de una terminal, lo que pasa se escribe antes que él.
@@ -4912,9 +4978,9 @@ class AirVaultWindow(QDialog):
         # archivo de registro, así que la ventana decía «subida terminada»
         # de archivos que nunca se enviaron y nadie sabía por qué.
         for nombre, detalle in fallos:
-            self._anotar(f"No se subió «{nombre}»: {detalle}")
+            self._anotar(f"«{nombre}»: {mensaje_error(detalle, 'No se pudo subir. Vuelva a intentarlo.')}")
         for nombre, detalle in datos.get("fallos_indexado") or []:
-            self._anotar(f"No se pudo indexar «{nombre}»: {detalle}")
+            self._anotar(f"«{nombre}»: {mensaje_error(detalle, 'No se pudo indexar. Vuelva a revisar en AirVault.')}")
         # «Subir» no confia en la marca local: en cada clic consulta la cola
         # remota, recupera el ID que falte y solo entonces deja indexar. La
         # opcion de espera automatica decide si se seguira preguntando cuando
@@ -4976,12 +5042,19 @@ class AirVaultWindow(QDialog):
         # Se dice en qué quedó, que no es siempre «indexado»: con «Completar
         # batch» sale completado, y con páginas amarillas, incompleto.
         quedo = estado_local(trabajo).titulo.lower()
-        verdes = f"{datos['validas']} de {datos['total']} páginas en verde"
+        if trabajo.manifiesto.solo_subir:
+            cuenta = (
+                f"{datos['validas']} de {datos['total']} páginas con los datos "
+                "disponibles guardados; las incidencias siguen en amarillo "
+                "para revisión manual"
+            )
+        else:
+            cuenta = f"{datos['validas']} de {datos['total']} páginas en verde"
         self._anotar(
-            f"Batch {trabajo.manifiesto.batch_id} {quedo}: {verdes}"
+            f"Batch «{trabajo.manifiesto.nombre_batch}» {quedo}: {cuenta}"
         )
         self.resumen.setText(
-            f"«{trabajo.manifiesto.nombre_batch}» {quedo}: {verdes}."
+            f"«{trabajo.manifiesto.nombre_batch}» {quedo}: {cuenta}."
         )
 
     def _al_comprobar(self, datos: dict) -> None:
@@ -5131,11 +5204,15 @@ class AirVaultWindow(QDialog):
         lotes = datos.get("lotes", 1)
         self.boton_indexar.setEnabled(False)
         donde = f" en {lotes} batches" if lotes > 1 else ""
-        # Primero lo que importa, las páginas en verde; después cómo se
+        # Primero lo que importa, las páginas confirmadas; después cómo se
         # llegó ahí. Al revés, la cifra que se venía a mirar quedaba al final
         # de una frase que la línea recortaba.
+        confirmacion = (
+            "con los datos disponibles guardados"
+            if datos.get("incluye_revision") else "en verde"
+        )
         cuenta = (
-            f"{datos['validas']} de {datos['total']} páginas en verde{donde} "
+            f"{datos['validas']} de {datos['total']} páginas {confirmacion}{donde} "
             f"({resultado.escritas} escritas, {resultado.omitidas} omitidas, "
             f"{resultado.fallidas} fallidas)."
         )
@@ -5158,8 +5235,7 @@ class AirVaultWindow(QDialog):
                 # lo retoma desde donde quedó.
                 self._ajustar_vigilancia()
             self.resumen.setText(
-                f"Indexado cortado: {resultado.interrumpido} {cuenta} Se "
-                "retoma al revisar, sin repetir lo escrito."
+                f"{mensaje_error(resultado.interrumpido, 'El indexado se detuvo.')} {cuenta}"
             )
             self.estado_label.setText("Indexado cortado")
             self._anotar("Indexado cortado; se retoma al revisar")
@@ -5191,7 +5267,7 @@ class AirVaultWindow(QDialog):
                     f"{self.minutos_spin.value()} min."
                     if sigue else "."
                 )
-                + (f" Motivo: {motivo}" if motivo else "")
+                + (f" {mensaje_error(motivo, 'Revise las páginas pendientes en AirVault.')}" if motivo else "")
             )
             self.estado_label.setText("Indexado incompleto")
             self._anotar("Indexado incompleto: quedan páginas en amarillo")
@@ -5200,8 +5276,8 @@ class AirVaultWindow(QDialog):
         self._indexado_incompleto = False
         if datos.get("incluye_revision"):
             cuenta += (
-                " REVISAR guardado; sus incidencias quedan para revisión "
-                "manual."
+                " REVISAR guardado; sus incidencias siguen en amarillo "
+                "para revisión manual."
             )
         self.resumen.setText(
             f"Indexado terminado: {cuenta}" + self._cuenta_de_cierres(datos)
@@ -5237,11 +5313,12 @@ class AirVaultWindow(QDialog):
         for trabajo, resultado in colgados:
             partes.append(
                 f" No se pudo completar «{trabajo.manifiesto.nombre_batch}»: "
-                f"{resultado.detalle}"
+                f"{mensaje_error(resultado.detalle, 'Revise las páginas pendientes en AirVault.')}"
             )
         return "".join(partes)
 
     def _al_fallar(self, mensaje: str) -> None:
+        mensaje = mensaje_error(mensaje, "No se pudo continuar el indexado. Vuelva a revisar en AirVault.")
         self._fin_pendiente = False
         self._fin_confirmado = None
         preparados = self._estado.get("trabajos") or []
@@ -5336,7 +5413,6 @@ class AirVaultWindow(QDialog):
         """Deja el final en la barra y la bitacora cuando ya no falta nada."""
         if not self._fin_pendiente:
             return
-        self._fin_pendiente = False
         firma = self._firma_de_fin()
         if (
             firma is None or self.hilo() is not None or self._vigilando()
@@ -5344,6 +5420,7 @@ class AirVaultWindow(QDialog):
             or self._subir_al_terminar or self._indexar_al_terminar
         ):
             return
+        self._fin_pendiente = False
         partes = self._partes_en_cola()
         texto = (
             f"Proceso terminado: {conteo_de_estados(partes)}. "

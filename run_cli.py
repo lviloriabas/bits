@@ -21,6 +21,8 @@ Opciones útiles:
 
 from __future__ import annotations
 
+from app.utils.mensajes import mensaje_error
+
 import argparse
 import os
 import sys
@@ -208,7 +210,8 @@ def main() -> int:
     try:
         return _run(args)
     except Exception as exc:  # noqa: BLE001 - CLI amigable
-        print(f"\nERROR: {exc}", file=sys.stderr)
+        logger.opt(exception=exc).debug("No se pudo completar el procesamiento")
+        print(f"\nError: {mensaje_error(exc)}", file=sys.stderr)
         if args.verbose:
             import traceback
 
@@ -324,10 +327,10 @@ def _run(args: argparse.Namespace) -> int:
         try:
             page_range = PageRange.parse(args.pages)
         except ValueError as exc:
-            print(f"ERROR: --pages inválido: {exc}", file=sys.stderr)
+            print("Error: revise el rango de páginas. Use un número o un intervalo como 1-10.", file=sys.stderr)
             return 1
     if args.cpu_threads is not None and args.cpu_threads < 1:
-        print("ERROR: --threads debe ser >= 1", file=sys.stderr)
+        print("Error: la cantidad de hilos debe ser al menos 1.", file=sys.stderr)
         return 1
 
     # ── Carpeta de la ejecución: nombre del CSV (sin extensión) ──────────

@@ -41,6 +41,8 @@ caso que no se entiende no se toque.
 
 from __future__ import annotations
 
+from app.utils.mensajes import mensaje_error
+
 import base64
 import json
 import re
@@ -134,11 +136,12 @@ class ControlNoEncontrado(RuntimeError):
 def mensaje_airvault(aviso: object, accion: str) -> str:
     """Explica rechazos conocidos sin atribuir causas a avisos desconocidos."""
     texto = " ".join(str(aviso or "").split())
+    logger.debug("Rechazo de AirVault al {}: {}", accion, texto)
     normalizado = "".join(
         letra for letra in unicodedata.normalize("NFKD", texto.casefold())
         if not unicodedata.combining(letra)
     )
-    if re.search(
+    if not re.search(r"\bnot locked\b|\bno esta bloquead[ao]\b", normalizado) and re.search(
         r"\b(?:is (?:currently |already )?locked|has been locked|page locked|"
         r"document locked|locked by|esta bloquead[ao]|bloquead[ao] por)\b",
         normalizado,
@@ -148,9 +151,7 @@ def mensaje_airvault(aviso: object, accion: str) -> str:
         ))
         quien = " por otro usuario" if por_otro else ""
         return (
-            f"La bitácora está bloqueada{quien} en AirVault. No se puede "
-            f"{accion} mientras siga bloqueada. Espere a que se libere o "
-            "solicite al responsable que la desbloquee."
+            f"La bitácora está bloqueada{quien}. Solicite que la desbloqueen."
         )
     if any(marca in normalizado for marca in (
         "access denied", "permission denied", "not authorized", "not authorised",
@@ -160,26 +161,21 @@ def mensaje_airvault(aviso: object, accion: str) -> str:
         "acceso denegado",
     )):
         return (
-            f"Su cuenta no tiene permiso para {accion} en AirVault. "
-            "Solicite el permiso al administrador de AirVault."
+            f"Su cuenta no tiene permiso para {accion}. Solicítelo al administrador."
         )
     if any(marca in normalizado for marca in (
         "session expired", "session has expired", "login timeout",
         "sesion caduc", "sesion ha caduc", "sesion expir",
     )):
         return (
-            "La sesión de AirVault caducó. Vuelva a iniciar sesión y "
-            "consulte el reporte antes de continuar la corrección."
+            "La sesión de AirVault caducó. Vuelva a iniciar sesión."
         )
     if re.search(r"(?:document|page|bitacora).*(?:not found|no longer exists|has been deleted|no existe|ya no existe|no se encontr)", normalizado):
         return (
-            "La bitácora ya no está disponible en AirVault. Vuelva a "
-            "buscarla en Web Search y consulte el reporte antes de corregirla."
+            "La bitácora ya no está disponible. Vuelva a buscarla en Web Search."
         )
-    return (
-        f"AirVault no permitió {accion}. Revise la bitácora en Web Search "
-        f"antes de intentarlo de nuevo. Mensaje de AirVault: {texto}"
-    )
+    logger.warning("AirVault no permitió {}: {}", accion, texto)
+    return f"AirVault no permitió {accion}. Revise la bitácora en Web Search."
 
 
 def mensaje_error_correccion(error: Exception) -> str:
@@ -187,21 +183,14 @@ def mensaje_error_correccion(error: Exception) -> str:
     if isinstance(error, ControlNoEncontrado):
         return str(error)
     if isinstance(error, ErrorDePaginaAirVault):
-        return (
-            f"{error}. Vuelva a abrir AirVault y compruebe la bitácora "
-            "en Web Search antes de reintentar la corrección."
-        )
+        motivo = mensaje_error(error).split(". ", 1)[0].rstrip(".")
+        return f"{motivo}. Revise la bitácora en Web Search antes de reintentar."
     if isinstance(error, (TimeoutError, ConnectionError, ErrorDeNavegador)):
         return (
-            "No se pudo abrir o mantener la comunicación con Edge para "
-            "completar la corrección. Vuelva a abrir AirVault y "
-            "compruebe la bitácora en Web Search antes de reintentar."
+            "Se perdió la conexión con AirVault. Revise la bitácora en Web Search antes de reintentar."
         )
     return (
-        "Un error inesperado impidió completar la corrección. Compruebe en "
-        "Web Search si se eliminaron copias o cambió la matrícula, y vuelva "
-        "a consultar el reporte antes de reintentar. El detalle técnico "
-        "quedó en el registro de errores de BITS."
+        "No se pudo completar la corrección. Revise la bitácora en Web Search antes de reintentar."
     )
 
 
@@ -937,8 +926,7 @@ class CorrectorLogPageAudit:
                 return Resultado(
                     correccion,
                     detalle=(
-                        "La bitácora no aparece en Web Search. No se puede "
-                        "corregir sin localizarla. Vuelva a consultar el reporte."
+                        'La bitácora no aparece en Web Search. Vuelva a consultar el reporte.'
                     ),
                 )
             if correccion.accion == ACCION_BORRAR:
@@ -964,15 +952,12 @@ class CorrectorLogPageAudit:
     def _rejilla(pagina: _Pagina) -> list[Mapping[str, object]]:
         if not pagina.esperar(_REJILLA_CARGADA, 180.0):
             raise ControlNoEncontrado(
-                "Web Search no terminó de cargar la búsqueda. No se pudieron "
-                "comprobar las copias de la bitácora. Vuelva a abrir la búsqueda "
-                "y compruebe que tiene acceso a AirVault."
+                'Web Search no cargó la búsqueda. Vuelva a abrirla.'
             )
         leidas = pagina.evaluar(_LEER_REJILLA)
         if not isinstance(leidas, list):
             raise ControlNoEncontrado(
-                "No se pudo leer la tabla de Web Search ni comprobar las copias "
-                "de la bitácora. Vuelva a cargar la búsqueda antes de corregirla."
+                'No se pudieron leer las copias. Vuelva a cargar Web Search.'
             )
         return [fila for fila in leidas if isinstance(fila, Mapping)]
 
@@ -987,9 +972,7 @@ class CorrectorLogPageAudit:
         pagina.evaluar("window.__bits_recarga = 1; location.reload(); true")
         if not pagina.esperar(_REJILLA_RECARGADA, 180.0):
             raise ControlNoEncontrado(
-                "Web Search no volvió a cargar la búsqueda. No se pudo verificar "
-                "el estado de la bitácora. Compruebe las copias y la matrícula "
-                "en Web Search antes de reintentar la corrección."
+                'No se pudo comprobar la corrección. Revise las copias y la matrícula en Web Search.'
             )
         return copias_en(cls._rejilla(pagina), log_number)
 
@@ -1020,19 +1003,14 @@ class CorrectorLogPageAudit:
             return Resultado(
                 correccion,
                 detalle=(
-                    "No se pudo identificar la copia más antigua porque falta "
-                    "la fecha de archivo de alguna copia o no se puede leer. "
-                    "No se elimina ninguna: revise las fechas en Web Search "
-                    "para decidir cuál conservar."
+                    'Falta la fecha de archivo de una copia. Revise en Web Search cuál conservar.'
                 ),
             )
         if any(copia.imagenes != 1 or copia.tipo.upper() != "LOG PAGE" for copia in copias):
             return Resultado(
                 correccion,
                 detalle=(
-                    "No se elimina: alguna copia no está identificada como "
-                    "bitácora de una sola imagen. Puede tener varias imágenes "
-                    "o pertenecer a otra área. Revise las copias en Web Search."
+                    "Hay copias con varias imágenes o de otra área. Revise las copias en Web Search."
                 ),
             )
         if ensayo:
@@ -1052,16 +1030,12 @@ class CorrectorLogPageAudit:
             return Resultado(
                 correccion,
                 detalle=(
-                    "Web Search no permitió identificar todas las copias. "
-                    "No se elimina ninguna para evitar borrar la equivocada. "
-                    "Vuelva a cargar la búsqueda."
+                    'No se identificaron todas las copias. Vuelva a cargar Web Search.'
                 ),
             )
         if len({c.clave for c in copias}) != len(copias):
             return Resultado(correccion, detalle=(
-                "Web Search muestra el mismo documento más de una vez; no se "
-                "puede confirmar que sean copias distintas. No se elimina "
-                "ninguna. Vuelva a cargar la búsqueda."
+                'Web Search repite el mismo documento. Vuelva a cargar la búsqueda.'
             ))
         if self.revisar is not None and (self.revision_activa is None or self.revision_activa()):
             vistas = [(c, self._imagen_previa(pagina, c)) for c in copias]
@@ -1078,21 +1052,15 @@ class CorrectorLogPageAudit:
             conocidas = {c.clave: c for c in copias}
             if any(c.clave not in conocidas or not self._misma_copia(c, conocidas[c.clave]) for c in actuales):
                 raise ControlNoEncontrado(
-                    "La búsqueda de Web Search cambió desde la revisión. "
-                    "Se detiene la eliminación para evitar borrar una copia "
-                    "equivocada. Revise las que quedan y vuelva a consultar el reporte."
+                    'La búsqueda cambió. Revise las copias y vuelva a consultar el reporte.'
                 )
             if not any(c.clave == se_queda.clave for c in actuales):
                 raise ControlNoEncontrado(
-                    "La copia más antigua, que debía conservarse, ya no aparece "
-                    "en Web Search. Se detiene la eliminación. Revise las copias "
-                    "que quedan y vuelva a consultar el reporte."
+                    'La copia más antigua ya no aparece. Revise las restantes y vuelva a consultar el reporte.'
                 )
             if not any(c.clave == copia.clave for c in actuales):
                 raise ControlNoEncontrado(
-                    "La copia elegida para eliminar ya no aparece en Web Search. "
-                    "Se detiene la eliminación. Revise las copias que quedan "
-                    "y vuelva a consultar el reporte."
+                    'La copia elegida ya no aparece. Vuelva a consultar el reporte.'
                 )
             self._registrar("borrado_solicitado", correccion, copia)
             self._borrar_copia(pagina, copia)
@@ -1107,10 +1075,7 @@ class CorrectorLogPageAudit:
             return Resultado(
                 correccion,
                 detalle=(
-                    f"Se intentó borrar {cuantas}; Web Search muestra "
-                    f"{len(quedan)} copias, pero debían quedar "
-                    f"{len(copias) - len(sobran)} y conservarse la más antigua. "
-                    "No se pudo confirmar ese resultado. "
+                    f"No se pudo confirmar el borrado. Web Search muestra {len(quedan)} copias. "
                     "Revise las copias antes de reintentar."
                 ),
             )
@@ -1120,8 +1085,7 @@ class CorrectorLogPageAudit:
                 correccion,
                 detalle=(
                     f"{'Borrada' if una else 'Borradas'} {cuantas}; quedan "
-                    f"{len(quedan)} copias para revisar. La bitácora sigue "
-                    "duplicada. Vuelva a consultar el reporte antes de continuar."
+                    f"{len(quedan)} copias para revisar. Vuelva a consultar el reporte."
                 ),
             )
         return Resultado(
@@ -1170,18 +1134,14 @@ class CorrectorLogPageAudit:
             return Resultado(
                 correccion,
                 detalle=(
-                    detalle + " La búsqueda cambió o quedó incompleta al "
-                    "comprobarla; no se elimina nada. Vuelva a consultar "
-                    "el reporte."
+                    detalle + " La búsqueda cambió o quedó incompleta. Vuelva a consultar el reporte."
                 ),
             )
         return Resultado(
             correccion,
             detalle=(
-                f"Reporte desactualizado: indica {esperadas} copias, pero "
-                "Web Search confirma una sola después de volver a cargar "
-                "la búsqueda. Ya no aparece duplicada; no se elimina nada. "
-                "Vuelva a consultar el reporte con Actualizar en YES."
+                f"Reporte desactualizado: indica {esperadas} copias, pero Web Search muestra una sola. "
+                "Vuelva a consultar el reporte con «Actualizar» activado."
             ),
         )
 
@@ -1232,21 +1192,17 @@ class CorrectorLogPageAudit:
         }))(%s)""" % json.dumps(url))
         if not dato or not isinstance(dato, str):
             raise ControlNoEncontrado(
-                "No se pudo cargar la imagen para comparar las copias. "
-                "No se elimina ninguna. Compruebe la imagen en Web Search "
-                "antes de reintentar."
+                'No se pudo cargar la imagen. Revise las copias en Web Search antes de eliminarlas.'
             )
         try:
             imagen = base64.b64decode(dato, validate=True)
         except ValueError as exc:
             raise ControlNoEncontrado(
-                "AirVault no entregó una imagen válida para comparar las "
-                "copias. No se elimina ninguna. Revise las imágenes en Web Search."
+                'No se pudieron comparar las imágenes. Revise las copias en Web Search.'
             ) from exc
         if not imagen.startswith(b"\x89PNG\r\n\x1a\n"):
             raise ControlNoEncontrado(
-                "AirVault no entregó una imagen válida para comparar las "
-                "copias. No se elimina ninguna. Revise las imágenes en Web Search."
+                'No se pudieron comparar las imágenes. Revise las copias en Web Search.'
             )
         with self._candado_previa:
             if len(self.cache_previa) >= 64:
@@ -1266,9 +1222,7 @@ class CorrectorLogPageAudit:
             return Resultado(
                 correccion,
                 detalle=(
-                    f"Web Search muestra {len(copias)} copias de la bitácora. "
-                    "No se reindexa porque no se puede elegir una sola copia. "
-                    "Revise las duplicadas y vuelva a consultar el reporte."
+                    f"Web Search muestra {len(copias)} copias. Revise las duplicadas antes de reindexar."
                 ),
             )
         copia = copias[0]
@@ -1279,10 +1233,8 @@ class CorrectorLogPageAudit:
             return Resultado(
                 correccion,
                 detalle=(
-                    f"El reporte indica {correccion.matricula_actual}; Web "
-                    f"Search muestra {actual}. No se reindexa porque la "
-                    "matrícula actual no coincide con el reporte. Vuelva "
-                    "a consultar el reporte antes de continuar."
+                    f"El reporte indica {correccion.matricula_actual}; Web Search muestra {actual}. "
+                    "Vuelva a consultar el reporte."
                 ),
             )
         if ensayo:
@@ -1297,9 +1249,7 @@ class CorrectorLogPageAudit:
             return Resultado(
                 correccion,
                 detalle=(
-                    "Web Search no permitió identificar el documento de esta "
-                    "bitácora. No se reindexa para evitar cambiar la copia "
-                    "equivocada. Vuelva a cargar la búsqueda."
+                    'No se pudo identificar la bitácora. Vuelva a cargar Web Search.'
                 ),
             )
         flota, _arrendador, _inferida = self.flota.resolver(
@@ -1364,13 +1314,13 @@ class CorrectorLogPageAudit:
             else "reindexar la bitácora"
         )
         if abierto != "OK":
+            logger.warning("No se pudo {}: {}", accion, abierto)
             raise ControlNoEncontrado(
-                f"No se pudo {accion}: {abierto or 'AirVault no respondió'}."
+                f"No se pudo {accion}. Vuelva a cargar Web Search."
             )
         if not pagina.esperar(_cuadro_abierto(cuadro), 120.0):
             raise ControlNoEncontrado(
-                f"AirVault no abrió la ventana para {accion}. "
-                "Vuelva a cargar la búsqueda y compruebe su acceso a AirVault."
+                f"No se pudo {accion}. Vuelva a cargar Web Search."
             )
         aviso = pagina.evaluar(_MENSAJE)
         if aviso:
@@ -1381,9 +1331,7 @@ class CorrectorLogPageAudit:
                 if aviso:
                     raise ControlNoEncontrado(mensaje_airvault(aviso, accion))
                 raise ControlNoEncontrado(
-                    f"AirVault abrió la ventana para {accion}, pero no cargó "
-                    "los campos necesarios. Vuelva a cargar la búsqueda "
-                    "antes de reintentar."
+                    f"AirVault no cargó los datos para {accion}. Vuelva a cargar Web Search."
                 )
 
     @classmethod
@@ -1433,9 +1381,7 @@ class CorrectorLogPageAudit:
         while not pagina.esperar(_cuadro_cerrado(cuadro), 1.0):
             if time.monotonic() >= limite:
                 raise ControlNoEncontrado(
-                    f"AirVault no terminó de confirmar el {que}. La ventana "
-                    "sigue abierta y no se pudo verificar el resultado. "
-                    "Compruebe la bitácora en Web Search antes de reintentar."
+                    f"AirVault no confirmó el {que}. Revise la bitácora en Web Search antes de reintentar."
                 )
             if contestando:
                 respuesta = pagina.evaluar(
@@ -1455,9 +1401,7 @@ class CorrectorLogPageAudit:
         """Elimina únicamente documentos de bitácora con una sola imagen."""
         if copia.imagenes != 1 or copia.tipo.upper() != "LOG PAGE":
             raise ControlNoEncontrado(
-                "No se elimina la copia porque no se pudo confirmar que sea "
-                "una bitácora de una sola imagen. Revise el tipo de documento "
-                "y sus imágenes en Web Search."
+                'No se confirmó una sola imagen. Revise la copia en Web Search antes de eliminarla.'
             )
         cls._abrir_cuadro(
             pagina,
@@ -1471,9 +1415,9 @@ class CorrectorLogPageAudit:
                 _CONFIRMAR_BORRADO % json.dumps(list(TEXTOS_BORRAR))
             )
             if hecho != "OK":
+                logger.warning("AirVault no eliminó la copia: {}", hecho)
                 raise ControlNoEncontrado(
-                    f"No se pudo eliminar la copia: {hecho or 'AirVault no respondió'}. "
-                    "Compruebe la copia en Web Search antes de reintentar."
+                    "No se pudo eliminar la copia. Revísela en Web Search antes de reintentar."
                 )
             cls._cerrar_cuadro(pagina, "deletePageDialog", "borrado")
 
@@ -1498,10 +1442,9 @@ class CorrectorLogPageAudit:
                 )
             )
             if hecho != "OK":
+                logger.warning("AirVault no reindexó en {}: {}", matricula, hecho)
                 raise ControlNoEncontrado(
-                    f"No se pudo reindexar la bitácora en {matricula}: "
-                    f"{hecho or 'AirVault no respondió'}. "
-                    "Revise la matrícula en Web Search antes de reintentar."
+                    mensaje_error(hecho, f"No se pudo reindexar en {matricula}. Revise la matrícula en Web Search.")
                 )
             cls._cerrar_cuadro(
                 pagina, "reindexDialog", "reindexado", TEXTOS_SEGUIR,

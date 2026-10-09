@@ -272,7 +272,8 @@ def test_si_el_pull_falla_lo_explica_y_deja_el_boton(window, app, monkeypatch):
     window._actualizar_worker.wait()
     app.processEvents()
 
-    assert len(avisos) == 1 and "Not possible to fast-forward" in avisos[0]
+    assert len(avisos) == 1 and "No se pudo actualizar BITS" in avisos[0]
+    assert "Not possible to fast-forward" not in avisos[0]
     assert window.btn_actualizar.isEnabled()
     assert window.btn_actualizar.text() == "Hacer clic aquí para actualizar"
 

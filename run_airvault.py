@@ -21,6 +21,8 @@ Modos de ``indexar``:
 
 from __future__ import annotations
 
+from app.utils.mensajes import mensaje_error
+
 import argparse
 import os
 import sys
@@ -653,10 +655,12 @@ def main() -> int:
     try:
         return ETAPAS[args.etapa](args, config)
     except (ErrorDeSesion, FileNotFoundError, ValueError) as exc:
-        print(f"\nERROR: {exc}", file=sys.stderr)
+        logger.debug("No se pudo completar el trabajo: {}", exc)
+        print(f"\nError: {mensaje_error(exc)}", file=sys.stderr)
         return 1
     except Exception as exc:  # noqa: BLE001 - CLI amigable
-        print(f"\nERROR: {exc}", file=sys.stderr)
+        logger.debug("No se pudo completar el trabajo: {}", exc)
+        print(f"\nError: {mensaje_error(exc)}", file=sys.stderr)
         if args.verbose:
             import traceback
 

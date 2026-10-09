@@ -610,7 +610,8 @@ class EditorWindow(QMainWindow):
             self._render_current_page()
             logger.info(f"PDF abierto: {path} ({self._total_pages} páginas)")
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Error", str(exc))
+            logger.exception("No se pudo abrir el PDF")
+            QMessageBox.critical(self, "Abrir PDF", "No se pudo abrir el PDF. Revise el archivo.")
             self._pdf_path = None
 
     def _render_current_page(self) -> None:
@@ -644,7 +645,8 @@ class EditorWindow(QMainWindow):
             self._rebuild_field_list()
             self._update_nav_state()
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Error", str(exc))
+            logger.exception("No se pudo mostrar la página")
+            QMessageBox.critical(self, "Vista previa", "No se pudo mostrar la página. Vuelva a abrir el PDF.")
 
     def _update_nav_state(self) -> None:
         """Habilita/deshabilita las flechas según la página actual."""
@@ -894,7 +896,8 @@ class EditorWindow(QMainWindow):
                 f"Plantilla guardada con {len(template.fields)} campos:\n{path}",
             )
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Error", str(exc))
+            logger.exception("No se pudo guardar la plantilla")
+            QMessageBox.critical(self, "Guardar plantilla", "No se pudo guardar la plantilla. Elija otra carpeta.")
 
     def _load_template(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -912,7 +915,8 @@ class EditorWindow(QMainWindow):
             self._apply_template_to_scene(template)
             logger.info(f"Plantilla cargada: {template.name}")
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Error", str(exc))
+            logger.exception("No se pudo cargar la plantilla")
+            QMessageBox.critical(self, "Cargar plantilla", "No se pudo cargar la plantilla. Seleccione una válida.")
 
     def _apply_template_to_scene(self, template: Template) -> None:
         # Quitar rectángulos previos, conservando el fondo (pixmap).

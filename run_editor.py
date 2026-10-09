@@ -29,8 +29,9 @@ def main() -> int:
         from app.gui.editor_window import EditorWindow
         from app.gui.theme import install_application_theme
     except ImportError as exc:
-        print("PySide6 no está instalado. Ejecute:\n"
-              "  python -m pip install --user -r requirements.txt",
+        from loguru import logger
+        logger.opt(exception=exc).debug("No se pudo cargar el editor de BITS")
+        print("La carpeta de BITS está incompleta. Copie de nuevo la carpeta completa.",
               file=sys.stderr)
         return 1
 

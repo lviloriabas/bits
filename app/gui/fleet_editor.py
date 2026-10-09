@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from loguru import logger
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
@@ -165,6 +166,7 @@ class FleetEditorDialog(QDialog):
         try:
             self.store.save(values)
         except OSError as exc:
-            QMessageBox.critical(self, "No se pudo guardar", str(exc))
+            logger.exception("No se pudo guardar la flota")
+            QMessageBox.critical(self, "Guardar flota", "No se pudo guardar la flota. Cierre el archivo y vuelva a intentarlo.")
             return
         self.accept()

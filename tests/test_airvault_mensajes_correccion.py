@@ -25,8 +25,8 @@ from tests.test_airvault_correcciones import (
 @pytest.mark.parametrize("aviso,motivo,ayuda", [
     ("The specified document page is locked by another user.",
      "bloqueada por otro usuario", "desbloquee"),
-    ("The specified document page is locked.", "bloqueada en AirVault", "libere"),
-    ("The document is currently locked.", "bloqueada en AirVault", "libere"),
+    ("The specified document page is locked.", "bloqueada", "desbloqueen"),
+    ("The document is currently locked.", "bloqueada", "desbloqueen"),
     ("La bitácora está bloqueada por otro usuario.",
      "bloqueada por otro usuario", "desbloquee"),
     ("You do not have permission to perform this operation.",
@@ -56,16 +56,22 @@ def test_el_rechazo_se_explica_en_el_resultado_sin_guardar(
     assert not resultado.hecho
     assert motivo in resultado.detalle
     assert ayuda in resultado.detalle
-    if "bloqueada" in motivo or "permiso" in motivo:
+    assert len(resultado.detalle) < 140
+    if not aviso.startswith("La bitácora"):
+        assert aviso not in resultado.detalle
+    if "permiso" in motivo:
         assert accion in resultado.detalle
     assert cerradas == [True]
     assert not any("boton.click()" in orden for orden in pagina.ordenes)
 
 
-def test_el_aviso_desconocido_conserva_la_evidencia_sin_inventar_un_bloqueo():
+def test_el_aviso_desconocido_registra_la_evidencia_sin_mostrarla(monkeypatch):
+    registrados = []
+    monkeypatch.setattr(modulo.logger, "warning", lambda *args: registrados.append(args))
     aviso = "Cannot complete operation: repository is read-only."
     texto = mensaje_airvault(aviso, "reindexar la bitácora")
-    assert aviso in texto
+    assert aviso not in texto
+    assert any(aviso in args for args in registrados)
     assert "Revise la bitácora en Web Search" in texto
     assert "bloqueada" not in texto
     assert "no tiene permiso" not in texto
@@ -73,7 +79,9 @@ def test_el_aviso_desconocido_conserva_la_evidencia_sin_inventar_un_bloqueo():
 
 def test_no_deduce_un_bloqueo_de_una_negacion():
     aviso = "The document page is not locked; the operation failed."
-    assert aviso in mensaje_airvault(aviso, "eliminar la copia")
+    texto = mensaje_airvault(aviso, "eliminar la copia")
+    assert aviso not in texto
+    assert "bloqueada" not in texto
 
 
 @pytest.mark.parametrize("cuadro", ["deletePageDialog", "reindexDialog"])
@@ -95,10 +103,10 @@ def test_un_rechazo_al_confirmar_no_se_oculta_como_una_espera(cuadro):
 
 
 @pytest.mark.parametrize("error,motivo", [
-    (ConnectionResetError("WinError 10054: socket"), "comunicación con Edge"),
-    (ValueError("Invalid data in C:\\interno\\perfil"), "error inesperado"),
+    (ConnectionResetError("WinError 10054: socket"), "conexión con AirVault"),
+    (ValueError("Invalid data in C:\\interno\\perfil"), "No se pudo completar la corrección"),
     (ErrorDePaginaAirVault("La pestaña de AirVault ya no está abierta en Edge"),
-     "ya no está abierta"),
+     "se cerró"),
 ])
 def test_los_errores_internos_se_registran_y_no_se_muestran(
     app, monkeypatch, error, motivo,

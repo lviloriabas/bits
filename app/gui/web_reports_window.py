@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.utils.mensajes import mensaje_error
+
 from datetime import date
 from pathlib import Path
 from threading import Event, Lock
@@ -189,7 +191,8 @@ class _TrabajoEnEdge(QThread):
         raise NotImplementedError
 
     def _mensaje_fallo(self, error: Exception) -> str:
-        return str(error)
+        logger.exception("No se pudo completar el trabajo en AirVault")
+        return mensaje_error(error, "No se pudo consultar AirVault. Vuelva a intentarlo.")
 
     def run(self) -> None:  # noqa: D102 - lo describe la clase
         try:
@@ -844,7 +847,7 @@ class WebReportsWindow(QDialog):
         """Un fallo del corrector no se presenta como fallo de consulta."""
         self._cerrar_revision()
         self._cerrar_cronometro(aprender=False)
-        self.resumen.setText(f"Error al corregir: {mensaje}")
+        self.resumen.setText(mensaje)
 
     @staticmethod
     def _combo(nombre, opciones, defecto=None) -> QComboBox:
@@ -1161,7 +1164,7 @@ class WebReportsWindow(QDialog):
             self.resumen.setText(f"Abierto en Web Search: {etiqueta}.")
 
     def _al_fallar_apertura_paralela(self, mensaje: str) -> None:
-        self.resumen.setText(f"No se pudo abrir Web Search: {mensaje}")
+        self.resumen.setText(mensaje)
 
     def _al_terminar_apertura(self) -> None:
         self._aperturas.discard(self.sender())
@@ -1179,7 +1182,7 @@ class WebReportsWindow(QDialog):
 
     def _al_fallar_al_abrir(self, mensaje: str) -> None:
         self._cerrar_cronometro(aprender=False)
-        self.resumen.setText(f"No se pudo abrir Web Search: {mensaje}")
+        self.resumen.setText(mensaje)
 
     def _al_cancelar_la_apertura(self) -> None:
         """Abrir no se puede detener a medias, y no se finge que sí.
@@ -1194,7 +1197,7 @@ class WebReportsWindow(QDialog):
 
     def _al_fallar(self, mensaje: str) -> None:
         self._cerrar_cronometro(aprender=False)
-        self.resumen.setText(f"Error al consultar: {mensaje}")
+        self.resumen.setText(mensaje)
 
     def _al_cancelar(self) -> None:
         self._cerrar_revision()

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Union
 
@@ -15,6 +14,7 @@ from app.core.progress import VOID_STAGE
 from app.models.schemas import ValidationReport
 from app.templates.manager import TemplateManager
 from app.utils.fleet import load_fleet
+from app.utils.mensajes import mensaje_error
 from app.validation.book_corrector import correct_matricula_by_book
 from app.validation.date_corrector import correct_dates_by_book
 from app.validation.discrepancias import con_discrepancias_elegidas
@@ -222,7 +222,8 @@ class PipelineWorker(QThread):
             self.reports = reports
             self.succeeded.emit(reports)
         except Exception as exc:  # noqa: BLE001 - la GUI muestra el error
-            self.failed.emit(f"{exc}\n{traceback.format_exc()}")
+            logger.exception("Se interrumpió el procesamiento")
+            self.failed.emit(mensaje_error(exc, "No se pudieron procesar los PDF. Revise los archivos e inténtelo de nuevo."))
 
     def _on_progress(self, done: int, total: int, message: str) -> None:
         """Acumula el progreso entre bitácoras para un conteo global.
@@ -413,7 +414,8 @@ class PreprocessWorker(QThread):
                         )
             self.succeeded.emit(self.isInterruptionRequested())
         except Exception as exc:  # noqa: BLE001 - la GUI muestra el error
-            self.failed.emit(f"{exc}\n{traceback.format_exc()}")
+            logger.exception("Se interrumpió la preparación de los PDF")
+            self.failed.emit(mensaje_error(exc, "No se pudieron preparar los PDF. Revise los archivos e inténtelo de nuevo."))
 
 
 class OutputsWorker(QThread):
@@ -444,7 +446,8 @@ class OutputsWorker(QThread):
                 on_stage=self._on_stage,
             )
         except Exception as exc:  # noqa: BLE001 - la GUI muestra el error
-            self.failed.emit(f"{exc}\n{traceback.format_exc()}")
+            logger.exception("No se pudieron generar las salidas")
+            self.failed.emit(mensaje_error(exc, "No se pudieron guardar los resultados. Cierre los archivos abiertos y vuelva a intentarlo."))
         else:
             self.succeeded.emit(output_dir)
 

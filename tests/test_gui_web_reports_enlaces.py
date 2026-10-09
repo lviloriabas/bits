@@ -347,4 +347,4 @@ def test_un_fallo_de_apertura_no_para_el_reloj_de_la_correccion(
     assert ventana._estimacion is estimacion
     assert ventana._timer.isActive()
     assert ventana.progreso.value() == 37
-    assert "Edge no responde" in ventana.resumen.text()
+    assert "No se pudo abrir AirVault" in ventana.resumen.text()
