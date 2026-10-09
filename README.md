@@ -11,6 +11,8 @@ Es una aplicación de escritorio para Windows. El OCR corre local, en CPU y sin 
 - **Entrega.** Exporta un PDF único o varios, separados por matrícula, mes, errores o posibles discrepancias, con CSV, JSON y estadísticas de la ejecución.
 - **Indexa.** Sube los batches a AirVault, escribe los datos de búsqueda de cada página y completa los que quedan válidos. Con **Web Reports** corrige bitácoras duplicadas o mal indexadas que ya están publicadas.
 
+En **Indexar en AirVault**, marque las casillas del selector de ejecuciones y pulse **Subir a AirVault** para enviar varias entregas juntas. Cada ejecución conserva su nombre y fecha de indexado; los batches ya subidos se retoman. Pulse el nombre de una ejecución para volver a trabajar solo con ella. La cola muestra todos los batches seleccionados y tiene más espacio en pantallas de 720x768.
+
 ## Uso
 
 Abra `BITS.exe` desde la carpeta completa del programa. No requiere instalación: el intérprete, las bibliotecas y los modelos van en `portable/`.

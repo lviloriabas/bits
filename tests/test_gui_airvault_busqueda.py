@@ -189,6 +189,7 @@ class _ManifiestoFalso:
         self.registros = registros
         self.batch_id = ""
         self.posible_duplicado = False
+        self.solo_subir = nombre.endswith("REVISAR")
 
 
 class _TrabajoFalso:

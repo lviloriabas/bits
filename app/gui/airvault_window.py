@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Dict, Optional, Sequence
 
 from loguru import logger
-from PySide6.QtCore import (QItemSelection, QItemSelectionModel, QRectF,
+from PySide6.QtCore import (QEvent, QItemSelection, QItemSelectionModel, QRectF,
                             QSignalBlocker, Qt, QThread, QTimer, Signal)
 from PySide6.QtGui import (QBrush, QColor, QGuiApplication, QIcon,
                            QKeySequence, QPainter, QPen, QPixmap, QShortcut)
@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox,
                                QHeaderView, QLabel, QLineEdit, QListView,
                                QListWidgetItem, QMenu, QMessageBox,
                                QProgressBar, QPushButton, QSpinBox,
+                               QStyle, QStyleOptionComboBox, QStylePainter,
                                QTableWidget, QTableWidgetItem, QToolButton,
                                QVBoxLayout, QWidget)
 
@@ -543,6 +544,64 @@ TOOLTIP_ELIMINAR_REGISTROS = (
 )
 
 
+class SelectorEjecuciones(QComboBox):
+    """El nombre elige una ejecucion; las casillas permiten reunir varias."""
+
+    seleccion_cambiada = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.permitir_marcar = True
+        self.view().viewport().installEventFilter(self)
+        self.view().installEventFilter(self)
+
+    def marcar(self, indice: int) -> None:
+        if not self.permitir_marcar or not self.itemData(indice, ROL_SE_PUEDE_SUBIR):
+            return
+        marcado = self.itemData(indice, Qt.ItemDataRole.CheckStateRole)
+        self.setItemData(
+            indice,
+            Qt.CheckState.Unchecked if marcado == Qt.CheckState.Checked
+            else Qt.CheckState.Checked,
+            Qt.ItemDataRole.CheckStateRole,
+        )
+        self.seleccion_cambiada.emit()
+        self.update()
+
+    def eventFilter(self, objeto, evento) -> bool:  # noqa: N802 - API Qt
+        if evento.type() == QEvent.Type.MouseButtonRelease and objeto is self.view().viewport():
+            indice = self.view().indexAt(evento.position().toPoint())
+            ancho = self.style().pixelMetric(QStyle.PixelMetric.PM_IndicatorWidth) + SPACE_S * 2
+            if (
+                evento.button() == Qt.MouseButton.LeftButton
+                and indice.isValid()
+                and self.itemData(indice.row(), Qt.ItemDataRole.CheckStateRole) is not None
+                and evento.position().x() < self.view().visualRect(indice).left() + ancho
+            ):
+                self.marcar(indice.row())
+                return True
+        if evento.type() == QEvent.Type.KeyPress and objeto is self.view():
+            if evento.key() == Qt.Key.Key_Space:
+                self.marcar(self.view().currentIndex().row())
+                return True
+        return False
+
+    def paintEvent(self, evento) -> None:  # noqa: N802 - API Qt
+        cantidad = sum(
+            self.itemData(i, Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked
+            for i in range(1, self.count())
+        )
+        if cantidad <= 1:
+            super().paintEvent(evento)
+            return
+        pintor = QStylePainter(self)
+        opcion = QStyleOptionComboBox()
+        self.initStyleOption(opcion)
+        opcion.currentText = f"{cantidad} ejecuciones seleccionadas"
+        pintor.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, opcion)
+        pintor.drawControl(QStyle.ControlElement.CE_ComboBoxLabel, opcion)
+
+
 class TrabajoCancelado(BaseException):
     """Alguien pulsó Cancelar; el trabajo se deshace y se sale.
 
@@ -765,23 +824,27 @@ class TrabajoAirVaultWorker(QThread):
         from app.airvault.mapping import FLOTA_CACHE_FILENAME, ResolutorFlota
 
         estado = self.estado
-        csv = Path(estado["csv"])
         raiz = Path(estado["raiz"])
-
-        self._avisar(f"Leyendo la ejecución {csv.parent.parent.name}", 0, 0)
-        entrega = comprobar_entrega(csv)
-        cuantas = sum(len(p.paginas) for p in entrega)
-        archivos = ("1 archivo" if len(entrega) == 1
-                    else f"{len(entrega)} archivos")
-        self._avisar(f"{cuantas} páginas en {archivos} de entrega", 0, 0)
         resolutor = ResolutorFlota.load(raiz / FLOTA_CACHE_FILENAME)
-        trabajos = preparar_partes(
-            estado["config"], Path(estado["carpeta_job"]), csv,
-            estado["nombre_lote"], resolutor=resolutor,
-            paginas_por_batch=estado["paginas_por_batch"],
-            avisar=self._avisar,
-            fin_de_mes=estado.get("fin_de_mes", False),
-        )
+        ejecuciones = estado.pop("ejecuciones_subida", None) or [estado]
+        trabajos = []
+        # Se prepara toda la seleccion antes de enviar. Cada ejecucion
+        # conserva su nombre, fecha y memoria de lo que ya se subio.
+        for ejecucion in ejecuciones:
+            csv = Path(ejecucion["csv"])
+            self._avisar(f"Leyendo la ejecución {csv.parent.parent.name}", 0, 0)
+            entrega = comprobar_entrega(csv)
+            cuantas = sum(len(p.paginas) for p in entrega)
+            archivos = ("1 archivo" if len(entrega) == 1
+                        else f"{len(entrega)} archivos")
+            self._avisar(f"{cuantas} páginas en {archivos} de entrega", 0, 0)
+            trabajos.extend(preparar_partes(
+                estado["config"], Path(ejecucion["carpeta_job"]), csv,
+                ejecucion["nombre_lote"], resolutor=resolutor,
+                paginas_por_batch=estado["paginas_por_batch"],
+                avisar=self._avisar,
+                fin_de_mes=ejecucion.get("fin_de_mes", False),
+            ))
         estado["trabajos"] = trabajos
         for trabajo in trabajos:
             manifiesto = trabajo.manifiesto
@@ -1422,6 +1485,7 @@ class AirVaultWindow(QDialog):
         # nombre de la ejecucion elegida ya dice cual es, y la ruta debajo
         # solo repetia lo mismo ocupando una fila.
         self._corrida: str = ""
+        self._corridas_marcadas: set[str] = set()
         # Reloj del paso en curso y último texto anotado, para no repetir
         # una línea por cada trozo de una subida.
         self._reloj: Optional[QTimer] = None
@@ -1554,15 +1618,14 @@ class AirVaultWindow(QDialog):
         recordar(AIRVAULT, "solo_ejecucion", self.solo_ejecucion_check)
         cuerpo.addWidget(self.solo_ejecucion_check)
         cuerpo.addLayout(self._cabecera_de_lotes())
-        cuerpo.addWidget(self._lotes(), 1)
+        cuerpo.addWidget(self._lotes(), 3)
         cuerpo.addWidget(self._respuesta_de_la_busqueda())
         cuerpo.addLayout(self._fila_vigilancia())
         cuerpo.addLayout(self._fila_politica_duplicados())
         cuerpo.addLayout(self._fila_avance())
-        # La bitácora se queda con el alto que sobre: las dos tablas
-        # tienen tope y ella es la que necesita sitio para los mensajes
-        # largos.
-        cuerpo.addWidget(self._bitacora(), 2)
+        # La cola tiene prioridad: en pantallas bajas necesita mostrar
+        # varios batches a la vez. El registro sigue siendo desplazable.
+        cuerpo.addWidget(self._bitacora(), 1)
 
         self.resumen = ElidedLabel(TEXTO_SIN_SUBIR)
         pintar_del_tema(
@@ -1592,18 +1655,21 @@ class AirVaultWindow(QDialog):
         la más reciente no parezca elegida antes de que nadie la elija, y es
         el único sitio desde el que se elige lo que se sube.
         """
-        combo = QComboBox()
+        combo = SelectorEjecuciones()
         configure_combo_box(combo, 22)
         combo.setToolTip(
             "Ejecuciones procesadas, de la más reciente a la más antigua. "
             "Solo se suben las exportadas, y solo las últimas "
             f"{LIMITE_HISTORIAL}."
+            " Pulse un nombre para elegir una ejecución o marque las "
+            "casillas para subir varias juntas. Espacio marca la fila."
         )
         combo.setAccessibleName("Ejecuciones procesadas recientes")
         # «activated» solo lo emite quien elige con el ratón o el teclado,
         # así que sincronizar la lista desde el código no se lee como que
         # alguien cambió de ejecución y tira lo hecho.
         combo.activated.connect(self._al_elegir_del_historial)
+        combo.seleccion_cambiada.connect(self._al_marcar_ejecuciones)
         # Cada ejecución se puede reiniciar o quitar de en medio sin tocar a
         # las demás; el clic derecho actúa sobre la que está elegida.
         combo.setContextMenuPolicy(
@@ -1637,10 +1703,13 @@ class AirVaultWindow(QDialog):
         """Lo que el menú ofrece para una ejecución de la lista."""
         menu = QMenu(self)
         registro = menu.addAction("Eliminar el registro de AirVault")
+        en_uso = self.hilo() is not None and self._es_ejecucion_seleccionada(csv)
+        registro.setEnabled(not en_uso)
         registro.setToolTip(TOOLTIP_ELIMINAR_REGISTRO)
         registro.triggered.connect(lambda: self._eliminar_registro(csv))
         menu.addSeparator()
         ejecucion = menu.addAction("Eliminar la ejecución…")
+        ejecucion.setEnabled(not en_uso)
         ejecucion.setToolTip(
             "Manda a la Papelera la carpeta de esta ejecución en output/. Lo "
             "que ya esté en AirVault no se toca."
@@ -2891,7 +2960,6 @@ class AirVaultWindow(QDialog):
         """Deja la cola con su alto y la barra debajo de la cabecera."""
         style_data_table(tabla)
         tabla.setMinimumHeight(self._densidad.airvault_table_min_height)
-        tabla.setMaximumHeight(360)
         align_vertical_scrollbar_to_header(tabla)
 
     def _fila_vigilancia(self) -> QHBoxLayout:
@@ -3029,8 +3097,6 @@ class AirVaultWindow(QDialog):
         """
         lista = CopyableListWidget()
         lista.setToolTip("Lo que el indexado va haciendo, con la hora de cada paso")
-        # Sin tope y con suelo: un mensaje largo se envuelve en varias
-        # líneas y con 110 px fijos solo se veía el principio.
         lista.setMinimumHeight(self._densidad.airvault_log_min_height)
         lista.setWordWrap(True)
         lista.setTextElideMode(Qt.TextElideMode.ElideNone)
@@ -3262,6 +3328,13 @@ class AirVaultWindow(QDialog):
             Qt.ItemDataRole.ToolTipRole,
         )
         self.historial.setItemData(indice, listo, ROL_SE_PUEDE_SUBIR)
+        if listo:
+            self.historial.setItemData(
+                indice,
+                Qt.CheckState.Checked if str(csv) in self._corridas_marcadas
+                else Qt.CheckState.Unchecked,
+                Qt.ItemDataRole.CheckStateRole,
+            )
         if not listo:
             # Sale en la lista igualmente: quien la busca tiene que verla, y
             # el gris es lo que dice que todavía le falta exportarla.
@@ -3283,13 +3356,81 @@ class AirVaultWindow(QDialog):
         if not csv:
             self._marcar_en_historial(self._corrida)
             return
-        if csv == self._corrida:
-            return
         if self.hilo() is not None:
-            self.abrir_corrida_paralela.emit(str(csv))
+            if not self._es_ejecucion_seleccionada(csv):
+                self.abrir_corrida_paralela.emit(str(csv))
             self._marcar_en_historial(self._corrida)
             return
+        if csv == self._corrida and len(self._corridas_marcadas) <= 1:
+            return
         self.fijar_corrida(csv)
+
+    def _corridas_seleccionadas(self) -> list[str]:
+        """La seleccion en el orden del historial, sin repetir ejecuciones."""
+        ordenadas = [
+            str(self.historial.itemData(i))
+            for i in range(1, self.historial.count())
+            if str(self.historial.itemData(i)) in self._corridas_marcadas
+        ]
+        ordenadas.extend(sorted(self._corridas_marcadas.difference(ordenadas)))
+        return ordenadas
+
+    def _fecha_de_ejecucion(self, csv: str) -> bool:
+        """Respeta la fecha elegida antes, incluso en ejecuciones retomadas."""
+        if csv == self._corrida:
+            return self.fin_de_mes()
+        fechas = {
+            t.manifiesto.fin_de_mes for t in self._trabajos
+            if str(Path(t.manifiesto.csv_origen)).casefold() == str(Path(csv)).casefold()
+        }
+        return fechas.pop() if len(fechas) == 1 else not run_read_day(Path(csv))
+
+    def _al_marcar_ejecuciones(self) -> None:
+        """Reune las ejecuciones marcadas en la misma cola de trabajo."""
+        if self.hilo() is not None:
+            return
+        self._corridas_marcadas = {
+            str(self.historial.itemData(i))
+            for i in range(1, self.historial.count())
+            if self.historial.itemData(i, Qt.ItemDataRole.CheckStateRole)
+            == Qt.CheckState.Checked
+        }
+        elegidas = self._corridas_seleccionadas()
+        if not elegidas:
+            self._parar_vigilancia()
+            self._corrida = ""
+            self.historial.setCurrentIndex(0)
+            self.lote_edit.clear()
+            self._listo_para_subir = False
+            self._mostrar_reparto(None)
+            self.resumen.setText("Marque una o varias ejecuciones para subirlas.")
+            self._pintar_lotes()
+            self._habilitar(True)
+            return
+        csv = self._corrida if self._corrida in elegidas else elegidas[0]
+        self.fijar_corrida(csv, conservar_seleccion=True)
+
+    def _actualizar_seleccion(self) -> None:
+        """Refleja el alcance y conserva las fechas propias al subir varias."""
+        elegidas = self._corridas_seleccionadas()
+        varias = len(elegidas) > 1
+        self.solo_ejecucion_check.setText(
+            "Mostrar solo las ejecuciones seleccionadas" if varias
+            else "Mostrar solo la ejecución seleccionada"
+        )
+        if varias:
+            self.setWindowTitle(f"Indexar en AirVault - {len(elegidas)} ejecuciones")
+            self._listo_para_subir = all(estado_de_entrega(Path(csv))[1] for csv in elegidas)
+            repartos = [reparto_de_revision(Path(csv)) for csv in elegidas]
+            self._mostrar_reparto(
+                tuple(sum(r[i] for r in repartos) for i in range(2))
+                if all(r is not None for r in repartos) else None
+            )
+            self.resumen.setText(
+                f"{len(elegidas)} ejecuciones seleccionadas. Cada una conserva "
+                "su nombre y fecha de indexado."
+            )
+        self._habilitar(self.hilo() is None)
 
     def _marcar_en_historial(self, csv: Path | str) -> None:
         """Deja elegida en la lista la ejecución abierta, si está en ella."""
@@ -3297,6 +3438,14 @@ class AirVaultWindow(QDialog):
         texto = str(csv).strip()
         clave = str(Path(texto)).casefold() if texto else ""
         with QSignalBlocker(combo):
+            for indice in range(1, combo.count()):
+                if combo.itemData(indice, ROL_SE_PUEDE_SUBIR):
+                    combo.setItemData(
+                        indice,
+                        Qt.CheckState.Checked if str(combo.itemData(indice)) in self._corridas_marcadas
+                        else Qt.CheckState.Unchecked,
+                        Qt.ItemDataRole.CheckStateRole,
+                    )
             for indice in range(1, combo.count()):
                 dato = combo.itemData(indice)
                 if dato and str(Path(dato)).casefold() == clave:
@@ -3331,10 +3480,14 @@ class AirVaultWindow(QDialog):
         """Si las bitácoras se escriben con el último día del mes."""
         return bool(self.fecha_combo.currentData())
 
-    def fijar_corrida(self, csv: Path | str) -> None:
+    def fijar_corrida(self, csv: Path | str, conservar_seleccion: bool = False) -> None:
         """Apunta la ventana a una ejecución y propone el nombre del batch."""
         from app.airvault.flujo import carpeta_de_corrida, carpeta_de_trabajo
         from app.airvault.naming import nombre_desde_corrida
+
+        misma = conservar_seleccion and str(csv) == self._corrida
+        nombre_previo = self.lote_edit.text() if misma else None
+        fecha_previa = self.fin_de_mes() if misma else None
 
         # Cambiar de ejecución tira lo hecho, y con ello los batches que
         # hubieran quedado tomados en AirVault: sin soltarlos quedan
@@ -3342,6 +3495,8 @@ class AirVaultWindow(QDialog):
         self._soltar_lotes()
         self._parar_vigilancia()
         ruta = Path(csv)
+        if not conservar_seleccion:
+            self._corridas_marcadas = {str(ruta)}
         self.setWindowTitle(f"Indexar en AirVault - {ruta.parent.parent.name}")
         self._corrida = str(ruta)
         self.lote_edit.setText(nombre_desde_corrida(ruta))
@@ -3353,6 +3508,11 @@ class AirVaultWindow(QDialog):
         # volver a subir nada: sus manifiestos dicen en qué quedó.
         carpeta = self._raiz / carpeta_de_trabajo(carpeta_de_corrida(csv).name)
         self._cargar_trabajos(carpeta, ruta)
+        if misma:
+            self.lote_edit.setText(nombre_previo)
+            with QSignalBlocker(self.fecha_combo):
+                self.fecha_combo.setCurrentIndex(self.fecha_combo.findData(fecha_previa))
+        self._actualizar_seleccion()
 
     def corrida(self) -> Optional[Path]:
         """La ejecución a la que apunta la ventana, si ya hay una."""
@@ -3394,6 +3554,7 @@ class AirVaultWindow(QDialog):
     def _cargar_trabajos(self, carpeta: Path, csv: Path) -> None:
         """Retoma los trabajos que ya existan para esta ejecución."""
         from app.airvault.flujo import (CARPETA_TRABAJOS, SIN_SUBIR,
+                                        carpeta_de_corrida, carpeta_de_trabajo,
                                         cargar_partes,
                                         cargar_trabajos_pendientes,
                                         estado_local)
@@ -3412,6 +3573,16 @@ class AirVaultWindow(QDialog):
         except Exception:  # noqa: BLE001 - sin trabajos se empieza de cero
             self._trabajos = []
         trabajos_de_corrida = list(self._trabajos)
+        for otra in self._corridas_seleccionadas():
+            if otra != str(csv):
+                try:
+                    self._trabajos.extend(cargar_partes(
+                        self._config_actual(),
+                        self._raiz / carpeta_de_trabajo(carpeta_de_corrida(otra).name),
+                        Path(otra),
+                    ))
+                except Exception as exc:  # noqa: BLE001 - la subida lo validara
+                    logger.warning("No se pudo retomar la ejecucion {}: {}", otra, exc)
         conocidos = {
             str(trabajo.carpeta.resolve()).casefold()
             for trabajo in self._trabajos
@@ -3753,7 +3924,7 @@ class AirVaultWindow(QDialog):
                 "así que no se elimina desde aquí.",
             )
             return
-        if self._es_la_ejecucion_abierta(csv) and self.hilo() is not None:
+        if self._es_ejecucion_seleccionada(csv) and self.hilo() is not None:
             QMessageBox.information(
                 self,
                 "Eliminar la ejecución",
@@ -3798,6 +3969,7 @@ class AirVaultWindow(QDialog):
             return
 
         self._anotar(f"Ejecución eliminada: {nombre}")
+        self._corridas_marcadas.discard(str(csv))
         if self._es_la_ejecucion_abierta(csv):
             # La ventana se queda apuntando a una carpeta que ya no existe:
             # se suelta lo que hubiera tomado y se parte de cero.
@@ -3811,6 +3983,11 @@ class AirVaultWindow(QDialog):
             self.boton_subir.setEnabled(False)
             self.boton_indexar.setEnabled(False)
             self.boton_previa.setEnabled(False)
+        if self._corridas_marcadas:
+            self.fijar_corrida(
+                self._corrida or self._corridas_seleccionadas()[0],
+                conservar_seleccion=True,
+            )
         self._refrescar_historial()
 
     def _sincronizar_entrega(self, csv: Path) -> None:
@@ -3841,8 +4018,14 @@ class AirVaultWindow(QDialog):
             return list(trabajos)
         return [
             trabajo for trabajo in trabajos
-            if self._es_la_ejecucion_abierta(trabajo.manifiesto.csv_origen)
+            if self._es_ejecucion_seleccionada(trabajo.manifiesto.csv_origen)
         ]
+
+    def _es_ejecucion_seleccionada(self, csv: Path | str) -> bool:
+        elegidas = self._corridas_marcadas or {self._corrida}
+        return str(Path(csv)).casefold() in {
+            str(Path(elegida)).casefold() for elegida in elegidas if elegida
+        }
 
     def _partes_en_cola(self) -> list:
         visibles = {id(t) for t in self._filtrar_trabajos(
@@ -3865,7 +4048,7 @@ class AirVaultWindow(QDialog):
             claves = {str(t.carpeta) for t in nuevos}
             nuevos.extend(
                 t for t in self._trabajos
-                if not self._es_la_ejecucion_abierta(t.manifiesto.csv_origen)
+                if not self._es_ejecucion_seleccionada(t.manifiesto.csv_origen)
                 and str(t.carpeta) not in claves
             )
         self._trabajos = nuevos
@@ -4384,6 +4567,26 @@ class AirVaultWindow(QDialog):
         está mirando y mandar a AirVault batches de otro día sin pedirlo es
         justo como se acaban subiendo dos veces.
         """
+        if self.hilo() is not None:
+            return
+        elegidas = self._corridas_seleccionadas()
+        if len(elegidas) > 1:
+            from app.airvault.flujo import carpeta_de_corrida, comprobar_entrega
+
+            # La entrega puede haber cambiado desde que se abrio la lista.
+            # Se valida la seleccion entera antes de mandar ningun archivo.
+            try:
+                for csv in elegidas:
+                    comprobar_entrega(Path(csv))
+            except Exception as exc:  # noqa: BLE001 - se explica en la ventana
+                self.resumen.setText(
+                    f"{carpeta_de_corrida(csv).name}: "
+                    + mensaje_error(exc, "Vuelva a exportar la ejecución antes de subirla.")
+                )
+                return
+            self._cadena_manual = True
+            self._subir(varias=True)
+            return
         sospechosos = [
             parte for parte in self._partes_en_cola()
             if parte.trabajo.manifiesto.posible_duplicado
@@ -4395,10 +4598,25 @@ class AirVaultWindow(QDialog):
         self._cadena_manual = True
         self._subir()
 
-    def _subir(self) -> None:
+    def _subir(self, varias: bool = False) -> None:
         estado = self._base_del_estado()
         if estado is None:
             return
+        if varias:
+            from app.airvault.flujo import carpeta_de_corrida, carpeta_de_trabajo
+            from app.airvault.naming import nombre_desde_corrida
+
+            estado["recuperar_pendientes"] = False
+            estado["ejecuciones_subida"] = [
+                {
+                    "csv": csv,
+                    "carpeta_job": self._raiz / carpeta_de_trabajo(carpeta_de_corrida(csv).name),
+                    "nombre_lote": self.lote_edit.text().strip() if csv == self._corrida
+                    else nombre_desde_corrida(csv),
+                    "fin_de_mes": self._fecha_de_ejecucion(csv),
+                }
+                for csv in self._corridas_seleccionadas()
+            ]
         self._subidas_del_ciclo.clear()
         self._lanzar("subir", estado)
 
@@ -4591,14 +4809,16 @@ class AirVaultWindow(QDialog):
         # historial sigue disponible: elegir otra emite una solicitud para
         # abrirla en su propia ventana y su propio hilo.
         self.historial.setEnabled(True)
+        self.historial.permitir_marcar = activo
         self.boton_subir.setEnabled(activo and self._listo_para_subir)
         self.boton_eliminar_registro.setEnabled(
             activo and bool(self._registros_presentes())
         )
-        self.lote_edit.setEnabled(activo)
+        varias = len(self._corridas_marcadas) > 1
+        self.lote_edit.setEnabled(activo and not varias)
         self.cookie_edit.setEnabled(activo)
         self.limite_batch_spin.setEnabled(activo)
-        self.fecha_combo.setEnabled(activo)
+        self.fecha_combo.setEnabled(activo and not varias)
         self.boton_comprobar.setEnabled(activo and bool(self._trabajos))
         # La vista previa solo lee el disco, pero mientras el hilo reparte
         # los manifiestos están a medio escribir y enseñarlos engaña.

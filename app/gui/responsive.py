@@ -128,8 +128,8 @@ class Density:
     pdf_pane_min_height: int
     editor_view_min_width: int
     editor_panel_max_width: int
-    # Ventana de AirVault: las tres piezas elásticas que se apilan en ella
-    # (las dos tablas, la bitácora y el resumen de abajo). Lo que suman es
+    # Ventana de AirVault: las piezas elasticas que se apilan en ella
+    # (la cola, la bitacora y el resumen de abajo). Lo que suman es
     # lo que decide si la ventana entra en un escritorio bajo o si el
     # reparto tiene que apretar los controles unos contra otros.
     airvault_table_min_height: int
@@ -160,8 +160,8 @@ ROOMY = Density(
     pdf_pane_min_height=260,
     editor_view_min_width=600,
     editor_panel_max_width=340,
-    airvault_table_min_height=132,
-    airvault_log_min_height=160,
+    airvault_table_min_height=212,
+    airvault_log_min_height=80,
     airvault_summary_min_height=48,
 )
 
@@ -193,13 +193,11 @@ COMPACT = Density(
     pdf_pane_min_height=160,
     editor_view_min_width=360,
     editor_panel_max_width=300,
-    # La ventana de AirVault pide 789 px de alto con las medidas holgadas y
-    # un escritorio de 1366x768 solo da 728: al recortarla, el reparto
-    # empujaba el resumen de abajo por encima de la bitácora y la frase se
-    # leía sobre la lista. Apretadas, las tres piezas suman 118 px menos y
-    # la ventana entra entera hasta en un escritorio de 1280x720.
-    airvault_table_min_height=100,
-    airvault_log_min_height=120,
+    # La cola gana alto a costa del registro: debe mostrar varios batches
+    # completos en escritorios de 720x768 y 1280x720. Ambos se desplazan,
+    # pero el estado de los batches tiene prioridad sobre los mensajes.
+    airvault_table_min_height=160,
+    airvault_log_min_height=60,
     airvault_summary_min_height=34,
     qss=_COMPACT_QSS,
 )
