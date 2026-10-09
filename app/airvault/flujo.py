@@ -676,6 +676,7 @@ SOLO_REVISAR = "solo_revisar"
 INDEXADO = "indexado"
 COMPLETADO = "completado"
 AUTOCOMPLETADO = "autocompletado"
+PUBLICADO = "publicado"
 CANCELADO = "cancelado"
 # Sus bitacoras ya estan en AirVault, subidas por otro batch o por otra
 # persona. No se sube, no se reenvia y no se completa solo hasta que
@@ -691,6 +692,7 @@ POSIBLE_DUPLICADO = "posible_duplicado"
 # o una persona. REVISAR listo para escribir se nombra como los demás: su
 # propio nombre de batch ya dice que es REVISAR.
 NOMBRE_ESTADO_PARTE = {
+    PUBLICADO: "Confirmado en Web Search",
     SIN_SUBIR: "Sin subir",
     POSIBLE_DUPLICADO: "Posible duplicado",
     BUSCANDO: "Subido",
@@ -756,14 +758,14 @@ class EstadoParte:
         """
         return self.lote is None and self.estado not in (
             INDEXADO, COMPLETADO, AUTOCOMPLETADO, CANCELADO,
-            POSIBLE_DUPLICADO,
+            POSIBLE_DUPLICADO, PUBLICADO,
         )
 
     @property
     def se_acabo(self) -> bool:
         """Ya no hay nada que esperar de esta parte."""
         return self.estado in (
-            DESCUADRADO, INDEXADO, COMPLETADO, AUTOCOMPLETADO, CANCELADO,
+            DESCUADRADO, INDEXADO, COMPLETADO, AUTOCOMPLETADO, CANCELADO, PUBLICADO,
         )
 
     @property
@@ -2540,12 +2542,14 @@ def _prefijo(trabajo: "Trabajo") -> str:
     batch_id = str(manifiesto.batch_id or "").strip()
     if batch_id:
         return f"Batch {batch_id}: "
+    nombre = str(manifiesto.nombre_batch or "").strip()
+    if nombre:
+        return f"Batch «{nombre}»: "
     if manifiesto.solo_subir:
         return "Batch REVISAR: "
     if manifiesto.partes > 1:
         return f"Batch {manifiesto.parte}/{manifiesto.partes}: "
-    nombre = str(manifiesto.nombre_batch or "").strip()
-    return f"Batch «{nombre}»: " if nombre else "Batch: "
+    return "Batch: "
 
 
 def _entrega_de(trabajo: "Trabajo") -> str:
@@ -3939,6 +3943,22 @@ def _reubicar_trabajo(
     return True
 
 
+def cargar_todos_trabajos(
+    config: AirVaultConfig, carpeta_raiz: Path | str,
+) -> List["Trabajo"]:
+    """Recupera todos los manifiestos locales, incluidos batches terminados."""
+    trabajos = []
+    raiz = Path(carpeta_raiz).resolve()
+    for ruta in sorted(raiz.rglob(manifiestos.MANIFIESTO_FILENAME)):
+        if not ruta.resolve().is_relative_to(raiz):
+            continue
+        try:
+            trabajos.append(Trabajo.cargar(config, ruta.parent))
+        except (OSError, ValueError) as exc:
+            logger.warning("No se pudo leer un batch local: {}", exc)
+    return trabajos
+
+
 def cargar_trabajos_pendientes(
     config: AirVaultConfig,
     carpeta_raiz: Path | str,
@@ -4080,6 +4100,8 @@ def estado_local(trabajo: "Trabajo") -> EstadoParte:
     completar = manifiesto.etapas.get("completar")
     if completar and completar.estado is EstadoEtapa.HECHA:
         return _cierre_de(trabajo)
+    if manifiesto.websearch_confirmado:
+        return EstadoParte(trabajo, PUBLICADO, manifiesto.websearch_detalle)
     if manifiesto.cancelado:
         return _cancelado_de(trabajo)
     if duplicado_bloquea(trabajo):
@@ -4898,6 +4920,8 @@ def _estado_de(
     completar = manifiesto.etapas.get("completar")
     if completar and completar.estado is EstadoEtapa.HECHA:
         return _cierre_de(trabajo)
+    if manifiesto.websearch_confirmado:
+        return EstadoParte(trabajo, PUBLICADO, manifiesto.websearch_detalle)
     verificar = manifiesto.etapas.get("verificar")
     if verificar and verificar.estado is EstadoEtapa.HECHA:
         # Ya quedo confirmado en una ejecucion anterior. No hace falta abrir

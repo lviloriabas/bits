@@ -540,6 +540,10 @@ class Buscador:
         self._memoria[numero] = resultado
         return Consulta(resultado)
 
+    def renovar_consultas(self) -> None:
+        """Una revision manual debe ver lo publicado desde la consulta anterior."""
+        self._memoria.clear()
+
     def indice(self, numero: str) -> Optional[Indice]:
         """Los indices que Web Search tiene de esa bitacora, si la tiene.
 

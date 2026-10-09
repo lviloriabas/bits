@@ -327,10 +327,9 @@ def test_comprobar_cada_no_es_un_paso_de_la_automatizacion(app, tmp_path):
 
 def test_la_ventana_usa_batch_en_sus_campos_y_tabla(ventana):
     assert not ventana.lotes.isHidden()
-    assert [
-        ventana.lotes.horizontalHeaderItem(columna).text()
-        for columna in range(ventana.lotes.columnCount())
-    ] == ["ID", "Batch", "Páginas", "Estado"]
+    from app.gui.batches_sidebar import BatchesSidebar
+    assert isinstance(ventana.lotes, BatchesSidebar)
+    assert ventana.lotes.columnCount() == 1
     etiquetas = {
         etiqueta.text() for etiqueta in ventana.findChildren(QLabel)
     }
@@ -348,11 +347,8 @@ def test_la_cola_tiene_su_espacio_y_la_barra_bajo_el_header(app, ventana):
     app.processEvents()
     tabla = ventana.lotes
     assert tabla.minimumHeight() == ventana._densidad.airvault_table_min_height
-    assert isinstance(tabla.itemDelegate(), FlatSelectionDelegate)
-    assert (
-        f"margin-top: {tabla.horizontalHeader().height()}px"
-        in tabla.verticalScrollBar().styleSheet()
-    )
+    assert tabla.objectName() == "batchesSidebar"
+    assert ventana.divisor_batches.widget(0).isAncestorOf(tabla)
 
 
 def test_revisar_airvault_esta_a_la_derecha_de_subir(ventana):
@@ -741,6 +737,8 @@ class RegistroFalso:
 
 
 class ManifiestoFalso:
+    websearch_confirmado = ""
+    websearch_detalle = ""
     def __init__(self, nombre, paginas, batch_id):
         self.nombre_batch = nombre
         self.registros = [RegistroFalso() for _ in range(paginas)]
@@ -974,13 +972,8 @@ def test_batch_conserva_el_nombre_hasta_un_ancho_razonable(ventana):
 
     assert ventana.lotes.item(0, 1).text() == nombre
     assert ventana.lotes.item(0, 1).toolTip() == nombre
-    assert ventana.lotes.columnWidth(1) == min(
-        max(
-            ventana.lotes.sizeHintForColumn(1) + 16,
-            ANCHO_MINIMO_NOMBRE_BATCH,
-        ),
-        ANCHO_MAXIMO_NOMBRE_BATCH,
-    )
+    assert nombre in ventana.lotes.item(0).text()
+    assert ventana.lotes.wordWrap()
 
 
 def test_todos_los_batches_confirmados_quedan_activos_en_blanco(ventana):
@@ -1662,6 +1655,9 @@ def test_un_batch_pendiente_no_se_confunde_con_el_fin(ventana, estado):
 
     ventana.auto_check.setChecked(False)
     ventana._opciones.fijar(INDEXAR, False)
+    # La meta de una orden manual sigue siendo indexar, aunque la
+    # automatizacion este apagada para que esta prueba no lance otro hilo.
+    ventana._estado["indexar_manual"] = True
     ventana._estados = [
         parte(COMPLETADO, carpeta="hecho"), parte(estado, carpeta="pendiente"),
     ]
@@ -1893,7 +1889,7 @@ def test_la_bitacora_dice_que_el_proceso_sigue_en_curso(ventana):
     try:
         ventana._actualizar_latido()
         viva = ventana.bitacora.item(ventana.bitacora.count() - 1)
-        assert viva.text().startswith("En curso")
+        assert viva.text().startswith("BITS trabajando")
         # No es algo que haya pasado: ni se elige ni se copia.
         assert not viva.flags() & Qt.ItemFlag.ItemIsSelectable
         assert not viva.icon().isNull()
@@ -1919,7 +1915,7 @@ def test_entre_revisiones_la_bitacora_cuenta_lo_que_falta(ventana):
     ventana._ajustar_vigilancia()
     try:
         viva = ventana.bitacora.item(ventana.bitacora.count() - 1)
-        assert viva.text().startswith("En espera: se revisa AirVault en")
+        assert viva.text().startswith("Depende de AirVault: próxima revisión en")
     finally:
         ventana._parar_vigilancia()
     assert ventana.bitacora.count() == 0
@@ -2608,7 +2604,7 @@ def test_la_bitacora_lista_cada_batch_en_su_propia_linea(ventana):
         if "Revisado:" in ventana.bitacora.item(i).text()
     ][-1]
     lineas = revisado.splitlines()
-    assert len(lineas) == 3
+    assert len(lineas) == 4
     assert "DP | BITS -1" in lineas[1]
     assert "DP | BITS -2" in lineas[2]
     # Sangradas bajo el encabezado, no bajo la hora: la columna de horas

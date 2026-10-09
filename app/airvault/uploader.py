@@ -115,6 +115,25 @@ def trozos(ruta: Path, tamano: int = TROZO_BYTES):
             yield indice, total, handle.read(tamano)
 
 
+def comprobar_aceptacion(respuesta) -> None:
+    """Un HTTP 200 tambien puede contener un rechazo de Quick Upload."""
+    if respuesta is None:
+        return
+    try:
+        datos = respuesta.json()
+    except (ValueError, AttributeError):
+        return
+    if isinstance(datos, dict):
+        normalizados = {str(clave).casefold(): valor for clave, valor in datos.items()}
+        rechazado = any(normalizados.get(clave) in (False, "false", "False")
+                       for clave in ("success", "ok", "issuccess"))
+        error = normalizados.get("error") or normalizados.get("errors")
+        if rechazado or error:
+            raise RuntimeError("AirVault rechazó la carga: " + str(
+                error or normalizados.get("message") or "vuelva a intentarlo"
+            ))
+
+
 class SubidorQuickUpload:
     """Sube archivos y confirma sus indices."""
 
@@ -136,12 +155,14 @@ class SubidorQuickUpload:
         archivo = Path(ruta)
         if not archivo.is_file():
             return ResultadoSubida(str(archivo), False, "no existe")
+        if archivo.stat().st_size == 0:
+            return ResultadoSubida(str(archivo), False, "El archivo está vacío. Vuelva a exportarlo.")
         for indice, total, datos in trozos(archivo):
             if avisar is not None:
                 avisar(f"Subiendo {archivo.name}", indice, total)
             # Reenviar un trozo con el mismo indice es inocuo: el servidor
             # arma el archivo por posicion, no por orden de llegada.
-            self.sesion.post(
+            respuesta = self.sesion.post(
                 "/quickuploadex/Home/Upload/",
                 data={
                     "repoId": self.repo_id,
@@ -153,6 +174,9 @@ class SubidorQuickUpload:
                 files={"file": (archivo.name, datos,
                                 "application/octet-stream")},
             )
+            comprobar_aceptacion(respuesta)
+            if avisar is not None:
+                avisar(f"Subiendo {archivo.name}", indice + 1, total)
         from app.airvault.session import RespuestaPerdida
 
         if avisar is not None:
@@ -163,7 +187,7 @@ class SubidorQuickUpload:
             # a AirVault un segundo batch con el mismo archivo o que junte
             # los dos. Un rechazo del servidor si se repite: ese dice que no
             # se hizo.
-            self.sesion.post(
+            respuesta = self.sesion.post(
                 "/quickuploadex/Home/FinishUpload",
                 json={"model": {
                     "RepoId": self.repo_id,
@@ -173,6 +197,7 @@ class SubidorQuickUpload:
                 repetir_sin_respuesta=False,
                 tiempo_limite=ESPERA_FINISH_UPLOAD_S,
             )
+            comprobar_aceptacion(respuesta)
         except RespuestaPerdida as exc:
             logger.warning(
                 "FinishUpload de {} no contesto ({}); no se repite y se "

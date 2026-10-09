@@ -187,6 +187,10 @@ class Manifiesto(BaseModel):
     # lo que quedo terminado sin que nadie interviniera de lo que ya estaba
     # cerrado en AirVault cuando se encontro.
     completado_automatico: bool = False
+    # Confirmacion por muestra en Web Search, independiente del cierre.
+    websearch_confirmado: str = ""
+    websearch_muestra: List[str] = Field(default_factory=list)
+    websearch_detalle: str = ""
     doc_type: str = "Log Page"
     audit_status: str = "PUBLISHED"
     # Audit Status de las bitacoras marcadas como discrepancia. Viaja en el
