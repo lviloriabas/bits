@@ -121,3 +121,39 @@ def test_una_pantalla_diminuta_no_encoge_la_ventana_hasta_lo_inservible(
     finally:
         ventana.close()
         app.processEvents()
+
+
+def test_reordenar_campos_al_estrechar_no_recorta_ni_superpone_controles(
+    app, pantalla, tmp_path
+):
+    pantalla(1920, 1080)
+    ventana = AirVaultWindow(tmp_path)
+    try:
+        ventana.show()
+        for ancho in (1280, 720, 1280):
+            ventana.resize(ancho, 720)
+            app.processEvents()
+            assert ventana.width() <= ancho
+            zona = ventana.rect().adjusted(SPACE_L, SPACE_L, -SPACE_L, -SPACE_L)
+            controles = (
+                ventana.historial, ventana.lote_edit, ventana.limite_batch_control,
+                ventana.fecha_combo, ventana.cookie_edit, ventana.auto_check,
+                ventana.minutos_control, ventana.completar_check,
+                ventana.detener_duplicados_check, ventana.porcentaje_duplicados_control,
+                ventana.boton_automatizacion, ventana.boton_continuar,
+                ventana.boton_reiniciar, ventana.bitacora,
+            )
+            rectangulos = [QRect(control.mapTo(ventana, QPoint()), control.size())
+                           for control in controles]
+            assert all(zona.contains(rectangulo) for rectangulo in rectangulos)
+            for indice, rectangulo in enumerate(rectangulos):
+                assert not any(rectangulo.intersects(otro)
+                               for otro in rectangulos[indice + 1:])
+            nombre, limite = rectangulos[1:3]
+            if ancho == 1280:
+                assert nombre.top() == limite.top()
+            else:
+                assert limite.top() > nombre.bottom()
+    finally:
+        ventana.close()
+        app.processEvents()

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Dict, Optional, Sequence
 
@@ -38,7 +39,7 @@ from PySide6.QtGui import (QBrush, QColor, QGuiApplication, QIcon,
                            QKeySequence, QPainter, QPen, QPixmap, QShortcut)
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox,
                                QDialog, QGridLayout, QGroupBox, QHBoxLayout,
-                               QLabel, QLineEdit, QListView,
+                               QLabel, QLayout, QLineEdit, QListView,
                                QListWidgetItem, QMenu, QMessageBox,
                                QProgressBar, QPushButton, QSizePolicy, QSpinBox,
                                QSplitter, QStyle, QStyleOptionComboBox, QStylePainter,
@@ -49,7 +50,7 @@ from app.airvault.config import (AIRVAULT_FILENAME, AirVaultConfig,
                                  guardar_paginas_por_batch)
 from app.airvault.session import SesionCancelada
 from app.gui.airvault_busqueda import buscar_en_la_cola, frase_de
-from app.gui.batches_sidebar import BatchesSidebar
+from app.gui.batches_sidebar import BatchesSidebar, agregar_filtros_al_menu
 from app.gui.automatizacion import (COMPLETAR, MenuAutomatizacion,
                                     OpcionesAutomatizacion)
 from app.gui.csv_utils import (TEXTO_ELEGIR_EJECUCION, find_csv_files,
@@ -58,7 +59,8 @@ from app.gui.memoria import AIRVAULT, recordar
 from app.gui.responsive import available_area, fit_to_screen
 from app.gui.text_copy import CopyableListWidget
 from app.gui.theme import gestor_tema
-from app.gui.tokens import SPACE_L, SPACE_M, SPACE_S, link_text_color, paleta
+from app.gui.tokens import (SPACE_L, SPACE_M, SPACE_S, SPACE_XL, SPACE_XS,
+                            link_text_color, paleta)
 from app.gui.widgets import (ElidedLabel, IconoAyuda, SpinBoxWithButtons,
                              configure_combo_box, configure_menu_button,
                              data_table_qss, pane_status_colors,
@@ -347,6 +349,7 @@ ALTO_MINIMO_VENTANA = 480
 
 ANCHO_MINIMO_NOMBRE_BATCH = 220
 ANCHO_MAXIMO_NOMBRE_BATCH = 420
+ANCHO_FORMULARIO_DOBLE = 640
 
 # Lo que explica el desplegable de fecha del indexado y lo que se dice
 # cuando la ejecución no deja elegir.
@@ -1779,15 +1782,26 @@ class AirVaultWindow(QDialog):
         c = paleta()
         return (
             f"QSplitter#airvaultBatchesSplitter::handle:horizontal {{ "
-            f"background: {c.TABLE_GRID}; margin: 0 {(SPACE_M - 2) // 2}px; "
+            f"background: {c.TABLE_GRID}; margin: 0 {(SPACE_L - 2) // 2}px; "
             f"border-radius: 6px; }}"
             f"QSplitter#airvaultBatchesSplitter::handle:horizontal:hover {{ "
             f"background: {c.PANE_TEXT}; }}"
             f"QListWidget#batchesSidebar {{ background: {c.TABLE_BASE_BG}; "
-            f"border: 1px solid {c.PANE_BORDER}; border-radius: 6px; }}"
-            f"QListWidget#batchesSidebar::item {{ padding: 6px; border-radius: 6px; "
+            f"border: 1px solid {c.PANE_BORDER}; border-radius: 6px; "
+            f"padding: {SPACE_XS}px; }}"
+            f"QListWidget#batchesSidebar::item {{ padding: {SPACE_S}px; border-radius: 6px; "
             f"border: 1px solid {c.DIVIDER}; }}"
-            f"QListWidget#batchesSidebar::item:selected {{ background: {c.PANE_CONTROL_HOVER}; }}"
+            f"QListWidget#batchesSidebar::item:hover:!selected {{ background: {c.PANE_CONTROL_BG}; }}"
+            f"QListWidget#batchesSidebar::item:selected {{ background: {c.STROKE_STRONG}; "
+            f"border: 1px solid {c.TEXT_SECONDARY}; color: {c.PANE_TEXT}; }}"
+            f"QListWidget#batchesSidebar::item:selected:!active {{ background: {c.STROKE_STRONG}; "
+            f"border: 1px solid {c.TEXT_SECONDARY}; color: {c.PANE_TEXT}; }}"
+            f"QGroupBox#airvaultResultado {{ padding: {SPACE_XL}px {SPACE_M}px {SPACE_M}px; }}"
+            f"QGroupBox#airvaultResultado::title {{ left: {SPACE_M}px; }}"
+            f"QListWidget#airvaultBitacora {{ padding: {SPACE_S}px; }}"
+            f"QListWidget#airvaultBitacora::item {{ padding: {SPACE_XS}px {SPACE_S}px; }}"
+            f"QToolButton#spinStepButton {{ min-width: {SPACE_L + 2}px; "
+            f"max-width: {SPACE_L + 2}px; padding: 0; }}"
         )
 
     def _al_cambiar_tema(self, _nombre: str) -> None:
@@ -1805,9 +1819,10 @@ class AirVaultWindow(QDialog):
 
     def _build_ui(self) -> None:
         cuerpo = QVBoxLayout(self)
+        cuerpo.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         margen = max(SPACE_L, self._densidad.window_margin)
         cuerpo.setContentsMargins(margen, margen, margen, margen)
-        cuerpo.setSpacing(self._densidad.root_spacing)
+        cuerpo.setSpacing(SPACE_S)
         self._root_layout = cuerpo
 
         # Sin frase de bienvenida: la lista abre en «Seleccionar ejecución»
@@ -1816,7 +1831,7 @@ class AirVaultWindow(QDialog):
         # la cola de batches, que es lo que se mira mientras trabaja.
         self.divisor_batches = QSplitter(Qt.Orientation.Horizontal)
         self.divisor_batches.setObjectName("airvaultBatchesSplitter")
-        self.divisor_batches.setHandleWidth(SPACE_M)
+        self.divisor_batches.setHandleWidth(SPACE_L)
         self.divisor_batches.setChildrenCollapsible(False)
         lateral = QWidget()
         lateral.setMinimumWidth(220)
@@ -1825,16 +1840,19 @@ class AirVaultWindow(QDialog):
         sidebar.setContentsMargins(0, 0, 0, 0)
         sidebar.setSpacing(SPACE_S)
         filtros = QVBoxLayout()
-        filtros.setSpacing(0)
+        filtros.setSpacing(SPACE_XS)
         sidebar.addLayout(filtros)
         principal = QWidget()
+        self._panel_formulario = principal
         contenido = QVBoxLayout(principal)
         contenido.setContentsMargins(0, 0, 0, 0)
-        contenido.setSpacing(self._densidad.root_spacing)
-        contenido.addWidget(self._historial())
+        contenido.setSpacing(SPACE_M)
         ajustes = self._campos()
+        self._formulario = ajustes
+        ajustes.addWidget(self._historial(), 0, 0, 1, 3)
         contenido.addLayout(ajustes)
-        ajustes.addWidget(self._recuadro_de_revision(), 4, 0, 1, 3)
+        self._resultado = self._recuadro_de_revision()
+        ajustes.addWidget(self._resultado, 5, 0, 1, 3)
         self.solo_ejecucion_check = QCheckBox("Solo la ejecución seleccionada")
         self.solo_ejecucion_check.setToolTip(
             "Limita la cola y sus acciones a los batches de la ejecución seleccionada."
@@ -1859,8 +1877,17 @@ class AirVaultWindow(QDialog):
         sidebar.addWidget(self._lotes(), 1)
         sidebar.addWidget(self._respuesta_de_la_busqueda())
         sidebar.addLayout(self._fila_avance())
-        self._fila_vigilancia(ajustes, 5)
-        self._fila_politica_duplicados(ajustes, 7)
+        self._fila_vigilancia(ajustes, 6)
+        self._fila_politica_duplicados(ajustes, 8)
+        acciones = QHBoxLayout()
+        acciones.setSpacing(SPACE_S)
+        acciones.addStretch()
+        for boton in (self.boton_automatizacion, self.boton_continuar, self.boton_reiniciar):
+            acciones.addWidget(boton)
+        contenido.addLayout(acciones)
+        self._formulario_ancho = None
+        self._distribuir_formulario(False)
+        principal.installEventFilter(self)
         contenido.addWidget(self._bitacora(), 1)
         self.divisor_batches.addWidget(lateral)
         self.divisor_batches.addWidget(principal)
@@ -1888,6 +1915,55 @@ class AirVaultWindow(QDialog):
         etiqueta = QLabel(texto)
         etiqueta.setStyleSheet("font-weight: 600;")
         return etiqueta
+
+    def eventFilter(self, objeto, evento) -> bool:  # noqa: N802 - API Qt
+        if objeto is getattr(self, "_panel_formulario", None) and evento.type() == QEvent.Type.Resize:
+            self._distribuir_formulario(objeto.width() >= ANCHO_FORMULARIO_DOBLE)
+        return super().eventFilter(objeto, evento)
+
+    def _distribuir_formulario(self, ancho: bool) -> None:
+        """Alinea formulario y registro, con dos pares de campos si caben."""
+        if ancho == self._formulario_ancho:
+            return
+        self._formulario_ancho = ancho
+        grid = self._formulario
+        while grid.count():
+            grid.takeAt(0)
+        for columna in range(4):
+            grid.setColumnStretch(columna, 0)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1 if ancho else 0)
+        self._resultado.setMinimumHeight(
+            0 if ancho else SPACE_XL + SPACE_M + self.reparto_total.fontMetrics().lineSpacing() * 2
+        )
+        grid.addWidget(self.historial, 0, 0, 1, 4)
+        campos = (self.lote_edit, self.limite_batch_control,
+                  self.fecha_combo, self.cookie_edit)
+        for indice, (etiqueta, campo) in enumerate(zip(self._etiquetas_campos, campos)):
+            fila, columna = ((1 + indice // 2, 2 * (indice % 2)) if ancho else (1 + indice, 0))
+            grid.addWidget(etiqueta, fila, columna)
+            span = 1 if ancho else 3
+            alineacion = (Qt.AlignmentFlag.AlignLeft if indice in (1, 2)
+                          else Qt.AlignmentFlag(0))
+            grid.addWidget(campo, fila, columna + 1, 1, span, alineacion)
+        if ancho:
+            grid.addWidget(self._resultado, 3, 0, 1, 4)
+            grid.addWidget(self.auto_check, 4, 0)
+            grid.addWidget(self.minutos_control, 4, 1, Qt.AlignmentFlag.AlignLeft)
+            grid.addWidget(self.completar_check, 4, 2)
+            grid.addWidget(self.detener_duplicados_check, 5, 0, 1, 2)
+            grid.addWidget(self._etiqueta_duplicados, 5, 2)
+            grid.addWidget(self.porcentaje_duplicados_control, 5, 3, Qt.AlignmentFlag.AlignLeft)
+        else:
+            grid.addWidget(self._resultado, 5, 0, 1, 4)
+            grid.addWidget(self.auto_check, 6, 0)
+            grid.addWidget(self.minutos_control, 6, 1, 1, 3, Qt.AlignmentFlag.AlignLeft)
+            grid.addWidget(self.completar_check, 7, 0, 1, 4)
+            grid.addWidget(self.detener_duplicados_check, 8, 0, 1, 4)
+            grid.addWidget(self._etiqueta_duplicados, 9, 0)
+            grid.addWidget(self.porcentaje_duplicados_control, 9, 1, 1, 3, Qt.AlignmentFlag.AlignLeft)
+        if self.isVisible():
+            self._acotar_a_la_pantalla()
 
     def _historial(self) -> QComboBox:
         """La lista de ejecuciones, la misma que la del visor de CSV.
@@ -1967,12 +2043,15 @@ class AirVaultWindow(QDialog):
         """Rejilla comun de datos, automatizacion y limite de duplicadas."""
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(SPACE_S)
-        grid.setVerticalSpacing(self._densidad.group_spacing)
-        grid.setColumnStretch(2, 1)
+        grid.setHorizontalSpacing(SPACE_M)
+        grid.setVerticalSpacing(SPACE_S)
+        grid.setColumnStretch(1, 1)
         etiquetas = ("Nombre del batch:", "Máximo por batch:", "Fecha:", "Sesión:")
-        for fila, etiqueta in enumerate(etiquetas):
-            grid.addWidget(QLabel(etiqueta), fila, 0)
+        self._etiquetas_campos = []
+        for fila, etiqueta in enumerate(etiquetas, start=1):
+            rotulo = QLabel(etiqueta)
+            self._etiquetas_campos.append(rotulo)
+            grid.addWidget(rotulo, fila, 0)
 
         self.lote_edit = QLineEdit()
         self.lote_edit.setPlaceholderText(
@@ -1982,7 +2061,7 @@ class AirVaultWindow(QDialog):
             "Nombre con el que el batch queda en AirVault. Lleva fecha y hora "
             "para no confundirlo con otro de la cola."
         )
-        grid.addWidget(self.lote_edit, 0, 1, 1, 2)
+        grid.addWidget(self.lote_edit, 1, 1, 1, 2)
 
         self.limite_batch_spin = QSpinBox()
         self.limite_batch_spin.setRange(10, 5000)
@@ -2002,7 +2081,8 @@ class AirVaultWindow(QDialog):
         )
         self.limite_batch_control = SpinBoxWithButtons(self.limite_batch_spin)
         self.limite_batch_control.setMaximumWidth(160)
-        grid.addWidget(self.limite_batch_control, 1, 1, Qt.AlignmentFlag.AlignLeft)
+        self.limite_batch_control.layout().setSpacing(SPACE_XS)
+        grid.addWidget(self.limite_batch_control, 2, 1, Qt.AlignmentFlag.AlignLeft)
 
         # La misma elección que en la ventana principal, vista desde aquí:
         # con qué fecha se escribe cada bitácora. Una ejecución exportada
@@ -2025,7 +2105,8 @@ class AirVaultWindow(QDialog):
         self.fecha_combo.setToolTip(TOOLTIP_FECHA_INDEXADO)
         self.fecha_combo.setAccessibleName("Fecha con la que se indexa")
         configure_combo_box(self.fecha_combo, 12)
-        grid.addWidget(self.fecha_combo, 2, 1, 1, 2)
+        self.fecha_combo.setMaximumWidth(self.limite_batch_control.maximumWidth())
+        grid.addWidget(self.fecha_combo, 3, 1, Qt.AlignmentFlag.AlignLeft)
 
         # El campo de la sesión queda por si el navegador no puede: el
         # camino normal es que se resuelva sola.
@@ -2039,7 +2120,7 @@ class AirVaultWindow(QDialog):
             "Edge. Si eso falla, pegue aquí la cookie de AirVault. No se "
             "guarda en el disco."
         )
-        grid.addWidget(self.cookie_edit, 3, 1, 1, 2)
+        grid.addWidget(self.cookie_edit, 4, 1, 1, 2)
         return grid
 
     def _recuadro_de_revision(self) -> QGroupBox:
@@ -2052,10 +2133,11 @@ class AirVaultWindow(QDialog):
         si detrás hay una tarde de Web Index.
         """
         recuadro = QGroupBox("Resultado")
+        recuadro.setObjectName("airvaultResultado")
         recuadro.setToolTip(TOOLTIP_REPARTO)
         fila = QHBoxLayout(recuadro)
         fila.setContentsMargins(0, 0, 0, 0)
-        fila.setSpacing(SPACE_S)
+        fila.setSpacing(SPACE_M)
         self.reparto_total = QLabel()
         self.reparto_automaticas = QLabel()
         pintar_del_tema(
@@ -2076,6 +2158,9 @@ class AirVaultWindow(QDialog):
             fila.addWidget(etiqueta, 1)
         self.reparto_automaticas.setWordWrap(True)
         self.reparto_revisar.setWordWrap(True)
+        recuadro.setMinimumHeight(
+            SPACE_XL + SPACE_M + self.reparto_total.fontMetrics().lineSpacing() * 2
+        )
         self._reparto_fila = fila
         self._mostrar_reparto(None)
         return recuadro
@@ -2199,8 +2284,8 @@ class AirVaultWindow(QDialog):
         self.boton_previa = batch_menu.addAction("Vista previa…")
         self.boton_previa.setEnabled(False)
         self.boton_previa.setToolTip(
-            "Muestra cómo quedaría repartida la ejecución en batches y qué "
-            "lleva cada uno. No prepara ni sube nada."
+            "Muestra todos los batches locales y el reparto previsto de la ejecución. "
+            "Permite aplicar las casillas del panel lateral. No prepara ni sube nada."
         )
         self.boton_previa.triggered.connect(self._vista_previa)
         batch_menu.addSeparator()
@@ -2224,6 +2309,8 @@ class AirVaultWindow(QDialog):
         self.boton_eliminar_registro.triggered.connect(
             lambda: self._eliminar_registro()
         )
+        batch_menu.addSeparator()
+        agregar_filtros_al_menu(batch_menu, self._controles_filtro_batches())
         self.batch_actions_button = QToolButton()
         self.batch_actions_button.setText("Acciones")
         configure_menu_button(self.batch_actions_button, batch_menu)
@@ -2231,13 +2318,7 @@ class AirVaultWindow(QDialog):
         return fila
 
     def _vista_previa(self) -> None:
-        """Calcula el reparto sin tocar nada y lo enseña.
-
-        Hasta que se sube no hay ningún batch que mirar, y el reparto solo
-        se sabía después de haberlo hecho. Esto responde antes la misma
-        pregunta: con qué nombre y con cuántas páginas saldría cada batch,
-        y qué bitácoras van dentro.
-        """
+        """Enseña toda la cola y añade el reparto que todavía no existe."""
         from app.airvault.flujo import (ErrorDeCorrida, carpeta_de_corrida,
                                         carpeta_de_trabajo,
                                         previsualizar_reparto)
@@ -2245,41 +2326,71 @@ class AirVaultWindow(QDialog):
         from app.gui.airvault_previa import VistaPreviaBatches
 
         csv = self._corrida.strip()
-        if not csv:
-            return
-        carpeta = self._raiz / carpeta_de_trabajo(
-            carpeta_de_corrida(csv).name
-        )
+        previstos = []
         try:
-            previstos = previsualizar_reparto(
-                self._config_actual(),
-                carpeta,
-                Path(csv),
-                self.lote_edit.text().strip(),
-                resolutor=ResolutorFlota.load(
-                    self._raiz / FLOTA_CACHE_FILENAME
-                ),
-                paginas_por_batch=self.limite_batch_spin.value(),
-                fin_de_mes=self.fin_de_mes(),
-            )
+            if csv and (self._listo_para_subir or not self._estados):
+                carpeta = self._raiz / carpeta_de_trabajo(carpeta_de_corrida(csv).name)
+                previstos = previsualizar_reparto(
+                    self._config_actual(), carpeta, Path(csv),
+                    self.lote_edit.text().strip(),
+                    resolutor=ResolutorFlota.load(self._raiz / FLOTA_CACHE_FILENAME),
+                    paginas_por_batch=self.limite_batch_spin.value(),
+                    fin_de_mes=self.fin_de_mes(),
+                )
         except (ErrorDeCorrida, OSError, ValueError) as error:
             logger.opt(exception=error).warning("No se pudo preparar la vista previa: {}", error)
             QMessageBox.warning(self, "Vista previa", mensaje_error(error, "No se pudo preparar la vista previa. Vuelva a exportar la ejecución."))
             return
+        previstos = self._previstos_de_la_cola(previstos)
         if not previstos:
             QMessageBox.information(
                 self,
                 "Vista previa",
-                "Esta ejecución no deja ningún batch: todas sus bitácoras "
-                "viajaron ya a AirVault.",
+                "No hay batches locales ni batches previstos para mostrar.",
             )
             return
         self._abrir_ventana(
-            VistaPreviaBatches(previstos, csv=csv, parent=self)
+            VistaPreviaBatches(
+                previstos, csv=csv, parent=self,
+                filtros=self._controles_filtro_batches(),
+                filtrar=self._filtrar_previstos,
+            )
         )
+
+    def _controles_filtro_batches(self) -> tuple:
+        return (self.solo_ejecucion_check, self.ocultar_indexados_check,
+                self.ocultar_completados_check)
+
+    def _previstos_de_la_cola(self, previstos=()) -> list:
+        from app.airvault.flujo import (AUTOCOMPLETADO, COMPLETADO, PUBLICADO,
+                                        _previsto_de_trabajo)
+
+        locales = []
+        for parte in self._estados:
+            previsto = _previsto_de_trabajo(parte.trabajo)
+            locales.append(replace(
+                previsto,
+                estado=(TEXTO_INDEXANDO if str(parte.trabajo.carpeta) in self._indexando
+                        else parte.titulo),
+                completado=parte.estado in (COMPLETADO, AUTOCOMPLETADO, PUBLICADO),
+            ))
+        carpetas = {p.carpeta for p in locales}
+        nombres = {(str(Path(p.csv_origen)).casefold(), p.nombre) for p in locales}
+        return locales + [p for p in previstos
+                          if (p.carpeta is None or p.carpeta not in carpetas)
+                          and (str(Path(p.csv_origen)).casefold(), p.nombre) not in nombres]
+
+    def _filtrar_previstos(self, previstos) -> list:
+        carpetas = {parte.trabajo.carpeta for parte in self._partes_en_cola()}
+        return [p for p in previstos if p.carpeta in carpetas
+                or (p.carpeta is None and (
+                    not self.solo_ejecucion_check.isChecked()
+                    or self._es_ejecucion_seleccionada(p.csv_origen)
+                ))]
 
     def _lotes(self) -> BatchesSidebar:
         lista = BatchesSidebar()
+        lista.setSpacing(SPACE_XS)
         lista.setToolTip(
             "Todos los batches locales. Clic derecho para sus acciones; "
             "Ctrl o Mayúsculas para seleccionar varios."
@@ -2562,11 +2673,12 @@ class AirVaultWindow(QDialog):
         Es lo que hace cualquier lista, y evita actuar sobre batches que no
         se están mirando.
         """
-        fila = self.lotes.rowAt(punto.y())
+        fila = self.lotes.indexAt(punto).row()
         if fila < 0 or fila >= len(self._partes_en_cola()):
             return
         menu = self._acciones_de_la_cola(self._elegidas(fila))
         menu.exec(self.lotes.viewport().mapToGlobal(punto))
+        menu.deleteLater()
 
     def _elegidas(self, fila: int) -> list:
         """Las filas sobre las que va a actuar el menú."""
@@ -2663,6 +2775,10 @@ class AirVaultWindow(QDialog):
             lambda: self._comprobar_estas(partes),
         )
         self._accion(
+            menu, "Verificar subidas en Web Search", partes,
+            lambda: self._iniciar_confirmacion([p.trabajo for p in partes], automatico=False),
+        )
+        self._accion(
             menu, "Indexar ahora", indexables,
             lambda: self._indexar_estas(indexables),
         )
@@ -2726,6 +2842,9 @@ class AirVaultWindow(QDialog):
                 "\n".join(parte.batch_id for parte in con_id)
             ),
         )
+        menu.addSeparator()
+        menu.addAction(self.boton_previa)
+        agregar_filtros_al_menu(menu, self._controles_filtro_batches())
         return menu
 
     @staticmethod
@@ -3345,6 +3464,7 @@ class AirVaultWindow(QDialog):
         recordar(AIRVAULT, "minutos", self.minutos_spin)
         self.minutos_control = SpinBoxWithButtons(self.minutos_spin)
         self.minutos_control.setMaximumWidth(160)
+        self.minutos_control.layout().setSpacing(SPACE_XS)
         fila.addWidget(self.minutos_control, inicio, 1, Qt.AlignmentFlag.AlignLeft)
 
         # Los mismos pasos que en la ventana principal y el mismo menú: no
@@ -3361,8 +3481,8 @@ class AirVaultWindow(QDialog):
         configure_menu_button(
             self.boton_automatizacion, self.menu_automatizacion
         )
-        self.boton_automatizacion.setFixedWidth(self.minutos_control.maximumWidth())
-        fila.addWidget(self.boton_automatizacion, inicio, 2, Qt.AlignmentFlag.AlignLeft)
+        self.boton_automatizacion.setMaximumWidth(self.minutos_control.maximumWidth())
+        fila.addWidget(self.boton_automatizacion, inicio, 2)
 
         self.completar_check = QCheckBox("Completar batch")
         self.completar_check.setChecked(self._opciones.completar)
@@ -3393,8 +3513,8 @@ class AirVaultWindow(QDialog):
             "incompletos si no hay ninguno. No borra nada en AirVault."
         )
         self.boton_reiniciar.clicked.connect(self._reiniciar_incompleto)
-        self.boton_reiniciar.setFixedWidth(self.minutos_control.maximumWidth())
-        fila.addWidget(self.boton_reiniciar, inicio + 1, 2, Qt.AlignmentFlag.AlignLeft)
+        self.boton_reiniciar.setMaximumWidth(self.minutos_control.maximumWidth())
+        fila.addWidget(self.boton_reiniciar, inicio + 1, 2)
 
     def _al_cambiar_automatizacion(self, paso: str, marcado: bool) -> None:
         """Refleja lo que se eligió en la ventana principal.
@@ -3465,6 +3585,7 @@ class AirVaultWindow(QDialog):
         cuánto llevaba, y una espera larga no se distinguía de un cuelgue.
         """
         lista = CopyableListWidget()
+        lista.setObjectName("airvaultBitacora")
         lista.setToolTip("Lo que el indexado va haciendo, con la hora de cada paso")
         lista.setMinimumHeight(self._densidad.airvault_log_min_height)
         lista.setWordWrap(True)
@@ -3499,15 +3620,17 @@ class AirVaultWindow(QDialog):
         )
         self.porcentaje_duplicados_control = SpinBoxWithButtons(self.porcentaje_duplicados_spin)
         self.porcentaje_duplicados_control.setMaximumWidth(160)
+        self.porcentaje_duplicados_control.layout().setSpacing(SPACE_XS)
         self.detener_duplicados_check.toggled.connect(self._guardar_politica_duplicados)
         fila.addWidget(self.detener_duplicados_check, inicio, 0, 1, 3)
-        fila.addWidget(QLabel("Máximo de duplicadas:"), inicio + 1, 0)
+        self._etiqueta_duplicados = QLabel("Máximo de duplicadas:")
+        fila.addWidget(self._etiqueta_duplicados, inicio + 1, 0)
         fila.addWidget(self.porcentaje_duplicados_control, inicio + 1, 1, Qt.AlignmentFlag.AlignLeft)
 
     def _fila_botones(self) -> QHBoxLayout:
         fila = QHBoxLayout()
         fila.setContentsMargins(0, 0, 0, 0)
-        fila.setSpacing(SPACE_S)
+        fila.setSpacing(SPACE_M)
 
         fila.addStretch()
 
@@ -3578,24 +3701,19 @@ class AirVaultWindow(QDialog):
             self._cargar_sidebar()
 
     def _acotar_a_la_pantalla(self) -> None:
-        """Impide que el contenido exija más ancho del que hay.
+        """Permite apilar el formulario y conserva su alto dentro del escritorio.
 
-        El layout pide de mínimo lo que suman sus controles puestos en fila,
-        y la fila de botones de abajo sola pide más de 1200 px. Qt aplica ese
-        mínimo por encima del tamaño con el que la ventana se abrió, así que
-        la ventana crecía sola: en una pantalla de 1366 quedaba pegada a los
-        bordes y por debajo se salía, con los botones fuera del alcance.
-
-        Aquí se acota ese mínimo a lo que da el escritorio. Lo que no quepa
-        se recorta, que es preferible a mandar media ventana a donde no se
-        puede llegar con el ratón. Se recalcula al mostrarla porque la
-        pantalla puede no ser la misma que la última vez.
+        El minimo horizontal no depende de los dos pares de campos: de lo
+        contrario impediria estrechar la ventana antes de que el formulario
+        pueda apilarse. El alto se mide con la distribucion activa, tambien
+        al cambiarla, para mantener accesibles los controles y el registro.
         """
         disponible = available_area(self)
         self.lotes.setMinimumHeight(80 if disponible.height() < 600 else self._densidad.airvault_table_min_height)
+        self._root_layout.invalidate()
         pedido = self.minimumSizeHint()
         self.setMinimumSize(
-            max(ANCHO_MINIMO_VENTANA, min(pedido.width(), disponible.width())),
+            ANCHO_MINIMO_VENTANA,
             max(ALTO_MINIMO_VENTANA, min(pedido.height(), disponible.height())),
         )
         # Levantar el tope no encoge sola a la ventana que ya habia crecido:
@@ -4496,6 +4614,15 @@ class AirVaultWindow(QDialog):
         # Cada repintado es un cambio de estado de algún batch, y la barra
         # de la cola sale de esos estados.
         self._pintar_avance()
+        self.boton_previa.setEnabled(
+            self.hilo() is None and bool(self._estados or self._corrida.strip())
+        )
+        from app.gui.airvault_previa import VistaPreviaBatches
+        for ventana in self._ventanas_de_consulta:
+            if isinstance(ventana, VistaPreviaBatches):
+                ventana.actualizar(self._previstos_de_la_cola(
+                    p for p in ventana._previstos if not p.existe
+                ))
 
     def _listos(self) -> list:
         """Partes que ya se pueden escribir y tienen su plan calculado."""
@@ -5339,7 +5466,7 @@ class AirVaultWindow(QDialog):
         # La vista previa solo lee el disco, pero mientras el hilo reparte
         # los manifiestos están a medio escribir y enseñarlos engaña.
         self.boton_previa.setEnabled(
-            activo and bool(self._corrida.strip())
+            activo and bool(self._estados or self._corrida.strip())
         )
         self.boton_automatizacion.setEnabled(True)
         self.boton_continuar.setEnabled(activo)

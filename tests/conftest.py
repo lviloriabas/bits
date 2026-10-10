@@ -132,7 +132,20 @@ def app():
     """
     from PySide6.QtWidgets import QApplication
 
-    return QApplication.instance() or QApplication([])
+    aplicacion = QApplication.instance() or QApplication([])
+    # El plugin offscreen de Windows puede omitir las fuentes nativas.
+    # Las metricas deben medir los glifos de la interfaz, no cuadros vacios.
+    if os.name == "nt":
+        from pathlib import Path
+        from PySide6.QtGui import QFontDatabase
+
+        if not QFontDatabase.hasFamily("Segoe UI"):
+            fuentes = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
+            for nombre in ("segoeui.ttf", "segoeuib.ttf"):
+                archivo = fuentes / nombre
+                if archivo.is_file():
+                    QFontDatabase.addApplicationFont(str(archivo))
+    return aplicacion
 
 
 def soltar_hilos(ventana) -> None:

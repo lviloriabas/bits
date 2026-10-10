@@ -2282,6 +2282,8 @@ class BatchPrevisto:
     # Search. Se guarda aparte de ``estado`` porque ese es texto para leer y
     # esto es una condicion que la interfaz consulta.
     completado: bool = False
+    csv_origen: str = ""
+    carpeta: Optional[Path] = None
 
     @property
     def paginas(self) -> int:
@@ -2315,6 +2317,8 @@ def _previsto_de_trabajo(trabajo: "Trabajo") -> BatchPrevisto:
         subido=trabajo_comprometido(trabajo),
         existe=True,
         completado=parte.estado in (COMPLETADO, AUTOCOMPLETADO),
+        csv_origen=manifiesto.csv_origen,
+        carpeta=trabajo.carpeta,
     )
 
 
@@ -2428,6 +2432,7 @@ def previsualizar_reparto(
             nuevos.append(
                 BatchPrevisto(
                     nombre=molde.nombre_lote(base),
+                    csv_origen=str(csv),
                     parte=indice,
                     partes=total,
                     revisar=revisar,
