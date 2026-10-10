@@ -6,12 +6,14 @@ import hashlib
 import re
 import time
 
-from app.airvault.config import CAMPO_BATCH_NAME, CAMPO_LOG_NUMBER, CAMPO_MATRICULA
+from app.airvault.config import CAMPO_LOG_NUMBER
 from app.airvault.session import SesionCancelada
-from app.airvault.websearch import PLANTILLAS
+from app.airvault.websearch import PLANTILLAS, _aparece
 
 
-METODO_MUESTRA = "muestra_distribuida"
+METODO_MUESTRA = "muestra_por_numero"
+METODOS_MUESTRA = (METODO_MUESTRA, "muestra_distribuida")
+MAX_BATCHES_PARALELOS = 32
 PORCENTAJE_MUESTRA = 2
 MINIMO_MUESTRA = 7
 MAXIMO_MUESTRA = 15
@@ -35,7 +37,7 @@ def _muestra(manifiesto):
     Los extremos permiten detectar una publicacion que solo llego al inicio.
     """
     unicos = list(dict.fromkeys(
-        (str(r.log_number).strip(), r.matricula.strip().upper())
+        str(r.log_number).strip()
         for r in manifiesto.bitacoras()
         if re.fullmatch(r"\d{7}", str(r.log_number).strip())
     ))
@@ -48,7 +50,7 @@ def _muestra(manifiesto):
 
 
 def muestra_de_batch(manifiesto) -> list[str]:
-    return [numero for numero, _matricula in _muestra(manifiesto)]
+    return _muestra(manifiesto)
 
 
 def _filas(datos):
@@ -91,6 +93,12 @@ def huella_de_batch(manifiesto, batch_id=None):
     return hashlib.sha256(json.dumps(datos, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
+def huella_de_numeros(manifiesto):
+    """La publicacion anterior no depende del nombre ni del ID local actual."""
+    datos = [(r.seq, str(r.log_number).strip()) for r in manifiesto.bitacoras()]
+    return hashlib.sha256(json.dumps(datos).encode("utf-8")).hexdigest()
+
+
 class _LecturaAcotada:
     """El descubrimiento de rutas comparte el presupuesto de la consulta."""
 
@@ -103,6 +111,8 @@ class _LecturaAcotada:
         return getattr(self._sesion, nombre)
 
     def get(self, *args, **kwargs):
+        if args and str(args[0]).lower().startswith("/index/"):
+            raise ValueError("La confirmación solo consulta Web Search.")
         if self._cancelado():
             raise SesionCancelada("Se canceló la verificación en Web Search")
         if time.monotonic() >= self._fin:
@@ -114,7 +124,7 @@ def verificar_batch(buscador, trabajo, avisar=None, presupuesto_s=60.0, cancelad
     """Busca solo la muestra y confirma cuando aparece toda en Web Search."""
     manifiesto = trabajo.manifiesto
     muestra = _muestra(manifiesto)
-    numeros = tuple(numero for numero, _matricula in muestra)
+    numeros = tuple(muestra)
     esperadas = len(muestra)
     encontradas = 0
     identidad = str(manifiesto.batch_id or "").casefold()
@@ -132,7 +142,11 @@ def verificar_batch(buscador, trabajo, avisar=None, presupuesto_s=60.0, cancelad
     if cancelado():
         raise SesionCancelada("Se canceló la verificación en Web Search")
     try:
-        if not buscador.ruta and not buscador.preparar() and not buscador._adoptar_ruta(numeros[0]):
+        if is_dataclass(buscador) and not buscador.ruta:
+            ruta, plantilla = buscador._guardada()
+            if ruta:
+                buscador._ruta, buscador._plantilla = ruta, plantilla
+        if not buscador.ruta and not buscador._adoptar_ruta(numeros[0]):
             if cancelado() or getattr(buscador.sesion, "cancelada", False):
                 raise SesionCancelada("Se canceló la verificación en Web Search")
             return resultado(False, buscador.motivo or "Web Search no está disponible.")
@@ -143,11 +157,12 @@ def verificar_batch(buscador, trabajo, avisar=None, presupuesto_s=60.0, cancelad
     if is_dataclass(original):
         for campo in ("_ruta", "_plantilla", "_probado", "_sin_control", "_motivo", "_candidatas", "_tanteos"):
             setattr(original, campo, getattr(buscador, campo))
-    if buscador._plantilla not in PLANTILLAS:
+    if (buscador._plantilla not in PLANTILLAS
+            or not buscador.ruta.lower().startswith("/zfp/")):
         return resultado(False, "Web Search no tiene una consulta válida para verificar esta carga.")
     forma = PLANTILLAS[buscador._plantilla]
     consultas = {}
-    for numero, matricula in muestra:
+    for numero in muestra:
         if cancelado():
             raise SesionCancelada("Se canceló la verificación en Web Search")
         if time.monotonic() - inicio >= presupuesto_s:
@@ -166,32 +181,15 @@ def verificar_batch(buscador, trabajo, avisar=None, presupuesto_s=60.0, cancelad
             raise SesionCancelada("Se canceló la verificación en Web Search")
         if time.monotonic() - inicio >= presupuesto_s:
             return resultado(False, "La consulta tardó demasiado. Se conserva el avance y se verificará de nuevo.")
-        coincidentes = []
+        aparece = False
         for fila in consultas[numero]:
-            hallado = _campo(fila, {"cdocno", "logpagenumber", "lognumber", "docno", str(CAMPO_LOG_NUMBER)})
-            if hallado != numero:
+            hallado = _campo(fila, {"cdocno", "clogno", "logno", "logpagenumber", "lognumber", "docno", str(CAMPO_LOG_NUMBER)})
+            if hallado != numero and (hallado or not _aparece(numero, fila)):
                 continue
-            nombre = _campo(fila, {"cbatchname", "batchname", "batchnombre", str(CAMPO_BATCH_NAME)})
-            if nombre and _normalizar(nombre) != _normalizar(manifiesto.nombre_batch):
-                continue
-            batch_id = _campo(fila, {"batchid", "batchkey", "cbatchid"})
-            if batch_id and identidad and batch_id.casefold() != identidad:
-                continue
-            # El nombre exacto basta si Web Search no expone el ID. Si no
-            # trae nombre, se exige el ID ya conocido de esta carga.
-            if not nombre and not (batch_id and identidad):
-                continue
-            avion = _campo(fila, {"cacreg", "acreg", "aircraft", "matricula", str(CAMPO_MATRICULA)})
-            if matricula and avion.upper() != matricula:
-                continue
-            coincidentes.append(batch_id.casefold())
-        ids = {valor for valor in coincidentes if valor}
-        if len(ids) > 1:
-            return resultado(False, "Hay varios batches con el mismo nombre. No se combinan sus bitácoras para confirmar una carga.")
-        if not coincidentes:
-            return resultado(False, f"{encontradas} de {esperadas} bitácoras de la muestra encontradas. El batch queda pendiente de confirmar.")
-        if ids:
-            identidad = next(iter(ids))
+            aparece = True
+            break
+        if not aparece:
+            return resultado(False, f"{encontradas} de {esperadas} números de bitácora de la muestra encontrados en Web Search. Falta confirmar la subida.")
         encontradas += 1
     if avisar:
         avisar(f"Muestra de «{manifiesto.nombre_batch}» encontrada en Web Search", encontradas, esperadas)

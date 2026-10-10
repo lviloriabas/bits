@@ -398,7 +398,7 @@ class Buscador:
     def _guardada(self) -> tuple[str, str]:
         ruta = str(self.config.ruta_websearch or "").strip()
         plantilla = str(self.config.parametros_websearch or "").strip()
-        if ruta and plantilla in PLANTILLAS:
+        if ruta.lower().startswith("/zfp/") and _parece_busqueda(ruta) and plantilla in PLANTILLAS:
             return ruta, plantilla
         return "", ""
 

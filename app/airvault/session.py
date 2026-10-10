@@ -374,7 +374,7 @@ class SesionAirVault:
         """De donde salio la sesion, para poder decirlo sin adivinar."""
         return self._origen
 
-    def clonar(self, renovable: bool = True) -> "SesionAirVault":
+    def clonar(self, renovable: bool = True, cancelacion_independiente: bool = False) -> "SesionAirVault":
         """Crea una conexion HTTP independiente con la misma autenticacion.
 
         ``requests.Session`` no es segura para dos hilos. Cada carril que
@@ -385,6 +385,9 @@ class SesionAirVault:
         ``renovable=False`` es para esos carriles: si AirVault pide entrar
         otra vez, el carril no abre Edge por su cuenta, levanta el rechazo y
         lo resuelve la sesion principal.
+
+        ``cancelacion_independiente=True`` separa una consulta de Web Search
+        del trabajo de subida o indexado que se esta ejecutando al mismo tiempo.
         """
         paralela = SesionAirVault(self.config)
         paralela._renovable = bool(renovable)
@@ -400,7 +403,8 @@ class SesionAirVault:
         paralela.dormir = self.dormir
         # El mismo objeto, no una copia: cancelar en un carril tiene que
         # parar tambien al otro.
-        paralela._cancelacion = self._cancelacion
+        if not cancelacion_independiente:
+            paralela._cancelacion = self._cancelacion
         return paralela
 
     # ── autenticacion ──────────────────────────────────────────────

@@ -129,6 +129,7 @@ def test_confirmar_solo_consulta_websearch_y_no_prepara_el_cliente_de_index(app,
 
     b.sesion.get = get
     estado = {"buscar_trabajos": [t], "config": config}
+    estado["raiz"] = tmp_path
     if con_sesion:
         estado["sesion"] = b.sesion
     else:
@@ -163,14 +164,14 @@ def test_la_muestra_completa_la_fila_y_el_progreso_sin_otra_revision(app, tmp_pa
 
 
 @pytest.mark.parametrize("automatico", [True, False])
-def test_la_consulta_manual_puede_renovar_su_sesion_de_lectura(app, tmp_path, automatico):
+def test_la_consulta_usa_una_sesion_aislada_del_indexado(app, tmp_path, automatico):
     from app.airvault.websearch import Buscador
     from tests.test_airvault_confirmacion import caso
     t, b, _, _ = caso(tmp_path, 10)
     clones = []
 
-    def clonar(renovable):
-        clones.append(renovable)
+    def clonar(renovable, cancelacion_independiente=False):
+        clones.append((renovable, cancelacion_independiente))
         return SimpleNamespace(config=t.config, get=b.sesion.get,
                                http=SimpleNamespace(close=lambda: None))
 
@@ -180,7 +181,7 @@ def test_la_consulta_manual_puede_renovar_su_sesion_de_lectura(app, tmp_path, au
         "buscar_trabajos": [t], "buscador": buscador, "confirmacion_automatica": automatico,
     })
     worker._buscar_websearch()
-    assert clones == [not automatico]
+    assert clones == [(False, True)]
     assert t.manifiesto.etapa_hecha("completar")
 
 
@@ -332,26 +333,22 @@ def test_ocultar_indexados_sin_completar_conserva_cien_por_ciento(app, tmp_path)
     assert ventana.progreso.value() == 100
 
 
-def test_revision_periodica_recorre_dos_antiguos_sin_bloquear_una_subida(app, tmp_path, monkeypatch):
+def test_revision_empieza_sin_intervalo_y_consulta_todos_aunque_haya_subida(app, tmp_path, monkeypatch):
     ventana = AirVaultWindow(tmp_path)
     ventana._trabajos = [trabajo(tmp_path, n) for n in ("primero", "segundo", "tercero")]
-    for t in ventana._trabajos:
-        t.manifiesto.etapa("subir").marcar(EstadoEtapa.HECHA)
+    ventana._estado["sesion"] = object()
     ventana._trabajos[0].manifiesto.websearch_revision = "2026-10-09T10:00:00"
     ventana.auto_check.setChecked(True)
     ventana._ajustar_confirmacion()
     assert ventana._confirmador.isActive()
+    assert ventana._confirmador.interval() == 0
     lanzamientos = []
-    monkeypatch.setattr(ventana, "_lanzar", lambda modo, estado: lanzamientos.append((modo, dict(estado))))
+    monkeypatch.setattr(ventana, "_iniciar_confirmacion", lambda trabajos, automatico: lanzamientos.append((trabajos, automatico)))
     monkeypatch.setattr(ventana, "hilo", lambda: object())
     ventana._confirmar_solo()
-    assert not lanzamientos
-    monkeypatch.setattr(ventana, "hilo", lambda: None)
-    ventana._confirmar_solo()
-    modo, estado = lanzamientos[0]
-    assert modo == "buscar_websearch"
-    assert estado["buscar_trabajos"] == ventana._trabajos[1:]
-    assert estado["confirmacion_automatica"] and estado["limite_confirmacion"] == 2
+    trabajos, automatico = lanzamientos[0]
+    assert trabajos == ventana._trabajos[1:] + ventana._trabajos[:1]
+    assert automatico
     ventana.auto_check.setChecked(False)
     assert not ventana._confirmador.isActive()
 
@@ -363,9 +360,9 @@ def test_busqueda_manual_incluye_todos_los_batches_ocultos(app, tmp_path, monkey
     ventana.ocultar_completados_check.setChecked(True)
     assert ventana.lotes.count() == 0
     peticiones = []
-    monkeypatch.setattr(ventana, "_encolar", lambda *args: peticiones.append(args))
+    monkeypatch.setattr(ventana, "_iniciar_confirmacion", lambda trabajos, automatico: peticiones.append((trabajos, automatico)))
     ventana._buscar_websearch()
-    assert peticiones[0][1] == ventana._trabajos
+    assert peticiones[0][0] == ventana._trabajos
 
 
 def test_confirmacion_automatica_no_hace_retroceder_el_progreso_final(app, tmp_path, monkeypatch):
@@ -405,3 +402,103 @@ def test_confirmar_un_batch_indexado_mantiene_el_progreso_final(app, tmp_path, m
     ventana._al_buscar_websearch({"resultados": [(t, True)], "automatico": True})
     assert ventana._estados[0].estado == PUBLICADO
     assert ventana.progreso.value() == 100
+
+
+def test_busca_muchos_batches_simultaneamente_y_no_solo_dos(app, tmp_path):
+    import base64
+    from threading import Barrier
+    from tests.test_airvault_confirmacion import caso
+    trabajos = [caso(tmp_path / str(i), 1, conocido=False)[0] for i in range(16)]
+    barrera = Barrier(16)
+    consultas = []
+
+    def get(ruta, parametros):
+        assert ruta.startswith("/zfp/")
+        numero = base64.b64decode(parametros["encodedValues"]).decode().split("=", 1)[1]
+        consultas.append(numero)
+        barrera.wait(timeout=3)
+        return {"rows": [{"LogNo": numero}]}
+
+    buscador = SimpleNamespace(ruta="/zfp/Search/GetSearchResults", _plantilla="encodedValues",
+                               config=AirVaultConfig(), sesion=SimpleNamespace(get=get))
+    worker = TrabajoAirVaultWorker("buscar_websearch", {"buscar_trabajos": trabajos, "buscador": buscador})
+    worker._buscar_websearch()
+    assert len(consultas) == 16
+    assert all(t.manifiesto.etapa_hecha("completar") for t in trabajos)
+    assert all(t.manifiesto.batch_id is None for t in trabajos)
+
+
+def test_publica_cada_confirmacion_sin_esperar_al_batch_lento(app, tmp_path):
+    import base64
+    from threading import Event
+    from PySide6.QtCore import Qt
+    from app.airvault.manifest import cargar
+    from tests.test_airvault_confirmacion import caso
+    rapido = caso(tmp_path / "rapido", 1, conocido=False)[0]
+    lento = caso(tmp_path / "lento", 1, conocido=False)[0]
+    lento.manifiesto.registros[0].log_number = "2000001"
+    lento.guardar()
+    entro_lento, soltar_lento = Event(), Event()
+    primeras = []
+
+    def get(ruta, parametros):
+        numero = base64.b64decode(parametros["encodedValues"]).decode().split("=", 1)[1]
+        if numero == "2000001":
+            entro_lento.set()
+            assert soltar_lento.wait(3)
+        else:
+            assert entro_lento.wait(3)
+        return {"rows": [{"LogNo": numero}]}
+
+    b = SimpleNamespace(ruta="/zfp/Search/GetSearchResults", _plantilla="encodedValues",
+                        config=rapido.config, sesion=SimpleNamespace(get=get))
+    worker = TrabajoAirVaultWorker("buscar_websearch", {"buscar_trabajos": [lento, rapido], "buscador": b})
+
+    def recibir(datos):
+        if datos["resultados"] and datos["resultados"][0][0] is rapido:
+            primeras.append(cargar(rapido.carpeta).etapa_hecha("completar"))
+            soltar_lento.set()
+
+    worker.buscado.connect(recibir, type=Qt.ConnectionType.DirectConnection)
+    worker._buscar_websearch()
+    assert primeras == [True]
+    assert lento.manifiesto.etapa_hecha("completar")
+
+
+def test_busqueda_manual_tiene_su_hilo_y_no_modifica_el_estado_del_indexado(app, tmp_path, monkeypatch):
+    ventana = AirVaultWindow(tmp_path)
+    ventana._trabajos = [trabajo(tmp_path, "sin-id")]
+    ventana._estado = {"sesion": object(), "trabajos": ventana._trabajos, "indexar_manual": True}
+    anterior = dict(ventana._estado)
+    monkeypatch.setattr(ventana, "hilo", lambda: SimpleNamespace(modo="indexar"))
+    monkeypatch.setattr(ventana, "_lanzar", lambda *args: pytest.fail("No debe usar el hilo del indexado"))
+    monkeypatch.setattr(ventana, "_encolar", lambda *args: pytest.fail("No debe esperar el turno de subida"))
+    monkeypatch.setattr(TrabajoAirVaultWorker, "start", lambda self: None)
+    monkeypatch.setattr(ventana, "_actualizar_latido", lambda: None)
+    ventana._buscar_websearch()
+    assert ventana._worker_websearch.modo == "buscar_websearch"
+    assert ventana._worker_websearch.estado["buscar_trabajos"] == ventana._trabajos
+    assert ventana._estado == anterior
+    assert ventana._worker_websearch.estado is not ventana._estado
+
+
+def test_confirmacion_actualiza_el_sidebar_sin_perder_las_paginas_que_se_indexan(app, tmp_path):
+    from app.airvault.manifest import cargar
+    from app.airvault.model import EstadoRegistro
+    from tests.test_airvault_confirmacion import caso
+    original, b, _, _ = caso(tmp_path, 10)
+    actual = Trabajo(original.config, original.carpeta, cargar(original.carpeta))
+    actual.manifiesto.registros[0].estado = EstadoRegistro.ESCRITA
+    actual.manifiesto.batch_id = "ID-DEL-INDEXADO-ACTUAL"
+    ventana = AirVaultWindow(tmp_path)
+    ventana._trabajos = [actual]
+    ventana._estado["trabajos"] = [actual]
+    ventana._estados = [estado_local(actual)]
+    worker = TrabajoAirVaultWorker("buscar_websearch", {"buscar_trabajos": [original], "buscador": b})
+    worker.buscado.connect(ventana._al_buscar_websearch)
+    worker._buscar_websearch()
+    assert actual.manifiesto.registros[0].estado is EstadoRegistro.ESCRITA
+    assert actual.manifiesto.batch_id == "ID-DEL-INDEXADO-ACTUAL"
+    assert actual.manifiesto.etapa_hecha("completar")
+    assert ventana._estados[0].trabajo is actual
+    assert ventana._estados[0].estado == COMPLETADO

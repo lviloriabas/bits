@@ -144,7 +144,7 @@ def soltar_hilos(ventana) -> None:
     despues aborta el proceso con 0xC0000409, que es justo lo que el cierre
     de la ventana esta escrito para evitar.
     """
-    teardown = getattr(ventana, "_teardown", None)
+    teardown = getattr(ventana, "_teardown", None) or getattr(ventana, "detener", None)
     if teardown is None:
         return
     try:
