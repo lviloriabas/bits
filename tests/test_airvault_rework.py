@@ -181,7 +181,7 @@ def test_la_consulta_usa_una_sesion_aislada_del_indexado(app, tmp_path, automati
         "buscar_trabajos": [t], "buscador": buscador, "confirmacion_automatica": automatico,
     })
     worker._buscar_websearch()
-    assert clones == [(False, True)]
+    assert clones == [(True, True)]
     assert t.manifiesto.etapa_hecha("completar")
 
 
@@ -336,6 +336,9 @@ def test_ocultar_indexados_sin_completar_conserva_cien_por_ciento(app, tmp_path)
 def test_revision_empieza_sin_intervalo_y_consulta_todos_aunque_haya_subida(app, tmp_path, monkeypatch):
     ventana = AirVaultWindow(tmp_path)
     ventana._trabajos = [trabajo(tmp_path, n) for n in ("primero", "segundo", "tercero")]
+    from app.airvault.model import EstadoEtapa
+    for anterior in ventana._trabajos:
+        anterior.manifiesto.etapa("subir").marcar(EstadoEtapa.HECHA)
     ventana._estado["sesion"] = object()
     ventana._trabajos[0].manifiesto.websearch_revision = "2026-10-09T10:00:00"
     ventana.auto_check.setChecked(True)

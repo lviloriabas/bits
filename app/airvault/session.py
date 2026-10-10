@@ -315,6 +315,7 @@ class SesionAirVault:
         # serian varias ventanas de acceso. El carril levanta el rechazo y
         # la peticion la repite la sesion principal, que si renueva.
         self._renovable = True
+        self._comprobar_en_websearch = False
         # Inyectable para que las pruebas no esperen de verdad.
         self.dormir = self.esperar
 
@@ -398,6 +399,7 @@ class SesionAirVault:
         paralela._autenticada = self._autenticada
         paralela._origen = self._origen
         paralela._perfil = self._perfil
+        paralela._comprobar_en_websearch = self._comprobar_en_websearch
         paralela._tokens = dict(self._tokens)
         paralela._avisar_sesion = self._avisar_sesion
         paralela.dormir = self.dormir
@@ -497,7 +499,8 @@ class SesionAirVault:
             sonda.cookies.set(nombre, valor, domain=host, path="/")
         try:
             respuesta = sonda.get(
-                self.config.url(RUTA_DE_PRUEBA), params=dict(CONSULTA_DE_PRUEBA),
+                self.config.url("/zfp/" if self._comprobar_en_websearch else RUTA_DE_PRUEBA),
+                params={} if self._comprobar_en_websearch else dict(CONSULTA_DE_PRUEBA),
                 timeout=self.config.timeout_s,
             )
         except requests.exceptions.SSLError as exc:
@@ -624,6 +627,12 @@ class SesionAirVault:
                 return int(datos.get("records", 0) or 0)
             except (TypeError, ValueError):
                 return 0
+        return 0
+
+    def comprobar_websearch(self) -> int:
+        """Comprueba el acceso a Web Search antes de repartir las consultas."""
+        self._comprobar_en_websearch = True
+        self.get("/zfp/", json_esperado=False)
         return 0
 
     # ── antiforgery ────────────────────────────────────────────────
@@ -920,6 +929,7 @@ def abrir_sesion(
     usar_edge: bool = True,
     credenciales: Optional[Credenciales] = None,
     avisar: Optional[Callable[[str], None]] = None,
+    websearch: bool = False,
 ) -> SesionAirVault:
     """Arma la sesion con la primera fuente disponible.
 
@@ -933,6 +943,7 @@ def abrir_sesion(
     puramente local).
     """
     sesion = SesionAirVault(config)
+    sesion._comprobar_en_websearch = websearch
     pegada = str(cookie or os.environ.get(ENV_COOKIE, "") or "")
     if pegada.strip():
         return sesion.usar_cookie(pegada)
@@ -963,6 +974,7 @@ def abrir_sesion(
 def comprobar_o_renovar(
     sesion: SesionAirVault,
     avisar: Optional[Callable[[str], None]] = None,
+    websearch: bool = False,
 ) -> int:
     """Comprueba la sesion y, si el perfil trae una caducada, vuelve a entrar.
 
@@ -970,13 +982,18 @@ def comprobar_o_renovar(
     tiene la forma correcta, asi que el programa la daba por buena y moria
     en la primera peticion pidiendo que alguien copiara una cookie a mano.
     Aqui se hace lo que haria una persona: abrir el navegador y entrar otra
-    vez. Solo tiene sentido cuando la sesion salio del navegador; una cookie
-    pegada a mano no se puede renovar sola.
+    vez. Web Search tambien recupera por navegador una cookie pegada que
+    haya caducado, para no dejar la revision pendiente por falta de acceso.
     """
+    if sesion.cancelada:
+        raise SesionCancelada("Se canceló el acceso a AirVault")
+    comprobar = sesion.comprobar_websearch if websearch else sesion.comprobar
     try:
-        return sesion.comprobar()
+        return comprobar()
     except ErrorDeSesion:
-        if sesion.origen != ORIGEN_EDGE:
+        if sesion.cancelada:
+            raise SesionCancelada("Se canceló el acceso a AirVault")
+        if sesion.origen != ORIGEN_EDGE and not websearch:
             raise
         logger.info(
             "La sesion guardada en el perfil de Edge ya no vale; se vuelve "
@@ -988,7 +1005,7 @@ def comprobar_o_renovar(
                 "AirVault."
             )
         sesion.renovar_en_navegador(avisar)
-        return sesion.comprobar()
+        return comprobar()
 
 
 def _perfil(config: AirVaultConfig) -> Optional[Path]:

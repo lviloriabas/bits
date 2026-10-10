@@ -1638,6 +1638,7 @@ class MainWindow(QMainWindow):
                 self._open_airvault_corrida
             )
             ventana.avance_automatico.connect(self._al_avanzar_airvault)
+            ventana.proceso_terminado.connect(self._al_terminar_airvault)
             self._airvault_windows.append(ventana)
             self._airvault_window = ventana
             if self._airvault_corrida is not None:
@@ -1675,6 +1676,11 @@ class MainWindow(QMainWindow):
         ):
             return
         self.cadena.marcar(paso, estado)
+
+    def _al_terminar_airvault(self, texto: str) -> None:
+        """Avisa tambien cuando la ventana de AirVault esta cerrada o minimizada."""
+        self.statusBar().showMessage("AirVault: " + texto)
+        QApplication.alert(self, 5000)
 
     def _open_airvault_corrida(self, csv: str) -> None:
         """Abre otra ejecución sin tocar la ventana que ya está ocupada."""

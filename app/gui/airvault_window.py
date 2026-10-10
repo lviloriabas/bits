@@ -811,6 +811,7 @@ class TrabajoAirVaultWorker(QThread):
         from app.airvault.confirmacion import MAX_BATCHES_PARALELOS, METODO_MUESTRA, huella_de_numeros, verificar_batch
         from app.airvault.flujo import Trabajo, websearch_confirmacion_valida
         from app.airvault.manifest import copiar_confirmacion, guardar_confirmacion
+        from app.airvault.session import ErrorDeSesion, SesionAirVault
         from app.airvault.websearch import Buscador
 
         buscador = self.estado.get("buscador")
@@ -821,6 +822,7 @@ class TrabajoAirVaultWorker(QThread):
                 sesion = abrir_sesion(
                     self.estado["config"], cookie=self.estado.get("cookie") or None,
                     avisar=lambda texto: self._avisar(texto, 0, 0),
+                    websearch=True,
                 )
             buscador = Buscador(sesion, self.estado["config"],
                                ruta_config=Path(self.estado["raiz"]) / AIRVAULT_FILENAME)
@@ -833,12 +835,25 @@ class TrabajoAirVaultWorker(QThread):
             return nuevo
 
         if callable(getattr(buscador.sesion, "clonar", None)):
-            lectura = buscador.sesion.clonar(renovable=False, cancelacion_independiente=True)
+            lectura = buscador.sesion.clonar(renovable=True, cancelacion_independiente=True)
             lectura.config = lectura.config.with_overrides(timeout_s=5.0, reintentos=1)
             buscador = con_sesion(buscador, lectura)
         self.estado["sesion"] = buscador.sesion
         self.estado["buscador"] = buscador
         self._lecturas_websearch.append(buscador.sesion)
+        acceso = None
+        if isinstance(buscador.sesion, SesionAirVault):
+            from app.airvault.websearch_pagina import AccesoWebSearch
+            self._avisar("Abriendo Web Search e iniciando sesión", 0, 0)
+            acceso = AccesoWebSearch(buscador.config, buscador.sesion,
+                                     avisar=lambda texto: self._avisar(texto, 0, 0),
+                                     cancelado=self.hay_que_parar)
+            try:
+                acceso.__enter__()
+            except BaseException:
+                buscador.sesion.http.close()
+                self._lecturas_websearch.clear()
+                raise
         trabajos = [t for t in self.estado["buscar_trabajos"]
                     if not t.manifiesto.cancelado and not websearch_confirmacion_valida(t.manifiesto)]
         candado = Lock()
@@ -854,18 +869,31 @@ class TrabajoAirVaultWorker(QThread):
                 raise SesionCancelada("Se canceló la búsqueda en Web Search")
             copia = Trabajo(trabajo.config, trabajo.carpeta, trabajo.manifiesto.model_copy(deep=True))
             with candado:
-                if callable(getattr(buscador.sesion, "clonar", None)):
+                if acceso is not None:
+                    local = acceso.crear_lector()
+                elif callable(getattr(buscador.sesion, "clonar", None)):
                     sesion = buscador.sesion.clonar(renovable=False)
                     local = con_sesion(buscador, sesion)
                     self._lecturas_websearch.append(sesion)
                 else:
                     local = con_sesion(buscador, buscador.sesion)
             try:
-                resultado = verificar_batch(local, copia, self._avisar,
-                                            presupuesto_s=60.0, cancelado=self.hay_que_parar)
+                try:
+                    resultado = verificar_batch(local, copia, self._avisar,
+                                                presupuesto_s=60.0, cancelado=self.hay_que_parar)
+                except ErrorDeSesion:
+                    if acceso is None:
+                        raise
+                    local.cerrar()
+                    acceso.renovar(local.generacion)
+                    local = acceso.crear_lector()
+                    resultado = verificar_batch(local, copia, self._avisar,
+                                                presupuesto_s=60.0, cancelado=self.hay_que_parar)
                 return copia, resultado, local
             finally:
-                if local.sesion is not buscador.sesion:
+                if acceso is not None:
+                    local.cerrar()
+                elif local.sesion is not buscador.sesion:
                     cerrar(local.sesion)
                     with candado:
                         self._lecturas_websearch.remove(local.sesion)
@@ -884,7 +912,8 @@ class TrabajoAirVaultWorker(QThread):
                         trabajo.manifiesto.websearch_detalle = mensaje_error(exc, "No se pudieron consultar sus bitácoras en Web Search.")
                         revisados += 1
                         self.buscado.emit(dict(resultados=[(trabajo, False)], revisados=revisados,
-                                               confirmados=confirmados, total=len(trabajos), terminado=False))
+                                               confirmados=confirmados, total=len(trabajos), terminado=False,
+                                               automatico=bool(self.estado.get("confirmacion_automatica"))))
                         continue
                     with candado:
                         for campo in ("_ruta", "_plantilla", "_candidatas"):
@@ -910,6 +939,8 @@ class TrabajoAirVaultWorker(QThread):
                                            confirmados=confirmados, total=len(trabajos), terminado=False,
                                            automatico=bool(self.estado.get("confirmacion_automatica"))))
         finally:
+            if acceso is not None:
+                acceso.__exit__(None, None, None)
             cerrar(buscador.sesion)
             self._lecturas_websearch.clear()
         self.buscado.emit(dict(resultados=[], revisados=revisados, confirmados=confirmados,
@@ -1587,6 +1618,7 @@ class AirVaultWindow(QDialog):
     # ocurren aquí, así que sin esto aquella línea se quedaba en «Exportar»
     # y no había forma de saber desde allí si la entrega llegó a subirse.
     avance_automatico = Signal(str, str)
+    proceso_terminado = Signal(str)
 
     def __init__(
         self, raiz: Path, opciones: OpcionesAutomatizacion | None = None
@@ -1657,6 +1689,9 @@ class AirVaultWindow(QDialog):
         self._websearch_pendientes: dict = {}
         self._websearch_manual_pendiente = False
         self._cuenta_websearch = (0, 0)
+        self._websearch_inicio: Optional[set[str]] = None
+        self._websearch_inicio_por_revisar: set[str] = set()
+        self._websearch_proceso_activo = False
         self._deteniendo = False
         # Fallos seguidos sin ninguna comprobación buena por medio. Es lo
         # que separa un tropiezo de AirVault de un problema que tarda en
@@ -2303,12 +2338,14 @@ class AirVaultWindow(QDialog):
                 estado["buscador"].sesion = sesion
         for trabajo in trabajos:
             self._websearch_revisados[str(trabajo.carpeta)] = self._firma_consulta_websearch(trabajo)
+            self._websearch_inicio_por_revisar.discard(str(trabajo.carpeta))
         self._cuenta_websearch = (0, len(trabajos))
         worker = TrabajoAirVaultWorker("buscar_websearch", estado, self)
         worker.paso.connect(self._mostrar_paso_websearch)
         worker.buscado.connect(self._al_buscar_websearch)
         worker.fallo.connect(self._al_fallar_websearch)
-        worker.cancelado.connect(lambda: self._anotar("Búsqueda en Web Search cancelada"))
+        worker.cancelado.connect(lambda: self._anotar("Búsqueda en Web Search cancelada")
+                                 if not automatico or self._fin_confirmado is None else None)
         worker.finished.connect(self._al_terminar_websearch)
         self._worker_websearch = worker
         self.boton_cancelar.setEnabled(True)
@@ -2317,11 +2354,16 @@ class AirVaultWindow(QDialog):
         self._actualizar_latido()
 
     def _mostrar_paso_websearch(self, texto: str, hechas: int, total: int) -> None:
+        if self._fin_confirmado is not None and self._lectura_websearch_pendiente() is None:
+            return
         if self.hilo() is None:
-            self.estado_label.setText("Buscando números de bitácora en Web Search")
+            self.estado_label.setText(texto if total == 0 else "Buscando números de bitácora en Web Search")
             self.estado_label.setToolTip(texto)
 
     def _al_fallar_websearch(self, mensaje: str) -> None:
+        if (self._fin_confirmado is not None and self._worker_websearch is not None
+                and self._worker_websearch.estado.get("confirmacion_automatica")):
+            return
         mensaje = mensaje_error(mensaje, "No se pudo consultar Web Search.")
         self._anotar("Web Search: " + primera_frase(mensaje))
         if self.hilo() is None:
@@ -2350,21 +2392,23 @@ class AirVaultWindow(QDialog):
     def _al_buscar_websearch(self, datos: dict) -> None:
         from app.airvault.flujo import estado_local
         from app.airvault.manifest import copiar_confirmacion
+        auxiliar_terminado = self._fin_confirmado is not None and datos.get("automatico")
         resultados = datos["resultados"]
         for trabajo, confirmado in resultados:
             for actual in self._trabajos + list(self._estado.get("trabajos") or []):
                 if str(actual.carpeta) == str(trabajo.carpeta):
                     copiar_confirmacion(trabajo.manifiesto, actual.manifiesto)
-            self._anotar(
-                f"Batch «{trabajo.manifiesto.nombre_batch}»: "
-                + ("confirmado en Web Search" if confirmado else "pendiente de confirmar en Web Search"),
-                [trabajo.manifiesto.websearch_detalle],
-            )
+            if not auxiliar_terminado:
+                self._anotar(
+                    f"Batch «{trabajo.manifiesto.nombre_batch}»: "
+                    + ("confirmado en Web Search" if confirmado else "pendiente de confirmar en Web Search"),
+                    [trabajo.manifiesto.websearch_detalle],
+                )
         confirmados = datos.get("confirmados", sum(confirmado for _, confirmado in resultados))
         revisados = datos.get("revisados", len(resultados))
         total = datos.get("total", len(resultados))
         self._cuenta_websearch = (revisados, total)
-        if self.hilo() is None:
+        if self.hilo() is None and not auxiliar_terminado:
             self.resumen.setText(
                 f"Web Search: {revisados} de {total} batches consultados, {confirmados} confirmados por muestra. "
                 "Los no encontrados siguen pendientes de confirmar la subida."
@@ -2378,6 +2422,7 @@ class AirVaultWindow(QDialog):
         self._fin_pendiente = True
         self._pintar_lotes()
         self._ajustar_confirmacion()
+        self._anunciar_fin()
 
     def _respuesta_de_la_busqueda(self) -> QLabel:
         """La línea que dice en qué batches de la cola está la bitácora."""
@@ -4601,6 +4646,8 @@ class AirVaultWindow(QDialog):
         """
         from app.airvault.flujo import INDEXADO, INCOMPLETO, POSIBLE_DUPLICADO
 
+        if self._firma_de_fin() is not None:
+            return False
         indexa_solo = bool(self._opciones.indexar)
         return any(
             (not parte.se_acabo
@@ -4615,7 +4662,7 @@ class AirVaultWindow(QDialog):
                 or parte.estado == INCOMPLETO
                 or self._reconfirmaciones.get(str(parte.trabajo.carpeta), 0) > 0
             )
-            for parte in self._partes_del_alcance()
+            for parte in self._partes_del_proceso()
         )
 
     def _subidas_perdidas(self) -> list:
@@ -4784,13 +4831,36 @@ class AirVaultWindow(QDialog):
                 (subida.estado.value, subida.actualizada) if subida else None,
                 (cierre.estado.value, cierre.actualizada) if cierre else None)
 
+    def _subidos_por_confirmar_websearch(self) -> list:
+        from app.airvault.flujo import _subida_rastreable
+        return [
+            t for t in self._por_confirmar_websearch()
+            if not t.manifiesto.etapa_hecha("completar")
+            and _subida_rastreable(t, bool(t.manifiesto.batch_id))
+        ]
+
+    def _pendientes_websearch_automaticos(self) -> list:
+        """Conserva el alcance inicial aunque se suban nuevos batches."""
+        if self._firma_de_fin() is not None:
+            return []
+        pendientes = []
+        for trabajo in self._subidos_por_confirmar_websearch():
+            clave = str(trabajo.carpeta)
+            if self._websearch_inicio is not None and clave not in self._websearch_inicio:
+                continue
+            if self._websearch_revisados.get(clave) == self._firma_consulta_websearch(trabajo):
+                continue
+            if self.auto_check.isChecked() or clave in self._websearch_inicio_por_revisar:
+                pendientes.append(trabajo)
+        return pendientes
+
     def _ajustar_confirmacion(self) -> None:
         if not hasattr(self, "auto_check") or self._deteniendo:
             return
-        pendientes = [t for t in self._por_confirmar_websearch()
-                      if self._websearch_revisados.get(str(t.carpeta)) != self._firma_consulta_websearch(t)]
+        pendientes = self._pendientes_websearch_automaticos()
         sesion = self._estado.get("sesion") or self._estado_websearch.get("sesion")
-        if not self.auto_check.isChecked() or not pendientes or sesion is None:
+        inicial = any(str(t.carpeta) in self._websearch_inicio_por_revisar for t in pendientes)
+        if not pendientes or (sesion is None and not inicial):
             if self._confirmador is not None:
                 self._confirmador.stop()
             return
@@ -4802,10 +4872,9 @@ class AirVaultWindow(QDialog):
             self._confirmador.start(0)
 
     def _confirmar_solo(self) -> None:
-        if not self.auto_check.isChecked() or self._deteniendo:
+        if self._deteniendo:
             return
-        trabajos = [t for t in self._por_confirmar_websearch()
-                    if self._websearch_revisados.get(str(t.carpeta)) != self._firma_consulta_websearch(t)]
+        trabajos = self._pendientes_websearch_automaticos()
         if not trabajos:
             self._ajustar_confirmacion()
             return
@@ -4863,6 +4932,10 @@ class AirVaultWindow(QDialog):
     def _comprobar_solo(self) -> None:
         """Lo que dispara el reloj. Se salta el turno si hay algo en vuelo."""
         if self.hilo() is not None:
+            return
+        if not self._resultado_fallido and self._firma_de_fin() is not None:
+            self._fin_pendiente = True
+            self._anunciar_fin()
             return
         self._cadena_manual = False
         # Cada vuelta del reloj vuelve a dar permiso de subida: lo que no
@@ -5176,6 +5249,13 @@ class AirVaultWindow(QDialog):
             return
         if self._worker is not None and self._worker.isRunning():
             return
+        if not self._websearch_proceso_activo:
+            self._websearch_inicio = {
+                str(t.carpeta) for t in self._subidos_por_confirmar_websearch()
+            }
+            self._websearch_inicio_por_revisar = set(self._websearch_inicio)
+            self._websearch_revisados.clear()
+            self._websearch_proceso_activo = True
         if self._worker is not None:
             self._worker.deleteLater()
             self._worker = None
@@ -5227,6 +5307,7 @@ class AirVaultWindow(QDialog):
         self._cuenta_paso = (0, 0)
         self._arrancar_reloj()
         worker.start()
+        self._ajustar_confirmacion()
         self._pintar_avance()
         self._actualizar_latido()
         # Con el hilo ya en marcha, para que la línea de pasos de la ventana
@@ -5500,7 +5581,7 @@ class AirVaultWindow(QDialog):
         """
         if not hasattr(self, "bitacora"):
             return
-        if self.hilo() is None and self.lectura_websearch() is None and not self._vigilando():
+        if self.hilo() is None and self._lectura_websearch_pendiente() is None and not self._vigilando():
             if self._latido is not None:
                 self._latido.stop()
             if self._linea_viva is not None:
@@ -5531,7 +5612,7 @@ class AirVaultWindow(QDialog):
         por segundo lo que nadie ve no; al volver a abrirla se pone al día
         en la vuelta siguiente.
         """
-        if self.isVisible() or (self.hilo() is None and self.lectura_websearch() is None and not self._vigilando()):
+        if self.isVisible() or (self.hilo() is None and self._lectura_websearch_pendiente() is None and not self._vigilando()):
             self._pintar_linea_viva()
 
     def _pintar_linea_viva(self) -> None:
@@ -5539,7 +5620,8 @@ class AirVaultWindow(QDialog):
         linea = self._linea_viva
         if linea is None:
             return
-        worker = self.hilo() or self.lectura_websearch()
+        lector_paralelo = self._lectura_websearch_pendiente()
+        worker = self.hilo() or lector_paralelo
         if worker is None and not self._vigilando():
             # El hilo acaba de terminar y su aviso todavía no llegó: la
             # línea se va ya, sin esperar a ``_al_terminar``.
@@ -5556,6 +5638,12 @@ class AirVaultWindow(QDialog):
                      else "BITS trabajando") + f" ({_minutos(time.monotonic() - self._inicio_paso)})"
             if total > 0:
                 texto += f" - {min(hechas, total)} de {total}"
+                if lector:
+                    texto += " batches"
+            if not lector and lector_paralelo is not None:
+                revisados, batches = self._cuenta_websearch
+                if batches > 0:
+                    texto += f" - Web Search: {min(revisados, batches)} de {batches} batches"
             color = color_indexando()
         else:
             restante = max(0, self._vigilante.remainingTime()) / 1000
@@ -6073,9 +6161,16 @@ class AirVaultWindow(QDialog):
         # Si lo que sigue lanza otro hilo, la línea vuelve a girar en el acto.
         self._actualizar_latido()
         if self._cerrar_al_terminar:
+            self._websearch_proceso_activo = False
             self._cerrar_al_terminar = False
             self.close()
             return
+        # Las metas ya confirmadas cierran la cadena antes de otra consulta.
+        # Las acciones pedidas desde la cola conservan su turno.
+        if not self._resultado_fallido and self._firma_de_fin() is not None:
+            self._fin_pendiente = True
+            if self._anunciar_fin():
+                return
         if getattr(self, "_comprobar_al_terminar", False):
             self._comprobar_al_terminar = False
             self._comprobar()
@@ -6094,6 +6189,7 @@ class AirVaultWindow(QDialog):
                 return
         # La cadena que alguien pidió termina aquí; lo que venga después lo
         # arranca el reloj o un botón nuevo.
+        self._websearch_proceso_activo = False
         self._cadena_manual = False
         self._publicar_avance()
         # Lo que se pidió desde la tabla mientras esto trabajaba entra ahora,
@@ -6105,22 +6201,41 @@ class AirVaultWindow(QDialog):
             self._parar_vigilancia()
         self._anunciar_fin()
 
-    def _anunciar_fin(self) -> None:
+    def _anunciar_fin(self) -> bool:
         """Deja el final en la barra y la bitacora cuando ya no falta nada."""
-        if not self._fin_pendiente:
-            return
+        if not self._fin_pendiente or self._resultado_fallido:
+            return False
         firma = self._firma_de_fin()
+        lector = self.lectura_websearch()
         if (
-            firma is None or self.hilo() is not None or self.lectura_websearch() is not None or self._vigilando()
-            or self._cola_de_acciones or self._comprobar_al_terminar
-            or self._subir_al_terminar or self._indexar_al_terminar
+            firma is None or self.hilo() is not None or self._cola_de_acciones
+            or self._websearch_manual_pendiente
+            or (lector is not None and not lector.estado.get("confirmacion_automatica"))
         ):
-            return
+            return False
         self._fin_pendiente = False
+        self._comprobar_al_terminar = False
+        self._subir_al_terminar = False
+        self._indexar_al_terminar = False
+        self._cadena_manual = False
+        self._websearch_proceso_activo = False
+        self._websearch_inicio_por_revisar.clear()
+        self._websearch_pendientes.clear()
+        anterior = self._fin_confirmado
+        self._fin_confirmado = firma
+        if self._confirmador is not None:
+            self._confirmador.stop()
+        self._parar_vigilancia()
+        self._parar_reloj()
+        if lector is not None:
+            # La lectura automatica es auxiliar. Se cancela sin bloquear la
+            # interfaz y su QThread se conserva hasta su señal finished.
+            lector.cancelar()
+        self.boton_cancelar.setEnabled(False)
         partes = self._partes_del_proceso()
         texto = (
             f"Proceso terminado: {conteo_de_estados(partes)}. "
-            "No queda trabajo automático pendiente."
+            "Todo lo solicitado se completó. No queda trabajo automático pendiente."
         )
         if any(p.trabajo.manifiesto.solo_subir for p in partes):
             texto += " Las incidencias de REVISAR quedan para revisión manual."
@@ -6128,10 +6243,12 @@ class AirVaultWindow(QDialog):
         self.estado_label.setText("Proceso terminado")
         self.estado_label.setToolTip(texto)
         self._actualizar_latido()
-        if firma != self._fin_confirmado:
+        if firma != anterior:
             self._anotar(texto)
-        self._fin_confirmado = firma
+            self.proceso_terminado.emit(texto)
         self._pintar_avance()
+        self._publicar_avance()
+        return True
 
     # ── lo que ve la ventana principal ─────────────────────────────
 
@@ -6226,6 +6343,14 @@ class AirVaultWindow(QDialog):
             return worker if worker.isRunning() else None
         except RuntimeError:
             return None
+
+    def _lectura_websearch_pendiente(self) -> Optional[QThread]:
+        """Una lectura auxiliar cancelada al terminar no mantiene el proceso vivo."""
+        lector = self.lectura_websearch()
+        if (lector is not None and self._fin_confirmado is not None
+                and lector.estado.get("confirmacion_automatica")):
+            return None
+        return lector
 
     def closeEvent(self, event) -> None:
         """Cerrar siempre se puede; con trabajo en vuelo, lo cancela antes.

@@ -7,7 +7,7 @@ import re
 import time
 
 from app.airvault.config import CAMPO_LOG_NUMBER
-from app.airvault.session import SesionCancelada
+from app.airvault.session import ErrorDeSesion, SesionCancelada
 from app.airvault.websearch import PLANTILLAS, _aparece
 
 
@@ -136,31 +136,32 @@ def verificar_batch(buscador, trabajo, avisar=None, presupuesto_s=60.0, cancelad
     if not muestra:
         return resultado(False, "Faltan números válidos para buscar una muestra de bitácoras.")
     inicio = time.monotonic()
+    directa = getattr(buscador, "consultar_numero", None)
     original = buscador
     if is_dataclass(buscador):
         buscador = replace(buscador, sesion=_LecturaAcotada(buscador.sesion, inicio + presupuesto_s, cancelado))
     if cancelado():
         raise SesionCancelada("Se canceló la verificación en Web Search")
     try:
-        if is_dataclass(buscador) and not buscador.ruta:
+        if not callable(directa) and is_dataclass(buscador) and not buscador.ruta:
             ruta, plantilla = buscador._guardada()
             if ruta:
                 buscador._ruta, buscador._plantilla = ruta, plantilla
-        if not buscador.ruta and not buscador._adoptar_ruta(numeros[0]):
+        if not callable(directa) and not buscador.ruta and not buscador._adoptar_ruta(numeros[0]):
             if cancelado() or getattr(buscador.sesion, "cancelada", False):
                 raise SesionCancelada("Se canceló la verificación en Web Search")
             return resultado(False, buscador.motivo or "Web Search no está disponible.")
-    except SesionCancelada:
+    except (ErrorDeSesion, SesionCancelada):
         raise
     except Exception:
         return resultado(False, "No se pudo consultar Web Search. Se verificará de nuevo.")
     if is_dataclass(original):
         for campo in ("_ruta", "_plantilla", "_probado", "_sin_control", "_motivo", "_candidatas", "_tanteos"):
             setattr(original, campo, getattr(buscador, campo))
-    if (buscador._plantilla not in PLANTILLAS
-            or not buscador.ruta.lower().startswith("/zfp/")):
+    if not callable(directa) and (buscador._plantilla not in PLANTILLAS
+                                 or not buscador.ruta.lower().startswith("/zfp/")):
         return resultado(False, "Web Search no tiene una consulta válida para verificar esta carga.")
-    forma = PLANTILLAS[buscador._plantilla]
+    forma = None if callable(directa) else PLANTILLAS[buscador._plantilla]
     consultas = {}
     for numero in muestra:
         if cancelado():
@@ -171,9 +172,11 @@ def verificar_batch(buscador, trabajo, avisar=None, presupuesto_s=60.0, cancelad
             avisar(f"Buscando una muestra de «{manifiesto.nombre_batch}» en Web Search", encontradas, esperadas)
         try:
             if numero not in consultas:
-                consultas[numero] = _filas(buscador.sesion.get(
-                    buscador.ruta, forma.construir(numero, buscador.config)))
-        except SesionCancelada:
+                datos = (directa(numero, max(0.0, presupuesto_s - (time.monotonic() - inicio)))
+                         if callable(directa) else buscador.sesion.get(
+                             buscador.ruta, forma.construir(numero, buscador.config)))
+                consultas[numero] = _filas(datos)
+        except (ErrorDeSesion, SesionCancelada):
             raise
         except Exception:
             return resultado(False, "Web Search no respondió. Se conserva el estado y se comprobará de nuevo.")
