@@ -1306,8 +1306,8 @@ def test_una_subida_que_no_aparece_se_avisa_y_no_se_manda_sola(ventana):
     assert "No se vuelve a mandar solo" in ventana.resumen.text()
     assert "Subir a AirVault ahora" in ventana.resumen.text()
     assert not ventana._subir_al_terminar
-    # El aviso dice el tiempo de espera configurado, sin multiplicarlo.
-    assert "30 minutos" in ventana.resumen.text()
+    # Un batch pequeño recibe cinco minutos antes de ofrecer el reenvío.
+    assert "5 minutos" in ventana.resumen.text()
 
 
 def test_sin_comprobacion_automatica_la_resubida_se_pide_a_mano(ventana):

@@ -71,9 +71,9 @@ def test_margen_avance_y_botones_coinciden_con_la_ventana_principal(
         assert not ventana.estado_label.isVisibleTo(ventana)
         progreso = ventana.progreso.mapTo(ventana, QPoint())
         assert progreso.x() == margenes.left()
-        assert (
-            progreso.x() + ventana.progreso.width()
-            == ventana.width() - margenes.right()
+        assert progreso.x() + ventana.progreso.width() == (
+            ventana.panel_batches.mapTo(ventana, QPoint()).x()
+            + ventana.panel_batches.width()
         )
         assert ventana.reloj_label.parentWidget() is ventana.progreso
         cerrar = ventana.boton_cerrar.mapTo(ventana, QPoint())
@@ -89,23 +89,18 @@ def test_margen_avance_y_botones_coinciden_con_la_ventana_principal(
 def test_el_contenido_no_puede_estirar_la_ventana_fuera_del_escritorio(
     app, pantalla, tmp_path
 ):
-    """Aunque el layout pida más, el mínimo se queda en lo que hay.
-
-    Las dos filas de acciones siguen pidiendo más de 1024 px por la suma de
-    los rótulos, así que el tope de la pantalla es lo único que impide que
-    la ventana nazca más ancha que el escritorio.
-    """
+    """Los controles proporcionados caben sin exigir un escritorio mayor."""
     pantalla(1024, 768)
     ventana = AirVaultWindow(tmp_path)
     try:
         ventana.show()
         app.processEvents()
-        # Lo que el contenido pediría por su cuenta, sin acotar.
-        assert ventana.minimumSizeHint().width() > 1024, (
-            "el fixture ya no reproduce el caso: el contenido cabe de sobra"
-        )
-
-        assert ventana.minimumWidth() == 1024
+        assert ventana.minimumSizeHint().width() <= 1024
+        assert ventana.minimumWidth() <= 1024
+        for control in (ventana.boton_cerrar, ventana.boton_subir,
+                        ventana.boton_continuar, ventana.boton_reiniciar):
+            assert ventana.rect().contains(control.mapTo(ventana, control.rect().topLeft()))
+            assert ventana.rect().contains(control.mapTo(ventana, control.rect().bottomRight()))
     finally:
         ventana.close()
         app.processEvents()

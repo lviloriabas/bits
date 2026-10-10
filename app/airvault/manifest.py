@@ -12,11 +12,29 @@ import json
 import os
 import tempfile
 import time
+from functools import wraps
 from pathlib import Path
+from threading import RLock
 
 from app.airvault.model import Manifiesto
 
 MANIFIESTO_FILENAME = "manifiesto.json"
+_CANDADOS: dict[str, RLock] = {}
+_GUARDIA = RLock()
+_CAMPOS_CONFIRMACION = ("websearch_confirmado", "websearch_muestra", "websearch_detalle",
+                        "websearch_metodo", "websearch_batch_id", "websearch_revision", "websearch_cotejadas",
+                        "websearch_huella")
+
+
+def _serializar(funcion):
+    @wraps(funcion)
+    def ejecutar(manifiesto, carpeta_job):
+        clave = str(Path(carpeta_job).resolve()).casefold()
+        with _GUARDIA:
+            candado = _CANDADOS.setdefault(clave, RLock())
+        with candado:
+            return funcion(manifiesto, carpeta_job)
+    return ejecutar
 
 # Windows no deja reemplazar un archivo mientras otro lo tiene abierto: el
 # antivirus que lo revisa, el indexador de busqueda u otra ventana que lee
@@ -51,11 +69,22 @@ def cargar(carpeta_job: Path | str) -> Manifiesto:
     return manifiesto
 
 
+@_serializar
 def guardar(manifiesto: Manifiesto, carpeta_job: Path | str) -> Path:
     """Guarda el manifiesto de forma atomica y devuelve su ruta."""
     carpeta = Path(carpeta_job)
     carpeta.mkdir(parents=True, exist_ok=True)
     destino = ruta_manifiesto(carpeta)
+    if destino.is_file():
+        try:
+            actual = cargar(carpeta)
+        except (OSError, ValueError):
+            actual = None
+        if actual is not None and actual.websearch_revision > manifiesto.websearch_revision:
+            for campo in _CAMPOS_CONFIRMACION:
+                setattr(manifiesto, campo, getattr(actual, campo))
+            if actual.websearch_confirmado and not manifiesto.batch_id:
+                manifiesto.batch_id = actual.websearch_batch_id
     contenido = manifiesto.model_dump_json(indent=2)
     tmp_fd, tmp_name = tempfile.mkstemp(
         dir=str(carpeta), prefix=".manifiesto-", suffix=".tmp"
@@ -77,6 +106,29 @@ def guardar(manifiesto: Manifiesto, carpeta_job: Path | str) -> Path:
         Path(tmp_name).unlink(missing_ok=True)
         raise
     return destino
+
+
+@_serializar
+def guardar_confirmacion(datos: dict, carpeta_job: Path | str) -> Manifiesto:
+    """Actualiza la confirmacion sin reemplazar el avance de otro worker."""
+    manifiesto = cargar(carpeta_job)
+    if datos["websearch_confirmado"] and manifiesto.batch_id and (
+        manifiesto.batch_id.casefold() != datos["batch_id"].casefold()
+    ):
+        raise ValueError("La identidad del batch cambió durante la consulta.")
+    if datos["websearch_confirmado"]:
+        from app.airvault.confirmacion import huella_de_batch
+        if datos["websearch_huella"] != huella_de_batch(manifiesto, datos["batch_id"]):
+            raise ValueError("El contenido del batch cambió durante la consulta.")
+    for campo in _CAMPOS_CONFIRMACION:
+        setattr(manifiesto, campo, datos[campo])
+    if datos["websearch_confirmado"]:
+        from app.airvault.model import EstadoEtapa
+        manifiesto.batch_id = manifiesto.batch_id or datos["batch_id"]
+        manifiesto.etapa("subir").marcar(EstadoEtapa.HECHA, "Confirmado completo por identidad en Web Search")
+        manifiesto.no_encontrado_desde = ""
+    guardar(manifiesto, carpeta_job)
+    return manifiesto
 
 
 def existe(carpeta_job: Path | str) -> bool:

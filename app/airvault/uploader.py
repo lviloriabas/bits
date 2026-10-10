@@ -55,7 +55,12 @@ def serializar_cargas(funcion):
         if args and getattr(args[0], "sesion", None) is not None:
             sesion = args[0].sesion
         sesion = getattr(sesion, "sesion", sesion)
+        avisado = False
         while not _TURNO_CARGA.acquire(timeout=0.25):
+            avisar = kwargs.get("avisar")
+            if not avisado and callable(avisar):
+                avisar("Esperando turno para subir a AirVault", 0, 0)
+                avisado = True
             if getattr(sesion, "cancelada", False):
                 from app.airvault.session import SesionCancelada
 

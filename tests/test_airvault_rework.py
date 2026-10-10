@@ -1,4 +1,4 @@
-"""Regresiones de progreso, confirmacion por muestra y cargas rechazadas."""
+"""Regresiones de progreso, confirmacion por identidad y cargas rechazadas."""
 
 from types import SimpleNamespace
 
@@ -8,7 +8,6 @@ from app.airvault.config import AirVaultConfig
 from app.airvault.flujo import (BUSCANDO, COMPLETADO, PUBLICADO, SIN_SUBIR,
                                EstadoParte, Trabajo, estado_local)
 from app.airvault.model import EstadoEtapa, Manifiesto, Registro
-from app.airvault.websearch import Consulta, muestra_de
 from app.gui.airvault_window import AirVaultWindow, TrabajoAirVaultWorker
 
 
@@ -84,18 +83,15 @@ def test_repintar_preserva_seleccion_por_identidad(app, tmp_path):
 
 
 @pytest.mark.parametrize("cantidad", [1, 2, 5, 100, 1000])
-def test_busqueda_confirma_muestra_y_persiste(app, tmp_path, cantidad):
-    t = trabajo(tmp_path, "buscar", cantidad)
-    consultas = []
-    buscador = SimpleNamespace(renovar_consultas=lambda: None,
-                              publicada=lambda n: consultas.append(n) or Consulta(True))
+def test_busqueda_confirma_carga_completa_y_persiste(app, tmp_path, cantidad):
+    from tests.test_airvault_confirmacion import caso
+    t, buscador, _, consultas = caso(tmp_path, cantidad)
     worker = TrabajoAirVaultWorker("buscar_websearch", {
         "buscar_trabajos": [t], "buscador": buscador,
     })
     worker._conectar = lambda: None
     worker._buscar_websearch()
-    assert consultas == muestra_de([r.log_number for r in t.manifiesto.registros], 5)
-    assert len(consultas) == min(cantidad, 5)
+    assert len(consultas) == (cantidad + 49) // 50
     recargado = Trabajo.cargar(t.config, t.carpeta)
     assert recargado.manifiesto.websearch_confirmado
     assert recargado.manifiesto.etapa_hecha("subir")
@@ -103,18 +99,12 @@ def test_busqueda_confirma_muestra_y_persiste(app, tmp_path, cantidad):
     assert not estado_local(recargado).se_puede_subir
 
 
-@pytest.mark.parametrize("respuesta", [False, None])
-def test_muestra_parcial_o_sin_respuesta_no_confirma(app, tmp_path, respuesta):
-    t = trabajo(tmp_path, "parcial", 50)
-    llamadas = []
-
-    def consultar(n):
-        llamadas.append(n)
-        return Consulta(True if len(llamadas) < 5 else respuesta, "Sin respuesta" if respuesta is None else "")
-
+def test_respuesta_parcial_no_confirma(app, tmp_path):
+    from tests.test_airvault_confirmacion import caso
+    t, buscador, filas, _ = caso(tmp_path, 50)
+    filas.pop()
     worker = TrabajoAirVaultWorker("buscar_websearch", {
-        "buscar_trabajos": [t],
-        "buscador": SimpleNamespace(renovar_consultas=lambda: None, publicada=consultar),
+        "buscar_trabajos": [t], "buscador": buscador,
     })
     worker._conectar = lambda: None
     worker._buscar_websearch()
@@ -123,15 +113,20 @@ def test_muestra_parcial_o_sin_respuesta_no_confirma(app, tmp_path, respuesta):
 
 
 def test_la_busqueda_no_repite_confirmados(app, tmp_path):
-    t = trabajo(tmp_path, "confirmado")
+    from tests.test_airvault_confirmacion import caso
+    t, buscador, _, consultas = caso(tmp_path)
     t.manifiesto.websearch_confirmado = "2026-10-09T10:00:00"
+    t.manifiesto.websearch_metodo = "completo_por_identidad"
+    t.manifiesto.websearch_batch_id = "B01"
+    from app.airvault.confirmacion import huella_de_batch
+    t.manifiesto.websearch_huella = huella_de_batch(t.manifiesto)
+    t.manifiesto.websearch_cotejadas = len(t.manifiesto.bitacoras())
     worker = TrabajoAirVaultWorker("buscar_websearch", {
-        "buscar_trabajos": [t],
-        "buscador": SimpleNamespace(renovar_consultas=lambda: None,
-                                   publicada=lambda n: pytest.fail("No debe repetir la consulta")),
+        "buscar_trabajos": [t], "buscador": buscador,
     })
     worker._conectar = lambda: None
     worker._buscar_websearch()
+    assert consultas == []
 
 
 @pytest.mark.parametrize("etapa", ["Upload/", "FinishUpload"])
@@ -208,3 +203,128 @@ def test_muestra_confirmada_no_esconde_un_error_de_upload(app, tmp_path):
     ventana._al_fallar("No respondió AirVault")
     ventana._al_terminar()
     assert ventana.progreso.value() < 100
+
+
+def test_sidebar_pequeno_crece_solo_cuando_el_usuario_lo_redimensiona(app, tmp_path):
+    ventana = AirVaultWindow(tmp_path)
+    ventana.show()
+    app.processEvents()
+    assert 220 <= ventana.panel_batches.width() <= 240
+    ancho = ventana.panel_batches.width()
+    ventana.resize(1280, 720)
+    app.processEvents()
+    assert ancho <= ventana.panel_batches.width() <= 240
+    ventana.divisor_batches.setSizes([350, 900])
+    app.processEvents()
+    assert ventana.panel_batches.width() > ancho
+    assert ventana.panel_batches.isAncestorOf(ventana.progreso)
+
+
+def test_filtros_ocultan_solo_la_vista_y_conservan_la_meta(app, tmp_path):
+    from app.airvault.flujo import INDEXADO
+    ventana = AirVaultWindow(tmp_path)
+    terminado, indexado, pendiente = [trabajo(tmp_path, n) for n in ("terminado", "indexado", "pendiente")]
+    ventana._estados = [EstadoParte(terminado, COMPLETADO), EstadoParte(indexado, INDEXADO),
+                        EstadoParte(pendiente, SIN_SUBIR)]
+    antes = ventana._avance_global()
+    ventana._pintar_lotes()
+    assert ventana.lotes.count() == 3
+    ventana.solo_activos_check.setChecked(True)
+    assert ventana.lotes.count() == 2
+    ventana.ocultar_indexados_check.setChecked(True)
+    assert ventana.lotes.count() == 1
+    assert ventana._ejecucion() == [terminado, indexado, pendiente]
+    assert ventana._avance_global() == antes
+    assert ventana._firma_de_fin() is None
+    ventana._habilitar(False)
+    assert ventana.solo_activos_check.isEnabled() and ventana.ocultar_indexados_check.isEnabled()
+    otra = AirVaultWindow(tmp_path)
+    assert otra.solo_activos_check.isChecked() and otra.ocultar_indexados_check.isChecked()
+
+
+def test_ocultar_indexados_sin_completar_conserva_cien_por_ciento(app, tmp_path):
+    from app.airvault.flujo import INDEXADO
+    ventana = AirVaultWindow(tmp_path)
+    t = trabajo(tmp_path, "indexado")
+    ventana._estados = [EstadoParte(t, INDEXADO)]
+    ventana.completar_check.setChecked(False)
+    ventana._fin_pendiente = True
+    ventana._anunciar_fin()
+    ventana.ocultar_indexados_check.setChecked(True)
+    assert ventana.lotes.count() == 0
+    assert ventana.progreso.value() == 100
+
+
+def test_revision_periodica_recorre_dos_antiguos_sin_bloquear_una_subida(app, tmp_path, monkeypatch):
+    ventana = AirVaultWindow(tmp_path)
+    ventana._trabajos = [trabajo(tmp_path, n) for n in ("primero", "segundo", "tercero")]
+    for t in ventana._trabajos:
+        t.manifiesto.etapa("subir").marcar(EstadoEtapa.HECHA)
+    ventana._trabajos[0].manifiesto.websearch_revision = "2026-10-09T10:00:00"
+    ventana.auto_check.setChecked(True)
+    ventana._ajustar_confirmacion()
+    assert ventana._confirmador.isActive()
+    lanzamientos = []
+    monkeypatch.setattr(ventana, "_lanzar", lambda modo, estado: lanzamientos.append((modo, dict(estado))))
+    monkeypatch.setattr(ventana, "hilo", lambda: object())
+    ventana._confirmar_solo()
+    assert not lanzamientos
+    monkeypatch.setattr(ventana, "hilo", lambda: None)
+    ventana._confirmar_solo()
+    modo, estado = lanzamientos[0]
+    assert modo == "buscar_websearch"
+    assert estado["buscar_trabajos"] == ventana._trabajos[1:]
+    assert estado["confirmacion_automatica"] and estado["limite_confirmacion"] == 2
+    ventana.auto_check.setChecked(False)
+    assert not ventana._confirmador.isActive()
+
+
+def test_busqueda_manual_incluye_todos_los_batches_ocultos(app, tmp_path, monkeypatch):
+    ventana = AirVaultWindow(tmp_path)
+    ventana._trabajos = [trabajo(tmp_path, n) for n in ("a", "b", "c")]
+    ventana._estados = [EstadoParte(t, COMPLETADO) for t in ventana._trabajos]
+    ventana.solo_activos_check.setChecked(True)
+    assert ventana.lotes.count() == 0
+    peticiones = []
+    monkeypatch.setattr(ventana, "_encolar", lambda *args: peticiones.append(args))
+    ventana._buscar_websearch()
+    assert peticiones[0][1] == ventana._trabajos
+
+
+def test_confirmacion_automatica_no_hace_retroceder_el_progreso_final(app, tmp_path, monkeypatch):
+    from app.airvault.flujo import INDEXADO
+    ventana = AirVaultWindow(tmp_path)
+    t = trabajo(tmp_path, "indexado")
+    ventana._estados = [EstadoParte(t, INDEXADO)]
+    ventana._fin_pendiente = True
+    ventana._anunciar_fin()
+    assert ventana.progreso.value() == 100
+    monkeypatch.setattr(ventana, "hilo", lambda: SimpleNamespace(modo="buscar_websearch",
+                                                               estado={"confirmacion_automatica": True}))
+    ventana._pintar_avance()
+    assert ventana.progreso.value() == 100
+    ventana._al_fallar("Web Search no respondió")
+    assert ventana.progreso.value() == 100
+    assert "Web Search pendiente" in ventana.resumen.text()
+
+
+def test_confirmar_un_batch_indexado_mantiene_el_progreso_final(app, tmp_path, monkeypatch):
+    from app.airvault.flujo import INDEXADO
+    from app.airvault.confirmacion import huella_de_batch
+    ventana = AirVaultWindow(tmp_path)
+    t = trabajo(tmp_path, "indexado")
+    ventana._trabajos = [t]
+    ventana._estados = [EstadoParte(t, INDEXADO)]
+    ventana._fin_pendiente = True
+    ventana._anunciar_fin()
+    t.manifiesto.batch_id = "B01"
+    t.manifiesto.websearch_confirmado = "2026-10-09T10:00:00"
+    t.manifiesto.websearch_metodo = "completo_por_identidad"
+    t.manifiesto.websearch_batch_id = "b01"
+    t.manifiesto.websearch_cotejadas = len(t.manifiesto.bitacoras())
+    t.manifiesto.websearch_huella = huella_de_batch(t.manifiesto)
+    monkeypatch.setattr(ventana, "hilo", lambda: SimpleNamespace(modo="buscar_websearch",
+                                                               estado={"confirmacion_automatica": True}))
+    ventana._al_buscar_websearch({"resultados": [(t, True)], "automatico": True})
+    assert ventana._estados[0].estado == PUBLICADO
+    assert ventana.progreso.value() == 100

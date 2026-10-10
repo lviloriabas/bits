@@ -1,7 +1,7 @@
 """Lista lateral de batches con seleccion multiple y acciones de la cola."""
 
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtWidgets import QAbstractItemView, QListWidget, QListWidgetItem
+from PySide6.QtWidgets import QAbstractItemView, QListView, QListWidget, QListWidgetItem
 
 
 class BatchesSidebar(QListWidget):
@@ -18,6 +18,8 @@ class BatchesSidebar(QListWidget):
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setWordWrap(True)
+        self.setResizeMode(QListView.ResizeMode.Adjust)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setSpacing(3)
         self.setMinimumWidth(205)
 
