@@ -1805,7 +1805,7 @@ class AirVaultWindow(QDialog):
 
     def _build_ui(self) -> None:
         cuerpo = QVBoxLayout(self)
-        margen = max(8, self._densidad.window_margin)
+        margen = max(SPACE_L, self._densidad.window_margin)
         cuerpo.setContentsMargins(margen, margen, margen, margen)
         cuerpo.setSpacing(self._densidad.root_spacing)
         self._root_layout = cuerpo

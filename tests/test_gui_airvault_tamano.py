@@ -14,6 +14,7 @@ from PySide6.QtCore import QPoint, QRect
 
 from app.gui import airvault_window as modulo
 from app.gui.airvault_window import AirVaultWindow
+from app.gui.tokens import SPACE_L
 
 
 @pytest.fixture
@@ -51,7 +52,7 @@ def test_la_ventana_cabe_en_la_pantalla(
         app.processEvents()
 
 
-def test_margen_avance_y_botones_coinciden_con_la_ventana_principal(
+def test_margen_exterior_alinea_avance_y_botones(
     app, pantalla, tmp_path
 ):
     pantalla(1920, 1080)
@@ -67,7 +68,7 @@ def test_margen_avance_y_botones_coinciden_con_la_ventana_principal(
             margenes.top(),
             margenes.right(),
             margenes.bottom(),
-        ) == (8, 8, 8, 8)
+        ) == (SPACE_L, SPACE_L, SPACE_L, SPACE_L)
         assert not ventana.estado_label.isVisibleTo(ventana)
         progreso = ventana.progreso.mapTo(ventana, QPoint())
         assert progreso.x() == margenes.left()
