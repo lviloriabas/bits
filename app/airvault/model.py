@@ -187,8 +187,8 @@ class Manifiesto(BaseModel):
     # lo que quedo terminado sin que nadie interviniera de lo que ya estaba
     # cerrado en AirVault cuando se encontro.
     completado_automatico: bool = False
-    # Confirmacion completa por identidad en Web Search, independiente del cierre.
-    # La muestra antigua se conserva para leer manifiestos anteriores.
+    # Confirmacion de publicacion por muestra distribuida en Web Search.
+    # El metodo distingue esta prueba del cotejo completo de versiones anteriores.
     websearch_confirmado: str = ""
     websearch_muestra: List[str] = Field(default_factory=list)
     websearch_detalle: str = ""

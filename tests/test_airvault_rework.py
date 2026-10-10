@@ -84,6 +84,7 @@ def test_repintar_preserva_seleccion_por_identidad(app, tmp_path):
 
 @pytest.mark.parametrize("cantidad", [1, 2, 5, 100, 1000])
 def test_busqueda_confirma_carga_completa_y_persiste(app, tmp_path, cantidad):
+    from app.airvault.confirmacion import muestra_de_batch
     from tests.test_airvault_confirmacion import caso
     t, buscador, _, consultas = caso(tmp_path, cantidad)
     worker = TrabajoAirVaultWorker("buscar_websearch", {
@@ -91,11 +92,12 @@ def test_busqueda_confirma_carga_completa_y_persiste(app, tmp_path, cantidad):
     })
     worker._conectar = lambda: None
     worker._buscar_websearch()
-    assert len(consultas) == (cantidad + 49) // 50
+    assert len(consultas) == len(muestra_de_batch(t.manifiesto))
     recargado = Trabajo.cargar(t.config, t.carpeta)
     assert recargado.manifiesto.websearch_confirmado
     assert recargado.manifiesto.etapa_hecha("subir")
-    assert estado_local(recargado).estado == PUBLICADO
+    assert recargado.manifiesto.etapa_hecha("completar")
+    assert estado_local(recargado).estado == COMPLETADO
     assert not estado_local(recargado).se_puede_subir
 
 
@@ -110,6 +112,76 @@ def test_respuesta_parcial_no_confirma(app, tmp_path):
     worker._buscar_websearch()
     assert not t.manifiesto.websearch_confirmado
     assert not t.manifiesto.etapa_hecha("subir")
+
+
+@pytest.mark.parametrize("con_sesion", [True, False])
+def test_confirmar_solo_consulta_websearch_y_no_prepara_el_cliente_de_index(app, tmp_path, monkeypatch, con_sesion):
+    from app.airvault.websearch import Buscador
+    from tests.test_airvault_confirmacion import caso
+    t, b, _, consultas = caso(tmp_path, 1000)
+    config = t.config.with_overrides(ruta_websearch=b.ruta, parametros_websearch=b._plantilla)
+    rutas = []
+    get_original = b.sesion.get
+
+    def get(ruta, parametros):
+        rutas.append(ruta)
+        return get_original(ruta, parametros)
+
+    b.sesion.get = get
+    estado = {"buscar_trabajos": [t], "config": config}
+    if con_sesion:
+        estado["sesion"] = b.sesion
+    else:
+        monkeypatch.setattr("app.airvault.session.abrir_sesion", lambda *args, **kwargs: b.sesion)
+    worker = TrabajoAirVaultWorker("buscar_websearch", estado)
+    worker._preparar_buscador = lambda: estado.update(buscador=Buscador(
+        estado["sesion"], config, _ruta=b.ruta, _plantilla=b._plantilla))
+    worker._conectar = lambda: pytest.fail("La confirmacion no consulta Web Index")
+    worker._buscar_websearch()
+    assert len(consultas) == 15
+    assert all(ruta.startswith("/zfp/") for ruta in rutas)
+    assert t.manifiesto.etapa_hecha("completar")
+    assert "cliente" not in estado
+
+
+def test_la_muestra_completa_la_fila_y_el_progreso_sin_otra_revision(app, tmp_path, monkeypatch):
+    from app.airvault.flujo import INDEXADO
+    from tests.test_airvault_confirmacion import caso
+    t, b, _, _ = caso(tmp_path)
+    ventana = AirVaultWindow(tmp_path)
+    ventana._trabajos = [t]
+    ventana._estados = [EstadoParte(t, INDEXADO)]
+    ventana.completar_check.setChecked(True)
+    worker = TrabajoAirVaultWorker("buscar_websearch", {"buscar_trabajos": [t], "buscador": b})
+    worker.buscado.connect(ventana._al_buscar_websearch)
+    worker._buscar_websearch()
+    monkeypatch.setattr(ventana, "_comprobar", lambda: pytest.fail("No se vuelve a revisar Web Index"))
+    ventana._al_terminar()
+    assert ventana._estados[0].estado == COMPLETADO
+    assert ventana.progreso.value() == 100
+    assert ventana.estado_label.text() == "Proceso terminado"
+
+
+@pytest.mark.parametrize("automatico", [True, False])
+def test_la_consulta_manual_puede_renovar_su_sesion_de_lectura(app, tmp_path, automatico):
+    from app.airvault.websearch import Buscador
+    from tests.test_airvault_confirmacion import caso
+    t, b, _, _ = caso(tmp_path, 10)
+    clones = []
+
+    def clonar(renovable):
+        clones.append(renovable)
+        return SimpleNamespace(config=t.config, get=b.sesion.get,
+                               http=SimpleNamespace(close=lambda: None))
+
+    buscador = Buscador(SimpleNamespace(clonar=clonar), t.config,
+                        _ruta=b.ruta, _plantilla=b._plantilla)
+    worker = TrabajoAirVaultWorker("buscar_websearch", {
+        "buscar_trabajos": [t], "buscador": buscador, "confirmacion_automatica": automatico,
+    })
+    worker._buscar_websearch()
+    assert clones == [not automatico]
+    assert t.manifiesto.etapa_hecha("completar")
 
 
 def test_la_busqueda_no_repite_confirmados(app, tmp_path):
@@ -221,25 +293,30 @@ def test_sidebar_pequeno_crece_solo_cuando_el_usuario_lo_redimensiona(app, tmp_p
 
 
 def test_filtros_ocultan_solo_la_vista_y_conservan_la_meta(app, tmp_path):
-    from app.airvault.flujo import INDEXADO
+    from app.airvault.flujo import CANCELADO, INDEXADO
     ventana = AirVaultWindow(tmp_path)
-    terminado, indexado, pendiente = [trabajo(tmp_path, n) for n in ("terminado", "indexado", "pendiente")]
+    terminado, indexado, pendiente, cancelado = [trabajo(tmp_path, n) for n in ("terminado", "indexado", "pendiente", "cancelado")]
     ventana._estados = [EstadoParte(terminado, COMPLETADO), EstadoParte(indexado, INDEXADO),
-                        EstadoParte(pendiente, SIN_SUBIR)]
+                        EstadoParte(pendiente, SIN_SUBIR), EstadoParte(cancelado, CANCELADO)]
     antes = ventana._avance_global()
     ventana._pintar_lotes()
-    assert ventana.lotes.count() == 3
-    ventana.solo_activos_check.setChecked(True)
-    assert ventana.lotes.count() == 2
+    assert ventana.ocultar_indexados_check.text() == "Ocultar batches indexados"
+    assert ventana.ocultar_completados_check.text() == "Ocultar batches completados"
+    assert ventana.lotes.count() == 4
     ventana.ocultar_indexados_check.setChecked(True)
-    assert ventana.lotes.count() == 1
-    assert ventana._ejecucion() == [terminado, indexado, pendiente]
+    assert [p.trabajo for p in ventana._partes_en_cola()] == [terminado, pendiente, cancelado]
+    ventana.ocultar_indexados_check.setChecked(False)
+    ventana.ocultar_completados_check.setChecked(True)
+    assert [p.trabajo for p in ventana._partes_en_cola()] == [indexado, pendiente, cancelado]
+    ventana.ocultar_indexados_check.setChecked(True)
+    assert [p.trabajo for p in ventana._partes_en_cola()] == [pendiente, cancelado]
+    assert ventana._ejecucion() == [terminado, indexado, pendiente, cancelado]
     assert ventana._avance_global() == antes
     assert ventana._firma_de_fin() is None
     ventana._habilitar(False)
-    assert ventana.solo_activos_check.isEnabled() and ventana.ocultar_indexados_check.isEnabled()
+    assert ventana.ocultar_completados_check.isEnabled() and ventana.ocultar_indexados_check.isEnabled()
     otra = AirVaultWindow(tmp_path)
-    assert otra.solo_activos_check.isChecked() and otra.ocultar_indexados_check.isChecked()
+    assert otra.ocultar_completados_check.isChecked() and otra.ocultar_indexados_check.isChecked()
 
 
 def test_ocultar_indexados_sin_completar_conserva_cien_por_ciento(app, tmp_path):
@@ -283,7 +360,7 @@ def test_busqueda_manual_incluye_todos_los_batches_ocultos(app, tmp_path, monkey
     ventana = AirVaultWindow(tmp_path)
     ventana._trabajos = [trabajo(tmp_path, n) for n in ("a", "b", "c")]
     ventana._estados = [EstadoParte(t, COMPLETADO) for t in ventana._trabajos]
-    ventana.solo_activos_check.setChecked(True)
+    ventana.ocultar_completados_check.setChecked(True)
     assert ventana.lotes.count() == 0
     peticiones = []
     monkeypatch.setattr(ventana, "_encolar", lambda *args: peticiones.append(args))

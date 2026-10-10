@@ -4185,15 +4185,21 @@ def estado_local(trabajo: "Trabajo") -> EstadoParte:
 
 
 def websearch_confirmacion_valida(manifiesto) -> bool:
-    identidad = bool(getattr(manifiesto, "websearch_confirmado", "")
-                and getattr(manifiesto, "websearch_metodo", "") == "completo_por_identidad"
-                and getattr(manifiesto, "websearch_batch_id", "").casefold() == str(manifiesto.batch_id or "").casefold()
-                and manifiesto.batch_id)
-    if not identidad:
+    from app.airvault.confirmacion import METODO_MUESTRA, huella_de_batch, muestra_de_batch
+
+    if not getattr(manifiesto, "websearch_confirmado", ""):
         return False
-    from app.airvault.confirmacion import huella_de_batch
-    return (getattr(manifiesto, "websearch_huella", "") == huella_de_batch(manifiesto)
-            and getattr(manifiesto, "websearch_cotejadas", 0) == len(manifiesto.bitacoras()))
+    if (getattr(manifiesto, "websearch_huella", "") != huella_de_batch(manifiesto)
+            or getattr(manifiesto, "websearch_batch_id", "").casefold()
+            != str(manifiesto.batch_id or "").casefold()):
+        return False
+    if manifiesto.websearch_metodo == METODO_MUESTRA:
+        muestra = muestra_de_batch(manifiesto)
+        return bool(muestra and manifiesto.websearch_muestra == muestra
+                    and manifiesto.websearch_cotejadas == len(muestra))
+    return bool(manifiesto.websearch_metodo == "completo_por_identidad"
+                and manifiesto.batch_id
+                and manifiesto.websearch_cotejadas == len(manifiesto.bitacoras()))
 
 
 def _nombre_embebido_empty_batch(cliente, lote: ResumenLote) -> str:

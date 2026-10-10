@@ -24,6 +24,29 @@ _GUARDIA = RLock()
 _CAMPOS_CONFIRMACION = ("websearch_confirmado", "websearch_muestra", "websearch_detalle",
                         "websearch_metodo", "websearch_batch_id", "websearch_revision", "websearch_cotejadas",
                         "websearch_huella")
+_CIERRE_POR_MUESTRA = "Confirmado por muestra en Web Search"
+
+
+def _aplicar_cierre_por_muestra(manifiesto):
+    """Mantiene el cierre local ligado a la muestra y al contenido comprobado."""
+    from app.airvault.confirmacion import METODO_MUESTRA
+
+    if manifiesto.websearch_metodo != METODO_MUESTRA:
+        return
+    from app.airvault.flujo import websearch_confirmacion_valida
+    from app.airvault.model import EstadoEtapa
+    if websearch_confirmacion_valida(manifiesto):
+        subida = manifiesto.etapas.get("subir")
+        if subida is None or subida.estado is not EstadoEtapa.HECHA:
+            manifiesto.etapa("subir").marcar(EstadoEtapa.HECHA, _CIERRE_POR_MUESTRA)
+        cierre = manifiesto.etapas.get("completar")
+        if cierre is None or cierre.estado is not EstadoEtapa.HECHA:
+            manifiesto.etapa("completar").marcar(EstadoEtapa.HECHA, _CIERRE_POR_MUESTRA)
+        manifiesto.no_encontrado_desde = ""
+    else:
+        cierre = manifiesto.etapas.get("completar")
+        if cierre and cierre.detalle == _CIERRE_POR_MUESTRA:
+            manifiesto.etapas.pop("completar")
 
 
 def _serializar(funcion):
@@ -85,6 +108,7 @@ def guardar(manifiesto: Manifiesto, carpeta_job: Path | str) -> Path:
                 setattr(manifiesto, campo, getattr(actual, campo))
             if actual.websearch_confirmado and not manifiesto.batch_id:
                 manifiesto.batch_id = actual.websearch_batch_id
+    _aplicar_cierre_por_muestra(manifiesto)
     contenido = manifiesto.model_dump_json(indent=2)
     tmp_fd, tmp_name = tempfile.mkstemp(
         dir=str(carpeta), prefix=".manifiesto-", suffix=".tmp"
@@ -125,7 +149,7 @@ def guardar_confirmacion(datos: dict, carpeta_job: Path | str) -> Manifiesto:
     if datos["websearch_confirmado"]:
         from app.airvault.model import EstadoEtapa
         manifiesto.batch_id = manifiesto.batch_id or datos["batch_id"]
-        manifiesto.etapa("subir").marcar(EstadoEtapa.HECHA, "Confirmado completo por identidad en Web Search")
+        manifiesto.etapa("subir").marcar(EstadoEtapa.HECHA, "Confirmado en Web Search")
         manifiesto.no_encontrado_desde = ""
     guardar(manifiesto, carpeta_job)
     return manifiesto

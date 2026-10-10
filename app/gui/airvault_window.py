@@ -158,8 +158,8 @@ def leyenda_de_estados() -> list[tuple[str, Optional[str], str]]:
         (INCOMPLETO, "Quedan páginas en amarillo: se reintentan solas o se "
                      "corrigen a mano."),
         (COMPLETADO, "Se cerró con «Complete» y pasó a Web Search."),
-        (PUBLICADO, "Todas sus bitácoras aparecen en Web Search con el nombre y el ID del mismo batch. "
-                     "Se confirmó la carga completa y no se vuelve a enviar."),
+        (PUBLICADO, "Su publicación se confirmó en Web Search. "
+                     "No se vuelve a enviar."),
         (NO_ENCONTRADO, "AirVault no publicó la carga al agotar la espera y la cola no la contiene. "
                         "Se conservan sus archivos y se puede reenviar a mano."),
         (DESCUADRADO, "AirVault tiene otra cantidad de páginas. No se toca "
@@ -792,20 +792,27 @@ class TrabajoAirVaultWorker(QThread):
         )
 
     def _buscar_websearch(self) -> None:
-        """Verifica todas las bitacoras de cada batch mediante paginas de resultados."""
+        """Busca una muestra de cada batch y marca su cierre local al encontrarla."""
         from datetime import datetime
-        from app.airvault.confirmacion import huella_de_batch, verificar_batch
+        from app.airvault.confirmacion import METODO_MUESTRA, huella_de_batch, verificar_batch
         from app.airvault.flujo import websearch_confirmacion_valida
         from app.airvault.manifest import guardar_confirmacion
 
-        self._conectar()
+        if self.estado.get("buscador") is None:
+            if self.estado.get("sesion") is None:
+                from app.airvault.session import abrir_sesion
+                self.estado["sesion"] = abrir_sesion(
+                    self.estado["config"], cookie=self.estado.get("cookie") or None,
+                    avisar=lambda texto: self._avisar(texto, 0, 0),
+                )
+            self._preparar_buscador()
         buscador = self.estado.get("buscador")
         if buscador is None:
             raise RuntimeError("No se pudo preparar Web Search. Vuelva a intentarlo.")
         original = buscador
         if callable(getattr(buscador.sesion, "clonar", None)):
             from dataclasses import replace
-            lectura = buscador.sesion.clonar(renovable=False)
+            lectura = buscador.sesion.clonar(renovable=not self.estado.get("confirmacion_automatica"))
             lectura.config = lectura.config.with_overrides(timeout_s=5.0, reintentos=1)
             buscador = replace(buscador, sesion=lectura)
             self.finished.connect(lectura.http.close)
@@ -817,15 +824,15 @@ class TrabajoAirVaultWorker(QThread):
             if trabajo.manifiesto.cancelado:
                 continue
             resultado = verificar_batch(buscador, trabajo, self._avisar,
-                                        presupuesto_s=30.0 if self.estado.get("confirmacion_automatica") else 120.0,
+                                        presupuesto_s=60.0,
                                         cancelado=self.hay_que_parar)
             if buscador is not original:
                 for campo in ("_ruta", "_plantilla", "_probado", "_sin_control", "_motivo", "_candidatas", "_tanteos"):
                     setattr(original, campo, getattr(buscador, campo))
             momento = datetime.now().isoformat(timespec="microseconds")
             datos = dict(websearch_confirmado=momento if resultado.confirmado else "",
-                         websearch_muestra=[], websearch_detalle=resultado.detalle,
-                         websearch_metodo="completo_por_identidad",
+                         websearch_muestra=list(resultado.muestra), websearch_detalle=resultado.detalle,
+                         websearch_metodo=METODO_MUESTRA,
                          websearch_batch_id=resultado.batch_id,
                          websearch_revision=momento, websearch_cotejadas=resultado.encontradas,
                          websearch_huella=huella_de_batch(trabajo.manifiesto, resultado.batch_id),
@@ -842,6 +849,7 @@ class TrabajoAirVaultWorker(QThread):
             if resultado.confirmado:
                 trabajo.manifiesto.batch_id = actual.batch_id
                 trabajo.manifiesto.etapas["subir"] = actual.etapa("subir")
+                trabajo.manifiesto.etapas["completar"] = actual.etapa("completar")
                 trabajo.manifiesto.no_encontrado_desde = ""
             resultados.append((trabajo, resultado.confirmado))
         self.buscado.emit({"resultados": resultados, "automatico": bool(self.estado.get("confirmacion_automatica"))})
@@ -1726,12 +1734,12 @@ class AirVaultWindow(QDialog):
         # ya filtrada.
         recordar(AIRVAULT, "solo_ejecucion", self.solo_ejecucion_check)
         filtros.addWidget(self.solo_ejecucion_check)
-        self.solo_activos_check = QCheckBox("Solo batches activos")
-        self.solo_activos_check.setToolTip("Oculta los batches completados y cancelados. No modifica la cola de trabajo.")
         self.ocultar_indexados_check = QCheckBox("Ocultar batches indexados")
-        self.ocultar_indexados_check.setToolTip("Oculta los batches con todas sus bitácoras ya indexadas, incluso sin completar el batch.")
-        for clave, control in (("solo_activos", self.solo_activos_check),
-                               ("ocultar_indexados", self.ocultar_indexados_check)):
+        self.ocultar_indexados_check.setToolTip("Oculta los batches con el indexado terminado y el batch aún abierto.")
+        self.ocultar_completados_check = QCheckBox("Ocultar batches completados")
+        self.ocultar_completados_check.setToolTip("Oculta los batches completados, también los confirmados en Web Search.")
+        for clave, control in (("ocultar_indexados", self.ocultar_indexados_check),
+                               ("ocultar_completados", self.ocultar_completados_check)):
             recordar(AIRVAULT, clave, control)
             control.toggled.connect(self._al_filtrar_vista)
             filtros.addWidget(control)
@@ -2074,8 +2082,9 @@ class AirVaultWindow(QDialog):
         batch_menu.setToolTipsVisible(True)
         self.boton_buscar_websearch = batch_menu.addAction("Verificar subidas en Web Search")
         self.boton_buscar_websearch.setToolTip(
-            "Coteja todas las bitácoras de cada batch con resultados paginados. "
-            "Exige nombre e identidad del batch para evitar confirmar otra copia."
+            "Busca el 2 % de las bitácoras, con un mínimo de 7 y un máximo de 15, "
+            "repartidas entre el inicio y el final de cada batch. "
+            "Si aparecen en Web Search, lo marca como completado automáticamente."
         )
         self.boton_buscar_websearch.triggered.connect(self._buscar_websearch)
         batch_menu.addSeparator()
@@ -2208,7 +2217,7 @@ class AirVaultWindow(QDialog):
             )
         confirmados = sum(confirmado for _, confirmado in resultados)
         self.resumen.setText(
-            f"Web Search: {confirmados} de {len(resultados)} batches confirmados completos. "
+            f"Web Search: {confirmados} de {len(resultados)} batches confirmados por muestra. "
             "Los pendientes dependen de la publicación de AirVault."
         )
         terminado = self._fin_confirmado is not None
@@ -4189,12 +4198,12 @@ class AirVaultWindow(QDialog):
         }
 
     def _partes_en_cola(self) -> list:
-        from app.airvault.flujo import (AUTOCOMPLETADO, CANCELADO, COMPLETADO, INDEXADO, PUBLICADO)
+        from app.airvault.flujo import (AUTOCOMPLETADO, COMPLETADO, INDEXADO, PUBLICADO)
         partes = self._partes_del_alcance()
-        if self.solo_activos_check.isChecked():
-            partes = [p for p in partes if p.estado not in (COMPLETADO, AUTOCOMPLETADO, PUBLICADO, CANCELADO)]
         if self.ocultar_indexados_check.isChecked():
-            partes = [p for p in partes if p.estado not in (INDEXADO, COMPLETADO, AUTOCOMPLETADO, PUBLICADO)]
+            partes = [p for p in partes if p.estado != INDEXADO]
+        if self.ocultar_completados_check.isChecked():
+            partes = [p for p in partes if p.estado not in (COMPLETADO, AUTOCOMPLETADO, PUBLICADO)]
         return partes
 
     def _partes_del_alcance(self) -> list:

@@ -1,16 +1,20 @@
-"""Comprueba una entrega completa por su identidad, con lecturas paginadas."""
+"""Confirma la publicacion de un batch con una muestra distribuida."""
 
-from collections import Counter
 from dataclasses import dataclass, is_dataclass, replace
 import json
 import hashlib
-import math
 import re
 import time
 
 from app.airvault.config import CAMPO_BATCH_NAME, CAMPO_LOG_NUMBER, CAMPO_MATRICULA
 from app.airvault.session import SesionCancelada
-from app.airvault.websearch import PLANTILLAS, _b64
+from app.airvault.websearch import PLANTILLAS
+
+
+METODO_MUESTRA = "muestra_distribuida"
+PORCENTAJE_MUESTRA = 2
+MINIMO_MUESTRA = 7
+MAXIMO_MUESTRA = 15
 
 
 @dataclass(frozen=True)
@@ -20,6 +24,31 @@ class ConfirmacionBatch:
     esperadas: int
     detalle: str
     batch_id: str = ""
+    muestra: tuple[str, ...] = ()
+
+
+def _muestra(manifiesto):
+    """Elige identidades distintas desde el principio hasta el final.
+
+    Se consulta el 2 % con un minimo de siete y un maximo de quince. Es una
+    senal de publicacion del batch, no una auditoria de todas sus paginas.
+    Los extremos permiten detectar una publicacion que solo llego al inicio.
+    """
+    unicos = list(dict.fromkeys(
+        (str(r.log_number).strip(), r.matricula.strip().upper())
+        for r in manifiesto.bitacoras()
+        if re.fullmatch(r"\d{7}", str(r.log_number).strip())
+    ))
+    cantidad = min(len(unicos), MAXIMO_MUESTRA,
+                   max(MINIMO_MUESTRA, (len(unicos) * PORCENTAJE_MUESTRA + 99) // 100))
+    if len(unicos) <= cantidad:
+        return unicos
+    return [unicos[round(i * (len(unicos) - 1) / (cantidad - 1))]
+            for i in range(cantidad)]
+
+
+def muestra_de_batch(manifiesto) -> list[str]:
+    return [numero for numero, _matricula in _muestra(manifiesto)]
 
 
 def _filas(datos):
@@ -81,121 +110,89 @@ class _LecturaAcotada:
         return self._sesion.get(*args, **kwargs)
 
 
-def verificar_batch(buscador, trabajo, avisar=None, presupuesto_s=120.0, cancelado=lambda: False) -> ConfirmacionBatch:
-    """Lee por Batch Name, no una peticion por cada bitacora.
-
-    Solo cuenta filas del nombre exacto, con su numero de bitacora. Un ID
-    de batch contradictorio, una matricula distinta o resultados repetidos
-    no pueden completar el recuento de otro batch.
-    """
+def verificar_batch(buscador, trabajo, avisar=None, presupuesto_s=60.0, cancelado=lambda: False) -> ConfirmacionBatch:
+    """Busca solo la muestra y confirma cuando aparece toda en Web Search."""
     manifiesto = trabajo.manifiesto
-    registros = manifiesto.bitacoras()
-    esperadas = len(registros)
-    numeros = [str(r.log_number).strip() for r in registros]
-    if not esperadas or any(not re.fullmatch(r"\d{7}", n) for n in numeros):
-        return ConfirmacionBatch(False, 0, esperadas, "Faltan números válidos para comprobar todas las bitácoras.")
+    muestra = _muestra(manifiesto)
+    numeros = tuple(numero for numero, _matricula in muestra)
+    esperadas = len(muestra)
+    encontradas = 0
+    identidad = str(manifiesto.batch_id or "").casefold()
+
+    def resultado(confirmado, detalle):
+        return ConfirmacionBatch(confirmado, encontradas, esperadas, detalle,
+                                 identidad, numeros)
+
+    if not muestra:
+        return resultado(False, "Faltan números válidos para buscar una muestra de bitácoras.")
     inicio = time.monotonic()
     original = buscador
     if is_dataclass(buscador):
         buscador = replace(buscador, sesion=_LecturaAcotada(buscador.sesion, inicio + presupuesto_s, cancelado))
+    if cancelado():
+        raise SesionCancelada("Se canceló la verificación en Web Search")
     try:
         if not buscador.ruta and not buscador.preparar() and not buscador._adoptar_ruta(numeros[0]):
             if cancelado() or getattr(buscador.sesion, "cancelada", False):
                 raise SesionCancelada("Se canceló la verificación en Web Search")
-            return ConfirmacionBatch(False, 0, esperadas, buscador.motivo or "Web Search no está disponible.")
+            return resultado(False, buscador.motivo or "Web Search no está disponible.")
     except SesionCancelada:
         raise
     except Exception:
-        return ConfirmacionBatch(False, 0, esperadas, "No se pudo consultar Web Search. Se verificará de nuevo.")
+        return resultado(False, "No se pudo consultar Web Search. Se verificará de nuevo.")
     if is_dataclass(original):
         for campo in ("_ruta", "_plantilla", "_probado", "_sin_control", "_motivo", "_candidatas", "_tanteos"):
             setattr(original, campo, getattr(buscador, campo))
     if buscador._plantilla not in PLANTILLAS:
-        return ConfirmacionBatch(False, 0, esperadas, "Web Search no tiene una consulta válida para verificar esta carga.")
+        return resultado(False, "Web Search no tiene una consulta válida para verificar esta carga.")
     forma = PLANTILLAS[buscador._plantilla]
-    parametros = forma.construir(manifiesto.nombre_batch, buscador.config)
-    if forma.nombre == "encodedValues":
-        parametros["encodedValues"] = _b64(f"{CAMPO_BATCH_NAME}={manifiesto.nombre_batch}")
-    elif forma.nombre == "fieldId":
-        parametros["fieldId"] = CAMPO_BATCH_NAME
-    parametros["rows"] = 50
-    esperados = Counter((str(r.log_number).strip(), r.matricula.strip().upper()) for r in registros)
-    numeros_esperados = set(numeros)
-    encontrados = Counter()
-    documentos = set()
-    paginas = set()
-    ids_batch = set()
-    sin_identidad = False
-    agotada = False
-    # Se admite margen para duplicados, sin recorrer una busqueda sin filtro
-    # que el servidor haya devuelto por no admitir la consulta por batch.
-    maximo = max(2, math.ceil(esperadas / 50) + 5)
-    for pagina in range(1, maximo + 1):
+    consultas = {}
+    for numero, matricula in muestra:
         if cancelado():
             raise SesionCancelada("Se canceló la verificación en Web Search")
         if time.monotonic() - inicio >= presupuesto_s:
-            return ConfirmacionBatch(False, sum(encontrados.values()), esperadas,
-                                     "La consulta tardó demasiado. Se conserva el avance del proceso y se verificará de nuevo.")
+            return resultado(False, "La consulta tardó demasiado. Se conserva el avance y se verificará de nuevo.")
         if avisar:
-            avisar(f"Verificando «{manifiesto.nombre_batch}» en Web Search", sum(encontrados.values()), esperadas)
-        parametros["page"] = pagina
+            avisar(f"Buscando una muestra de «{manifiesto.nombre_batch}» en Web Search", encontradas, esperadas)
         try:
-            datos = buscador.sesion.get(buscador.ruta, dict(parametros))
+            if numero not in consultas:
+                consultas[numero] = _filas(buscador.sesion.get(
+                    buscador.ruta, forma.construir(numero, buscador.config)))
         except SesionCancelada:
             raise
         except Exception:
-            return ConfirmacionBatch(False, sum(encontrados.values()), esperadas,
-                                     "Web Search no respondió. Se conserva el estado y se comprobará de nuevo.")
-        filas = _filas(datos)
-        huella = json.dumps(filas, sort_keys=True, ensure_ascii=False, default=str)
-        if not filas or huella in paginas:
-            agotada = not filas
-            break
-        paginas.add(huella)
-        for fila in filas:
+            return resultado(False, "Web Search no respondió. Se conserva el estado y se comprobará de nuevo.")
+        if cancelado():
+            raise SesionCancelada("Se canceló la verificación en Web Search")
+        if time.monotonic() - inicio >= presupuesto_s:
+            return resultado(False, "La consulta tardó demasiado. Se conserva el avance y se verificará de nuevo.")
+        coincidentes = []
+        for fila in consultas[numero]:
+            hallado = _campo(fila, {"cdocno", "logpagenumber", "lognumber", "docno", str(CAMPO_LOG_NUMBER)})
+            if hallado != numero:
+                continue
             nombre = _campo(fila, {"cbatchname", "batchname", "batchnombre", str(CAMPO_BATCH_NAME)})
-            if _normalizar(nombre) != _normalizar(manifiesto.nombre_batch):
+            if nombre and _normalizar(nombre) != _normalizar(manifiesto.nombre_batch):
                 continue
             batch_id = _campo(fila, {"batchid", "batchkey", "cbatchid"})
-            if not batch_id:
-                sin_identidad = True
+            if batch_id and identidad and batch_id.casefold() != identidad:
                 continue
-            if batch_id and manifiesto.batch_id and batch_id.casefold() != manifiesto.batch_id.casefold():
+            # El nombre exacto basta si Web Search no expone el ID. Si no
+            # trae nombre, se exige el ID ya conocido de esta carga.
+            if not nombre and not (batch_id and identidad):
                 continue
-            ids_batch.add(batch_id.casefold())
-            if len(ids_batch) > 1:
-                return ConfirmacionBatch(False, 0, esperadas, "Hay varios batches con el mismo nombre. No se combinan sus bitácoras para confirmar una carga.")
-            numero = _campo(fila, {"cdocno", "logpagenumber", "lognumber", "docno", str(CAMPO_LOG_NUMBER)})
-            if numero not in numeros_esperados:
+            avion = _campo(fila, {"cacreg", "acreg", "aircraft", "matricula", str(CAMPO_MATRICULA)})
+            if matricula and avion.upper() != matricula:
                 continue
-            matricula = _campo(fila, {"cacreg", "acreg", "aircraft", "matricula", str(CAMPO_MATRICULA)})
-            clave = (numero, matricula.upper())
-            if clave not in esperados:
-                clave = (numero, "")
-            if clave not in esperados:
-                continue
-            documento = _campo(fila, {"docid", "documentid", "documentkey", "id"})
-            # Sin ID de documento, varias filas del mismo número y avión
-            # solo prueban una bitácora, aunque cambien sus otros campos.
-            identidad = ("documento", documento) if documento else ("bitacora", *clave)
-            if identidad in documentos:
-                continue
-            documentos.add(identidad)
-            if encontrados[clave] < esperados[clave]:
-                encontrados[clave] += 1
-        total = sum(encontrados.values())
-        if encontrados == esperados and manifiesto.batch_id:
-            return ConfirmacionBatch(True, total, esperadas,
-                                     f"{total} de {esperadas} bitácoras confirmadas en el batch «{manifiesto.nombre_batch}».",
-                                     next(iter(ids_batch)))
-        if len(filas) < 50:
-            agotada = True
-            break
-    total = sum(encontrados.values())
-    if agotada and encontrados == esperados and len(ids_batch) == 1 and not sin_identidad:
-        return ConfirmacionBatch(True, total, esperadas,
-                                 f"{total} de {esperadas} bitácoras confirmadas en el batch «{manifiesto.nombre_batch}».",
-                                 next(iter(ids_batch)))
-    return ConfirmacionBatch(False, total, esperadas,
-                             "Web Search no devuelve el identificador del batch para distinguir sus copias." if sin_identidad else
-                             f"{total} de {esperadas} bitácoras identificadas en este batch. Falta confirmar su publicación completa.")
+            coincidentes.append(batch_id.casefold())
+        ids = {valor for valor in coincidentes if valor}
+        if len(ids) > 1:
+            return resultado(False, "Hay varios batches con el mismo nombre. No se combinan sus bitácoras para confirmar una carga.")
+        if not coincidentes:
+            return resultado(False, f"{encontradas} de {esperadas} bitácoras de la muestra encontradas. El batch queda pendiente de confirmar.")
+        if ids:
+            identidad = next(iter(ids))
+        encontradas += 1
+    if avisar:
+        avisar(f"Muestra de «{manifiesto.nombre_batch}» encontrada en Web Search", encontradas, esperadas)
+    return resultado(True, f"Muestra de {esperadas} bitácoras encontrada en Web Search, de {len(manifiesto.bitacoras())} en el batch. Batch marcado como completado.")
