@@ -1490,7 +1490,7 @@ class EmbeddedPdfViewer(QFrame):
         if self._refresh_pending:
             return
         self._refresh_pending = True
-        QTimer.singleShot(0, self._refresh_view)
+        QTimer.singleShot(0, self, self._refresh_view)
 
     def _refresh_view(self) -> None:
         self._refresh_pending = False
@@ -1949,13 +1949,13 @@ class CsvViewerWindow(QMainWindow):
         super().showEvent(event)
         self._refresh_history()
         self._update_responsive_layout()
-        QTimer.singleShot(0, self._balance_content_splitter)
+        QTimer.singleShot(0, self, self._balance_content_splitter)
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - API Qt
         super().resizeEvent(event)
         if hasattr(self, "content_splitter"):
             self._update_responsive_layout()
-            QTimer.singleShot(0, self._balance_content_splitter)
+            QTimer.singleShot(0, self, self._balance_content_splitter)
 
     def _on_splitter_moved(self, _position: int, _index: int) -> None:
         """Una vez que el usuario reparte el espacio, se respeta su medida."""

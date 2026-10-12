@@ -187,6 +187,17 @@ class Manifiesto(BaseModel):
     # lo que quedo terminado sin que nadie interviniera de lo que ya estaba
     # cerrado en AirVault cuando se encontro.
     completado_automatico: bool = False
+    # Confirmacion de publicacion por muestra distribuida en Web Search.
+    # El metodo distingue esta prueba del cotejo completo de versiones anteriores.
+    websearch_confirmado: str = ""
+    websearch_muestra: List[str] = Field(default_factory=list)
+    websearch_detalle: str = ""
+    websearch_metodo: str = ""
+    websearch_batch_id: str = ""
+    websearch_revision: str = ""
+    websearch_cotejadas: int = 0
+    websearch_huella: str = ""
+    no_encontrado_desde: str = ""
     doc_type: str = "Log Page"
     audit_status: str = "PUBLISHED"
     # Audit Status de las bitacoras marcadas como discrepancia. Viaja en el

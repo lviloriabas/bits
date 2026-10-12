@@ -132,7 +132,20 @@ def app():
     """
     from PySide6.QtWidgets import QApplication
 
-    return QApplication.instance() or QApplication([])
+    aplicacion = QApplication.instance() or QApplication([])
+    # El plugin offscreen de Windows puede omitir las fuentes nativas.
+    # Las metricas deben medir los glifos de la interfaz, no cuadros vacios.
+    if os.name == "nt":
+        from pathlib import Path
+        from PySide6.QtGui import QFontDatabase
+
+        if not QFontDatabase.hasFamily("Segoe UI"):
+            fuentes = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
+            for nombre in ("segoeui.ttf", "segoeuib.ttf"):
+                archivo = fuentes / nombre
+                if archivo.is_file():
+                    QFontDatabase.addApplicationFont(str(archivo))
+    return aplicacion
 
 
 def soltar_hilos(ventana) -> None:
@@ -144,7 +157,7 @@ def soltar_hilos(ventana) -> None:
     despues aborta el proceso con 0xC0000409, que es justo lo que el cierre
     de la ventana esta escrito para evitar.
     """
-    teardown = getattr(ventana, "_teardown", None)
+    teardown = getattr(ventana, "_teardown", None) or getattr(ventana, "detener", None)
     if teardown is None:
         return
     try:

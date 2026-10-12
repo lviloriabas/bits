@@ -14,6 +14,7 @@ from PySide6.QtCore import QPoint, QRect
 
 from app.gui import airvault_window as modulo
 from app.gui.airvault_window import AirVaultWindow
+from app.gui.tokens import SPACE_L
 
 
 @pytest.fixture
@@ -51,7 +52,7 @@ def test_la_ventana_cabe_en_la_pantalla(
         app.processEvents()
 
 
-def test_margen_avance_y_botones_coinciden_con_la_ventana_principal(
+def test_margen_exterior_alinea_avance_y_botones(
     app, pantalla, tmp_path
 ):
     pantalla(1920, 1080)
@@ -67,18 +68,20 @@ def test_margen_avance_y_botones_coinciden_con_la_ventana_principal(
             margenes.top(),
             margenes.right(),
             margenes.bottom(),
-        ) == (8, 8, 8, 8)
+        ) == (SPACE_L, SPACE_L, SPACE_L, SPACE_L)
         assert not ventana.estado_label.isVisibleTo(ventana)
         progreso = ventana.progreso.mapTo(ventana, QPoint())
         assert progreso.x() == margenes.left()
-        assert (
-            progreso.x() + ventana.progreso.width()
-            == ventana.width() - margenes.right()
+        assert progreso.x() + ventana.progreso.width() == (
+            ventana.panel_batches.mapTo(ventana, QPoint()).x()
+            + ventana.panel_batches.width()
         )
-        assert ventana.reloj_label.parentWidget() is ventana.progreso
-        cerrar = ventana.boton_cerrar.mapTo(ventana, QPoint())
+        assert not ventana.reloj_label.isVisibleTo(ventana)
+        assert not ventana.resumen.isVisibleTo(ventana)
+        assert ventana.progreso.format() == "%p%"
+        cancelar = ventana.boton_cancelar.mapTo(ventana, QPoint())
         espacio_inferior = (
-            ventana.height() - cerrar.y() - ventana.boton_cerrar.height()
+            ventana.height() - cancelar.y() - ventana.boton_cancelar.height()
         )
         assert espacio_inferior >= margenes.bottom()
     finally:
@@ -89,23 +92,17 @@ def test_margen_avance_y_botones_coinciden_con_la_ventana_principal(
 def test_el_contenido_no_puede_estirar_la_ventana_fuera_del_escritorio(
     app, pantalla, tmp_path
 ):
-    """Aunque el layout pida más, el mínimo se queda en lo que hay.
-
-    Las dos filas de acciones siguen pidiendo más de 1024 px por la suma de
-    los rótulos, así que el tope de la pantalla es lo único que impide que
-    la ventana nazca más ancha que el escritorio.
-    """
+    """Los controles proporcionados caben sin exigir un escritorio mayor."""
     pantalla(1024, 768)
     ventana = AirVaultWindow(tmp_path)
     try:
         ventana.show()
         app.processEvents()
-        # Lo que el contenido pediría por su cuenta, sin acotar.
-        assert ventana.minimumSizeHint().width() > 1024, (
-            "el fixture ya no reproduce el caso: el contenido cabe de sobra"
-        )
-
-        assert ventana.minimumWidth() == 1024
+        assert ventana.minimumSizeHint().width() <= 1024
+        assert ventana.minimumWidth() <= 1024
+        for control in (ventana.boton_cancelar, ventana.boton_proceso, ventana.boton_pausar):
+            assert ventana.rect().contains(control.mapTo(ventana, control.rect().topLeft()))
+            assert ventana.rect().contains(control.mapTo(ventana, control.rect().bottomRight()))
     finally:
         ventana.close()
         app.processEvents()
@@ -122,6 +119,42 @@ def test_una_pantalla_diminuta_no_encoge_la_ventana_hasta_lo_inservible(
 
         assert ventana.minimumWidth() == modulo.ANCHO_MINIMO_VENTANA
         assert ventana.minimumHeight() == modulo.ALTO_MINIMO_VENTANA
+    finally:
+        ventana.close()
+        app.processEvents()
+
+
+def test_reordenar_campos_al_estrechar_no_recorta_ni_superpone_controles(
+    app, pantalla, tmp_path
+):
+    pantalla(1920, 1080)
+    ventana = AirVaultWindow(tmp_path)
+    try:
+        ventana.show()
+        for ancho in (1280, 720, 1280):
+            ventana.resize(ancho, 720)
+            app.processEvents()
+            assert ventana.width() <= ancho
+            zona = ventana.rect().adjusted(SPACE_L, SPACE_L, -SPACE_L, -SPACE_L)
+            controles = (
+                ventana.historial, ventana.lote_edit, ventana.limite_batch_control,
+                ventana.fecha_combo, ventana.cookie_edit, ventana.auto_check,
+                ventana.minutos_control, ventana.completar_check,
+                ventana.detener_duplicados_check, ventana.porcentaje_duplicados_control,
+                ventana.boton_automatizacion, ventana.boton_proceso,
+                ventana.boton_pausar, ventana.boton_cancelar, ventana.bitacora,
+            )
+            rectangulos = [QRect(control.mapTo(ventana, QPoint()), control.size())
+                           for control in controles]
+            assert all(zona.contains(rectangulo) for rectangulo in rectangulos)
+            for indice, rectangulo in enumerate(rectangulos):
+                assert not any(rectangulo.intersects(otro)
+                               for otro in rectangulos[indice + 1:])
+            nombre, limite = rectangulos[1:3]
+            if ancho == 1280:
+                assert nombre.top() == limite.top()
+            else:
+                assert limite.top() > nombre.bottom()
     finally:
         ventana.close()
         app.processEvents()

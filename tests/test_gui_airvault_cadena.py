@@ -190,7 +190,7 @@ def _todo_terminado(ventana, cliente, trabajos, fallos):
         < eventos.index(("escribir", "003B2"))
         < eventos.index(("escribir", "003B3"))
     )
-    assert ventana.progreso.text() == "100% - Proceso terminado"
+    assert ventana.progreso.text() == "100%"
     assert "Proceso terminado: 3 completados." in ventana.resumen.text()
     assert "No queda trabajo automático pendiente" in ventana.bitacora.item(
         ventana.bitacora.count() - 1
@@ -215,7 +215,7 @@ def test_revisar_en_airvault_termina_todo_lo_que_falta(cadena, reloj):
     ventana, cliente, trabajos, fallos, modos = cadena
     ventana.auto_check.setChecked(reloj)
 
-    ventana.boton_revisar.click()
+    ventana.boton_revisar.trigger()
 
     _todo_terminado(ventana, cliente, trabajos, fallos)
     assert modos[0] == "comprobar"
@@ -229,19 +229,36 @@ def test_continuar_pendiente_termina_todo_lo_que_falta(cadena):
     _todo_terminado(ventana, cliente, trabajos, fallos)
 
 
+@pytest.mark.parametrize("pausado", [False, True], ids=["empezar", "continuar"])
+def test_el_boton_del_proceso_retoma_los_manifiestos_sin_repetir_subidas(cadena, pausado):
+    ventana, cliente, trabajos, fallos, _modos = cadena
+    if pausado:
+        ventana._pausar_proceso()
+        assert ventana.boton_proceso.text() == "Continuar proceso"
+    else:
+        ventana.auto_check.setChecked(False)
+        ventana._actualizar_botones_proceso()
+    assert ventana.boton_proceso.isEnabled()
+    ancho = ventana.boton_proceso.width()
+    ventana.boton_proceso.click()
+    _todo_terminado(ventana, cliente, trabajos, fallos)
+    assert ventana.boton_proceso.width() == ancho
+    assert not ventana._pausado
+
+
 def test_la_cadena_termina_y_no_queda_nada_por_hacer(cadena):
     """Al acabar, una revisión más no sube ni escribe nada."""
     ventana, cliente, trabajos, fallos, modos = cadena
-    ventana.boton_revisar.click()
+    ventana.boton_revisar.trigger()
     eventos = list(cliente.eventos)
     modos.clear()
 
-    ventana.boton_revisar.click()
+    ventana.boton_revisar.trigger()
 
     assert cliente.eventos == eventos
     assert modos == ["comprobar"]
     assert fallos == []
-    assert ventana.progreso.text() == "100% - Proceso terminado"
+    assert ventana.progreso.text() == "100%"
     finales = [
         ventana.bitacora.item(i).text()
         for i in range(ventana.bitacora.count())
@@ -255,8 +272,8 @@ def test_completar_desde_la_cola_confirma_el_fin_sin_revision_global(cadena):
 
     ventana, cliente, trabajos, fallos, modos = cadena
     ventana.completar_check.setChecked(False)
-    ventana.boton_revisar.click()
-    assert ventana.progreso.text() == "100% - Proceso terminado"
+    ventana.boton_revisar.trigger()
+    assert ventana.progreso.text() == "100%"
     pendientes = [p for p in ventana._estados if p.estado == INDEXADO]
     assert len(pendientes) == 2
 

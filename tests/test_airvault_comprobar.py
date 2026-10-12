@@ -1898,10 +1898,7 @@ def test_una_carga_que_no_aparece_detiene_las_siguientes_pero_no_el_indexado(
     assert [trabajo for trabajo, _detalle in fallos] == [sin_subir]
     assert encontrados == ["DP | BIT"]
     # Se le dio la espera entera antes de rendirse.
-    config = AirVaultConfig()
-    assert len(esperas) == int(
-        config.espera_maxima_s // config.espera_descubrimiento_s
-    )
+    assert 295 <= sum(esperas) <= 300
 
 
 def _dos_partes(tmp_path):
@@ -2272,12 +2269,8 @@ def test_una_carga_perdida_se_avisa_pero_no_se_reenvia_sola(
     perdida.manifiesto.espera_reenvio_desde = "2020-01-01T00:00:00"
     perdida.guardar()
 
-    # La espera es la configurada, sin multiplicadores: lo unico que vence
-    # con ella es el aviso.
-    assert (
-        espera_para_darla_por_perdida(perdida)
-        == perdida.config.espera_reenvio_s
-    )
+    # El batch pequeño tiene cinco minutos de margen, sin reenvío automático.
+    assert espera_para_darla_por_perdida(perdida) == 300
     estado = EstadoParte(perdida, BUSCANDO, "no aparecio")
     assert subida_estancada(perdida, espera_para_darla_por_perdida(perdida))
     assert subida_perdida(estado)
@@ -2372,8 +2365,10 @@ def test_una_carga_vieja_que_no_esta_en_la_cola_se_da_por_perdida_enseguida(
 
     estado = comprobar_partes([trabajo], cliente)[0]
 
-    assert estado.estado == BUSCANDO
-    assert "ningún nombre" in estado.detalle
+    from app.airvault.flujo import NO_ENCONTRADO
+    assert estado.estado == NO_ENCONTRADO
+    assert "resubirla" in estado.detalle
+    assert trabajo.manifiesto.no_encontrado_desde
     assert trabajo.manifiesto.busquedas_amplias_sin_hallar == 1
     assert subida_perdida(estado)
     assert partes_por_subir([estado]) == []
@@ -2406,7 +2401,7 @@ def test_cada_carga_se_confirma_antes_de_mandar_la_siguiente(
         self.manifiesto.etapa("subir").marcar(EstadoEtapa.HECHA, "ok")
 
     def descubrir(
-        self, cliente, esperar=True, dormir=None, avisar=None, cache=None
+        self, cliente, esperar=True, dormir=None, avisar=None, cache=None, limite_s=None
     ):
         eventos.append(("confirmar", self.manifiesto.nombre_batch))
         self.manifiesto.batch_id = f"ID-{len(eventos)}"
@@ -2457,7 +2452,7 @@ def test_la_carga_siguiente_ya_ve_nombrado_el_batch_anterior(
         )
 
     def descubrir(self, cliente, esperar=True, dormir=None, avisar=None,
-                  cache=None):
+                  cache=None, limite_s=None):
         conocidos = set(self.manifiesto.lotes_previos or [])
         nuevos = [
             actual for actual in cliente.listar_lotes()
@@ -2539,7 +2534,7 @@ def test_cada_hallazgo_se_indexa_mientras_airvault_arma_la_carga_siguiente(
         self.manifiesto.etapa("subir").marcar(EstadoEtapa.HECHA, "ok")
 
     def descubrir(
-        self, cliente, esperar=True, dormir=None, avisar=None, cache=None
+        self, cliente, esperar=True, dormir=None, avisar=None, cache=None, limite_s=None
     ):
         self.manifiesto.batch_id = f"ID-{self.manifiesto.parte}"
         return self.manifiesto.batch_id

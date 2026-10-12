@@ -677,6 +677,8 @@ SOLO_REVISAR = "solo_revisar"
 INDEXADO = "indexado"
 COMPLETADO = "completado"
 AUTOCOMPLETADO = "autocompletado"
+PUBLICADO = "publicado"
+NO_ENCONTRADO = "no_encontrado"
 CANCELADO = "cancelado"
 # Sus bitacoras ya estan en AirVault, subidas por otro batch o por otra
 # persona. No se sube, no se reenvia y no se completa solo hasta que
@@ -692,6 +694,8 @@ POSIBLE_DUPLICADO = "posible_duplicado"
 # o una persona. REVISAR listo para escribir se nombra como los demás: su
 # propio nombre de batch ya dice que es REVISAR.
 NOMBRE_ESTADO_PARTE = {
+    NO_ENCONTRADO: "No encontrado en AirVault",
+    PUBLICADO: "Confirmado en Web Search",
     SIN_SUBIR: "Sin subir",
     POSIBLE_DUPLICADO: "Posible duplicado",
     BUSCANDO: "Subido",
@@ -757,14 +761,14 @@ class EstadoParte:
         """
         return self.lote is None and self.estado not in (
             INDEXADO, COMPLETADO, AUTOCOMPLETADO, CANCELADO,
-            POSIBLE_DUPLICADO,
+            POSIBLE_DUPLICADO, PUBLICADO,
         )
 
     @property
     def se_acabo(self) -> bool:
         """Ya no hay nada que esperar de esta parte."""
         return self.estado in (
-            DESCUADRADO, INDEXADO, COMPLETADO, AUTOCOMPLETADO, CANCELADO,
+            DESCUADRADO, INDEXADO, COMPLETADO, AUTOCOMPLETADO, CANCELADO, PUBLICADO,
         )
 
     @property
@@ -1315,6 +1319,7 @@ class Trabajo:
         avisar: Optional[Aviso] = None,
         cache: Optional[dict[str, str]] = None,
         excluir: Collection[str] = (),
+        limite_s: Optional[float] = None,
     ) -> str:
         """Ubica el batch en AirVault por su nombre y lo deja anotado.
 
@@ -1330,7 +1335,7 @@ class Trabajo:
             avisar(f"Buscando el batch {nombre} en AirVault", 0, 0)
         if esperar:
             return self._esperar_confirmacion(
-                cliente, dormir, avisar, cache, excluir
+                cliente, dormir, avisar, cache, excluir, limite_s
             )
         error_busqueda: Optional[Exception] = None
         lote = None
@@ -1379,6 +1384,7 @@ class Trabajo:
         avisar: Optional[Aviso],
         cache: Optional[dict[str, str]],
         excluir: Collection[str] = (),
+        limite_s: Optional[float] = None,
     ) -> str:
         """Espera a que AirVault tenga la carga entera y la identifica.
 
@@ -1390,7 +1396,7 @@ class Trabajo:
         sin indexar hasta la siguiente comprobacion periodica, que tampoco
         lo indexaba mientras quedaran cargas por hacer. Ahora se mira la
         cola cada ``espera_descubrimiento_s`` hasta que la carga cuadra en
-        paginas y contenido, o hasta ``espera_maxima_s``.
+        paginas y contenido, o hasta agotar el plazo de publicación.
 
         Un Batch Name interno que no se pudo leer en una vuelta (la primera
         pagina aun sin procesar) se vuelve a pedir en la siguiente, en vez de
@@ -1399,10 +1405,13 @@ class Trabajo:
         nombre = self.manifiesto.nombre_batch
         nombres_embebidos = cache if cache is not None else {}
         espera = max(1.0, float(self.config.espera_descubrimiento_s or 0))
-        limite = max(0.0, float(self.config.espera_maxima_s or 0))
+        limite = max(0.0, float(self.config.espera_maxima_s if limite_s is None else limite_s))
+        edad_inicial = edad_de_la_carga(self) or 0.0
+        presupuesto = max(0.0, espera_para_darla_por_perdida(self) - edad_inicial)
+        inicio = time.monotonic()
         # Las vueltas acotan la espera aunque ``dormir`` no duerma, que es
         # como la ejercitan las pruebas.
-        vueltas = max(1, int(limite // espera) + 1)
+        vueltas = max(1, int(-(-limite // espera)) + 1)
         lotes_actuales: List[ResumenLote] = []
         for vuelta in range(1, vueltas + 1):
             for clave in [c for c, valor in nombres_embebidos.items() if not valor]:
@@ -1418,7 +1427,8 @@ class Trabajo:
             )
             if lote is not None:
                 return self.anotar_lote(cliente, lote, avisar)
-            if vuelta == vueltas:
+            transcurrido = max(time.monotonic() - inicio, (vuelta - 1) * espera)
+            if vuelta == vueltas or transcurrido >= limite:
                 break
             en_camino = self._carga_en_camino(lotes_actuales)
             logger.info(
@@ -1433,12 +1443,15 @@ class Trabajo:
                     0,
                     0,
                 )
-            dormir(espera)
+            dormir(min(espera, max(0.0, limite - transcurrido)))
         if not any(
             _es_nombre_provisional(actual.nombre, nombre)
             or _nombre_visible_compatible(actual.nombre, nombre)
             for actual in lotes_actuales
         ):
+            if limite_s is not None and limite >= presupuesto and _subida_rastreable(self):
+                self.manifiesto.no_encontrado_desde = datetime.now().isoformat(timespec="seconds")
+                self.guardar()
             raise LoteNoEncontrado(
                 f"No hay ningun batch llamado {nombre!r} en AirVault"
             )
@@ -1514,6 +1527,7 @@ class Trabajo:
         # el título. Guardarlo antes permitía continuar e indexar aunque el
         # batch siguiera indistinguible como ``Empty-Batch``.
         self.manifiesto.batch_id = lote.batch_id
+        self.manifiesto.no_encontrado_desde = ""
         self.manifiesto.intentos_identificacion = 0
         self.manifiesto.busquedas_amplias_sin_hallar = 0
         self.manifiesto.espera_reenvio_desde = ""
@@ -2275,6 +2289,8 @@ class BatchPrevisto:
     # Search. Se guarda aparte de ``estado`` porque ese es texto para leer y
     # esto es una condicion que la interfaz consulta.
     completado: bool = False
+    csv_origen: str = ""
+    carpeta: Optional[Path] = None
 
     @property
     def paginas(self) -> int:
@@ -2308,6 +2324,8 @@ def _previsto_de_trabajo(trabajo: "Trabajo") -> BatchPrevisto:
         subido=trabajo_comprometido(trabajo),
         existe=True,
         completado=parte.estado in (COMPLETADO, AUTOCOMPLETADO),
+        csv_origen=manifiesto.csv_origen,
+        carpeta=trabajo.carpeta,
     )
 
 
@@ -2421,6 +2439,7 @@ def previsualizar_reparto(
             nuevos.append(
                 BatchPrevisto(
                     nombre=molde.nombre_lote(base),
+                    csv_origen=str(csv),
                     parte=indice,
                     partes=total,
                     revisar=revisar,
@@ -2547,12 +2566,14 @@ def _prefijo(trabajo: "Trabajo") -> str:
     batch_id = str(manifiesto.batch_id or "").strip()
     if batch_id:
         return f"Batch {batch_id}: "
+    nombre = str(manifiesto.nombre_batch or "").strip()
+    if nombre:
+        return f"Batch «{nombre}»: "
     if manifiesto.solo_subir:
         return "Batch REVISAR: "
     if manifiesto.partes > 1:
         return f"Batch {manifiesto.parte}/{manifiesto.partes}: "
-    nombre = str(manifiesto.nombre_batch or "").strip()
-    return f"Batch «{nombre}»: " if nombre else "Batch: "
+    return "Batch: "
 
 
 def _entrega_de(trabajo: "Trabajo") -> str:
@@ -3079,6 +3100,33 @@ def subir_partes(
             if parte.batch_id:
                 publicar(parte.trabajo)
         if por_subir:
+            # El turno compartido evita envíos simultáneos, pero otra ventana
+            # pudo salir tras una respuesta perdida o una carga parcial. Sus
+            # archivos aceptados siguen en vuelo aunque su hilo haya terminado
+            # o la persona haya cancelado esa fila en la interfaz.
+            conocidas = {str(t.carpeta.resolve()).casefold() for t in ejecucion}
+            externas = []
+            raices = {carpeta_del_libro(t).resolve() for t in ejecucion}
+            for raiz in raices:
+                for anterior in cargar_todos_trabajos(trabajos[0].config, raiz):
+                    m = anterior.manifiesto
+                    if (str(anterior.carpeta.resolve()).casefold() not in conocidas
+                            and m.repo_id == trabajos[0].manifiesto.repo_id
+                            and not m.batch_id and _subida_rastreable(anterior)
+                            and not m.no_encontrado_desde and not m.etapa_hecha("completar")
+                            and not websearch_confirmacion_valida(m)):
+                        externas.append(EstadoParte(anterior, BUSCANDO))
+                        conocidas.add(str(anterior.carpeta.resolve()).casefold())
+            if externas:
+                bloqueo = _esperar_cargas_en_vuelo(
+                    externas, ejecucion, cliente, dormir_indexando, avisar,
+                    lambda _trabajo: None, nombres_embebidos,
+                )
+                if bloqueo:
+                    if avisar:
+                        avisar(bloqueo, 0, 0)
+                    indexar_todo()
+                    return [(trabajo, bloqueo) for trabajo in por_subir]
             bloqueo = _esperar_cargas_en_vuelo(
                 estados, ejecucion, cliente, dormir_indexando, avisar,
                 publicar, nombres_embebidos,
@@ -3294,10 +3342,15 @@ def subir_partes(
                 dormir=dormir_indexando,
                 avisar=propio if avisar else None,
                 cache=nombres_embebidos,
+                limite_s=limite_para_publicacion(trabajo),
             )
         except Exception as exc:  # noqa: BLE001 - se sigue con las demas
             detalle = str(exc)
             fallos.append((trabajo, detalle))
+            if trabajo.manifiesto.no_encontrado_desde:
+                if avisar is not None:
+                    avisar(f"{cabeza}No encontrado en AirVault; se conserva para resubir y se continúa con el siguiente", 0, 0)
+                continue
             logger.error(
                 "No se pudo encontrar el batch {}: {}. Se detienen las cargas.",
                 trabajo.manifiesto.nombre_batch,
@@ -3363,7 +3416,7 @@ def _esperar_cargas_en_vuelo(
         if parte.estado in (BUSCANDO, PROCESANDO, DESCUADRADO)
         and not parte.trabajo.manifiesto.batch_id
         and _subida_rastreable(parte.trabajo)
-        and not subida_perdida(parte, ejecucion)
+        and not getattr(parte.trabajo.manifiesto, "no_encontrado_desde", "")
     ]
     ocupados = {
         str(trabajo.manifiesto.batch_id).strip().upper()
@@ -3397,8 +3450,13 @@ def _esperar_cargas_en_vuelo(
                 avisar=propio if avisar else None,
                 cache=cache,
                 excluir=ocupados,
+                limite_s=limite_para_publicacion(trabajo),
             )
         except Exception as exc:  # noqa: BLE001 - se informa y se espera
+            if trabajo.manifiesto.no_encontrado_desde:
+                if avisar:
+                    avisar(f"{cabeza}No encontrado tras agotar la espera; se continúa con las cargas siguientes", 0, 0)
+                continue
             logger.info(
                 "La carga {} sigue sin confirmar: {}",
                 trabajo.manifiesto.nombre_batch, exc,
@@ -3543,6 +3601,7 @@ def _reiniciar_subida_ausente(trabajo: "Trabajo") -> None:
     manifiesto.intentos_identificacion = 0
     manifiesto.busquedas_amplias_sin_hallar = 0
     manifiesto.espera_reenvio_desde = ""
+    manifiesto.no_encontrado_desde = ""
     for nombre in (
         "subir",
         "descubrir",
@@ -3686,6 +3745,8 @@ def subida_perdida(
     ofrecer la subida a mano. Ninguna de las tres senales es infalible y
     las tres pueden saltar mientras AirVault todavia procesa la carga.
     """
+    if parte.estado == NO_ENCONTRADO:
+        return True
     if parte.estado != BUSCANDO:
         return False
     trabajo = parte.trabajo
@@ -3946,6 +4007,22 @@ def _reubicar_trabajo(
     return True
 
 
+def cargar_todos_trabajos(
+    config: AirVaultConfig, carpeta_raiz: Path | str,
+) -> List["Trabajo"]:
+    """Recupera todos los manifiestos locales, incluidos batches terminados."""
+    trabajos = []
+    raiz = Path(carpeta_raiz).resolve()
+    for ruta in sorted(raiz.rglob(manifiestos.MANIFIESTO_FILENAME)):
+        if not ruta.resolve().is_relative_to(raiz):
+            continue
+        try:
+            trabajos.append(Trabajo.cargar(config, ruta.parent))
+        except (OSError, ValueError) as exc:
+            logger.warning("No se pudo leer un batch local: {}", exc)
+    return trabajos
+
+
 def cargar_trabajos_pendientes(
     config: AirVaultConfig,
     carpeta_raiz: Path | str,
@@ -4067,6 +4144,10 @@ def _cierre_de(trabajo: "Trabajo") -> EstadoParte:
     nadie: se distingue del que ya estaba cerrado cuando se encontro, que
     cerro otra persona o una version anterior del programa.
     """
+    from app.airvault.confirmacion import METODO_MUESTRA
+    if (trabajo.manifiesto.websearch_metodo == METODO_MUESTRA
+            and websearch_confirmacion_valida(trabajo.manifiesto)):
+        return EstadoParte(trabajo, COMPLETADO, "sus números de bitácora ya aparecen en Web Search")
     if trabajo.manifiesto.completado_automatico:
         return EstadoParte(
             trabajo,
@@ -4087,6 +4168,8 @@ def estado_local(trabajo: "Trabajo") -> EstadoParte:
     completar = manifiesto.etapas.get("completar")
     if completar and completar.estado is EstadoEtapa.HECHA:
         return _cierre_de(trabajo)
+    if websearch_confirmacion_valida(manifiesto):
+        return EstadoParte(trabajo, PUBLICADO, manifiesto.websearch_detalle)
     if manifiesto.cancelado:
         return _cancelado_de(trabajo)
     if duplicado_bloquea(trabajo):
@@ -4095,6 +4178,8 @@ def estado_local(trabajo: "Trabajo") -> EstadoParte:
         return EstadoParte(
             trabajo, POSIBLE_DUPLICADO, manifiesto.posible_duplicado
         )
+    if getattr(manifiesto, "no_encontrado_desde", "") and not manifiesto.batch_id:
+        return EstadoParte(trabajo, NO_ENCONTRADO, "AirVault no publicó la carga dentro del plazo. Puede reenviarla desde sus acciones.")
     if not manifiesto.etapa_hecha("subir"):
         subir = manifiesto.etapas.get("subir")
         detalle = (
@@ -4113,6 +4198,29 @@ def estado_local(trabajo: "Trabajo") -> EstadoParte:
             trabajo, SOLO_REVISAR, "subido; falta escribir los datos disponibles"
         )
     return EstadoParte(trabajo, BUSCANDO, "subido; falta revisar")
+
+
+def websearch_confirmacion_valida(manifiesto) -> bool:
+    from app.airvault.confirmacion import METODO_MUESTRA, METODOS_MUESTRA, huella_de_batch, huella_de_numeros, muestra_de_batch
+
+    if not getattr(manifiesto, "websearch_confirmado", ""):
+        return False
+    if manifiesto.websearch_metodo == METODO_MUESTRA:
+        muestra = muestra_de_batch(manifiesto)
+        return bool(muestra and manifiesto.websearch_huella == huella_de_numeros(manifiesto)
+                    and manifiesto.websearch_muestra == muestra
+                    and manifiesto.websearch_cotejadas == len(muestra))
+    if (getattr(manifiesto, "websearch_huella", "") != huella_de_batch(manifiesto)
+            or getattr(manifiesto, "websearch_batch_id", "").casefold()
+            != str(manifiesto.batch_id or "").casefold()):
+        return False
+    if manifiesto.websearch_metodo in METODOS_MUESTRA:
+        muestra = muestra_de_batch(manifiesto)
+        return bool(muestra and manifiesto.websearch_muestra == muestra
+                    and manifiesto.websearch_cotejadas == len(muestra))
+    return bool(manifiesto.websearch_metodo == "completo_por_identidad"
+                and manifiesto.batch_id
+                and manifiesto.websearch_cotejadas == len(manifiesto.bitacoras()))
 
 
 def _nombre_embebido_empty_batch(cliente, lote: ResumenLote) -> str:
@@ -4843,17 +4951,30 @@ def edad_de_la_carga(
 def espera_para_darla_por_perdida(trabajo: "Trabajo") -> float:
     """Cuanto tiene que llevar sin publicarse para avisar de que se perdio.
 
-    Es la espera configurada, tal cual. Antes crecia con cada reenvio ya
-    hecho, para no insistir contra una cola que solo va lenta; ahora no hay
-    reenvios automaticos que espaciar y lo unico que vence con este plazo
-    es el aviso, que no escribe nada en AirVault.
+    Con el valor de fabrica se reservan 3,6 segundos por pagina, entre
+    cinco minutos y una hora: 500 paginas reciben media hora. Es un margen
+    operativo conservador, no una medicion ni una promesa del servidor.
+    Un valor configurado expresamente conserva su significado. Vencer el
+    plazo nunca reenvia automaticamente ni considera ausente una carga
+    parcial o ambigua.
 
     El ajuste se sigue llamando ``espera_reenvio_s`` en la configuracion,
     igual que la marca ``espera_reenvio_desde`` del manifiesto: son nombres
     guardados en archivos que ya existen y renombrarlos no valdria lo que
     cuesta.
     """
-    return max(0.0, float(trabajo.config.espera_reenvio_s))
+    configurada = max(0.0, float(trabajo.config.espera_reenvio_s))
+    if configurada != 1800.0:
+        return configurada
+    paginas = max(1, len(trabajo.manifiesto.registros))
+    return max(300.0, min(3600.0, paginas * 3.6))
+
+
+def limite_para_publicacion(trabajo: "Trabajo") -> float:
+    restante = max(0.0, espera_para_darla_por_perdida(trabajo) - (edad_de_la_carga(trabajo) or 0.0))
+    if trabajo.config.espera_maxima_s != 900.0:
+        restante = min(restante, max(0.0, trabajo.config.espera_maxima_s))
+    return restante
 
 
 def _carga_vieja_sin_publicar(trabajo: "Trabajo") -> bool:
@@ -4882,6 +5003,10 @@ def _registrar_busqueda_amplia_fallida(trabajo: "Trabajo") -> EstadoParte:
             timespec="seconds"
         )
     trabajo.guardar()
+    if _carga_vieja_sin_publicar(trabajo):
+        manifiesto.no_encontrado_desde = datetime.now().isoformat(timespec="seconds")
+        trabajo.guardar()
+        return EstadoParte(trabajo, NO_ENCONTRADO, "AirVault no publicó esta carga dentro del plazo. Se conserva para resubirla a mano.")
     return EstadoParte(
         trabajo,
         BUSCANDO,
@@ -4905,6 +5030,8 @@ def _estado_de(
     completar = manifiesto.etapas.get("completar")
     if completar and completar.estado is EstadoEtapa.HECHA:
         return _cierre_de(trabajo)
+    if websearch_confirmacion_valida(manifiesto):
+        return EstadoParte(trabajo, PUBLICADO, manifiesto.websearch_detalle)
     verificar = manifiesto.etapas.get("verificar")
     if verificar and verificar.estado is EstadoEtapa.HECHA:
         # Ya quedo confirmado en una ejecucion anterior. No hace falta abrir
@@ -5077,7 +5204,7 @@ def _estado_de(
 def _pendiente_de_busqueda(trabajo: "Trabajo") -> bool:
     """Si la fila local aun necesita localizar algo en AirVault."""
     manifiesto = trabajo.manifiesto
-    if manifiesto.cancelado or manifiesto.etapa_hecha("completar"):
+    if manifiesto.cancelado or manifiesto.etapa_hecha("completar") or websearch_confirmacion_valida(manifiesto):
         return False
     return not manifiesto.etapa_hecha("verificar")
 

@@ -127,6 +127,24 @@ def test_la_sesion_paralela_aisla_conexiones_cookies_y_tokens():
     assert sesion.http.cookies.get("SoloParalela") is None
 
 
+def test_cancelar_websearch_no_cancela_la_subida_ni_el_indexado():
+    sesion = SesionAirVault(AirVaultConfig()).usar_cookie("FedAuth=abc")
+    lectura = sesion.clonar(renovable=False, cancelacion_independiente=True)
+    carril = lectura.clonar(renovable=False)
+    try:
+        lectura.cancelar()
+        assert lectura.cancelada and carril.cancelada
+        assert not sesion.cancelada
+        sesion.cancelar()
+        nueva = sesion.clonar(cancelacion_independiente=True)
+        assert not nueva.cancelada
+        nueva.http.close()
+    finally:
+        carril.http.close()
+        lectura.http.close()
+        sesion.http.close()
+
+
 def test_una_cookie_del_servidor_no_borra_la_pegada():
     """El fallo que esto evita: perder la sesion a mitad de un batch."""
     config = AirVaultConfig()

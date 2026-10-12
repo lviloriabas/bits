@@ -327,10 +327,9 @@ def test_comprobar_cada_no_es_un_paso_de_la_automatizacion(app, tmp_path):
 
 def test_la_ventana_usa_batch_en_sus_campos_y_tabla(ventana):
     assert not ventana.lotes.isHidden()
-    assert [
-        ventana.lotes.horizontalHeaderItem(columna).text()
-        for columna in range(ventana.lotes.columnCount())
-    ] == ["ID", "Batch", "Páginas", "Estado"]
+    from app.gui.batches_sidebar import BatchesSidebar
+    assert isinstance(ventana.lotes, BatchesSidebar)
+    assert ventana.lotes.columnCount() == 1
     etiquetas = {
         etiqueta.text() for etiqueta in ventana.findChildren(QLabel)
     }
@@ -348,14 +347,11 @@ def test_la_cola_tiene_su_espacio_y_la_barra_bajo_el_header(app, ventana):
     app.processEvents()
     tabla = ventana.lotes
     assert tabla.minimumHeight() == ventana._densidad.airvault_table_min_height
-    assert isinstance(tabla.itemDelegate(), FlatSelectionDelegate)
-    assert (
-        f"margin-top: {tabla.horizontalHeader().height()}px"
-        in tabla.verticalScrollBar().styleSheet()
-    )
+    assert tabla.objectName() == "batchesSidebar"
+    assert ventana.divisor_batches.widget(0).isAncestorOf(tabla)
 
 
-def test_revisar_airvault_esta_a_la_derecha_de_subir(ventana):
+def test_los_controles_del_proceso_son_empezar_pausar_y_cancelar(ventana):
     botones = ventana.layout().itemAt(ventana.layout().count() - 1).layout()
     widgets = [
         botones.itemAt(indice).widget()
@@ -363,10 +359,8 @@ def test_revisar_airvault_esta_a_la_derecha_de_subir(ventana):
         if botones.itemAt(indice).widget() is not None
     ]
 
-    assert ventana.boton_revisar.text() == "Revisar en AirVault"
-    assert widgets.index(ventana.boton_revisar) == (
-        widgets.index(ventana.boton_subir) + 1
-    )
+    assert [boton.text() for boton in widgets] == ["Empezar proceso", "Pausar", "Cancelar"]
+    assert not hasattr(ventana, "boton_cerrar")
 
 
 def test_el_usuario_puede_elegir_el_limite_antes_de_subir(ventana, tmp_path):
@@ -741,6 +735,8 @@ class RegistroFalso:
 
 
 class ManifiestoFalso:
+    websearch_confirmado = ""
+    websearch_detalle = ""
     def __init__(self, nombre, paginas, batch_id):
         self.nombre_batch = nombre
         self.registros = [RegistroFalso() for _ in range(paginas)]
@@ -974,13 +970,8 @@ def test_batch_conserva_el_nombre_hasta_un_ancho_razonable(ventana):
 
     assert ventana.lotes.item(0, 1).text() == nombre
     assert ventana.lotes.item(0, 1).toolTip() == nombre
-    assert ventana.lotes.columnWidth(1) == min(
-        max(
-            ventana.lotes.sizeHintForColumn(1) + 16,
-            ANCHO_MINIMO_NOMBRE_BATCH,
-        ),
-        ANCHO_MAXIMO_NOMBRE_BATCH,
-    )
+    assert nombre in ventana.lotes.item(0).text()
+    assert ventana.lotes.wordWrap()
 
 
 def test_todos_los_batches_confirmados_quedan_activos_en_blanco(ventana):
@@ -1313,8 +1304,8 @@ def test_una_subida_que_no_aparece_se_avisa_y_no_se_manda_sola(ventana):
     assert "No se vuelve a mandar solo" in ventana.resumen.text()
     assert "Subir a AirVault ahora" in ventana.resumen.text()
     assert not ventana._subir_al_terminar
-    # El aviso dice el tiempo de espera configurado, sin multiplicarlo.
-    assert "30 minutos" in ventana.resumen.text()
+    # Un batch pequeño recibe cinco minutos antes de ofrecer el reenvío.
+    assert "5 minutos" in ventana.resumen.text()
 
 
 def test_sin_comprobacion_automatica_la_resubida_se_pide_a_mano(ventana):
@@ -1621,7 +1612,7 @@ def test_sin_completar_batch_la_meta_es_quedar_indexado(ventana):
     })
     ventana._al_terminar()
     assert ventana.progreso.value() == 100
-    assert ventana.progreso.text() == "100% - Proceso terminado"
+    assert ventana.progreso.text() == "100%"
 
     ventana.completar_check.setChecked(True)
     assert ventana.progreso.value() == 90
@@ -1643,7 +1634,7 @@ def test_el_fin_espera_al_ultimo_hilo_y_queda_en_la_bitacora(ventana, estado):
     )
     ventana._al_terminar()
 
-    assert ventana.progreso.text() == "100% - Proceso terminado"
+    assert ventana.progreso.text() == "100%"
     assert "Proceso terminado: 1 completado." in ventana.resumen.text()
     assert "No queda trabajo automático pendiente" in ventana.bitacora.item(
         ventana.bitacora.count() - 1
@@ -1662,6 +1653,9 @@ def test_un_batch_pendiente_no_se_confunde_con_el_fin(ventana, estado):
 
     ventana.auto_check.setChecked(False)
     ventana._opciones.fijar(INDEXAR, False)
+    # La meta de una orden manual sigue siendo indexar, aunque la
+    # automatizacion este apagada para que esta prueba no lance otro hilo.
+    ventana._estado["indexar_manual"] = True
     ventana._estados = [
         parte(COMPLETADO, carpeta="hecho"), parte(estado, carpeta="pendiente"),
     ]
@@ -1707,7 +1701,7 @@ def test_el_fin_de_revisar_distingue_la_revision_manual(ventana):
     })
     ventana._al_terminar()
 
-    assert ventana.progreso.text() == "100% - Proceso terminado"
+    assert ventana.progreso.text() == "100%"
     ultima = ventana.bitacora.item(ventana.bitacora.count() - 1).text()
     assert "No queda trabajo automático pendiente" in ultima
     assert "REVISAR quedan para revisión manual" in ultima
@@ -1833,7 +1827,8 @@ def test_mientras_trabaja_siempre_hay_algo_que_pulsar(ventana):
     """
     ventana._habilitar(False)
     assert ventana.boton_cancelar.isEnabled()
-    assert ventana.boton_cerrar.isEnabled()
+    assert ventana.boton_pausar.isEnabled()
+    assert ventana.windowFlags() & Qt.WindowType.WindowCloseButtonHint
     ventana._habilitar(True)
     assert not ventana.boton_cancelar.isEnabled()
 
@@ -1893,7 +1888,7 @@ def test_la_bitacora_dice_que_el_proceso_sigue_en_curso(ventana):
     try:
         ventana._actualizar_latido()
         viva = ventana.bitacora.item(ventana.bitacora.count() - 1)
-        assert viva.text().startswith("En curso")
+        assert viva.text().startswith("BITS trabajando")
         # No es algo que haya pasado: ni se elige ni se copia.
         assert not viva.flags() & Qt.ItemFlag.ItemIsSelectable
         assert not viva.icon().isNull()
@@ -1919,7 +1914,7 @@ def test_entre_revisiones_la_bitacora_cuenta_lo_que_falta(ventana):
     ventana._ajustar_vigilancia()
     try:
         viva = ventana.bitacora.item(ventana.bitacora.count() - 1)
-        assert viva.text().startswith("En espera: se revisa AirVault en")
+        assert viva.text().startswith("Depende de AirVault: próxima revisión en")
     finally:
         ventana._parar_vigilancia()
     assert ventana.bitacora.count() == 0
@@ -2608,16 +2603,16 @@ def test_la_bitacora_lista_cada_batch_en_su_propia_linea(ventana):
         if "Revisado:" in ventana.bitacora.item(i).text()
     ][-1]
     lineas = revisado.splitlines()
-    assert len(lineas) == 3
+    assert len(lineas) == 4
     assert "DP | BITS -1" in lineas[1]
     assert "DP | BITS -2" in lineas[2]
-    # Sangradas bajo el encabezado, no bajo la hora: la columna de horas
-    # se sigue leyendo de un vistazo.
-    assert lineas[1].startswith(" " * 10)
+    # El delegado alinea las continuaciones bajo el texto usando su fuente.
+    # La copia conserva el contenido sin sangrias artificiales.
+    assert not lineas[1].startswith(" ")
 
 
 def test_un_mensaje_de_varios_parrafos_se_apunta_por_su_primera_frase(ventana):
-    """El motivo entero esta en el resumen; en la bitacora tapaba las horas."""
+    """El registro conserva el motivo completo como ayuda al pasar por la entrada."""
     ventana._al_fallar(
         "No se pudo abrir la sesion. Revise el usuario y la contrasenya en "
         "la configuracion de AirVault y vuelva a intentarlo."
@@ -2627,6 +2622,7 @@ def test_un_mensaje_de_varios_parrafos_se_apunta_por_su_primera_frase(ventana):
     assert "Se detuvo: Inicie sesión" in ultima
     assert "Total:" in ultima
     assert "configuracion" not in ultima
+    assert ventana.bitacora.item(ventana.bitacora.count() - 1).toolTip() == ventana.resumen.text()
 
 
 def test_una_carga_que_no_salio_no_se_cuenta_como_subida(ventana):

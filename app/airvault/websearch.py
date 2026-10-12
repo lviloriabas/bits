@@ -401,7 +401,7 @@ class Buscador:
     def _guardada(self) -> tuple[str, str]:
         ruta = str(self.config.ruta_websearch or "").strip()
         plantilla = str(self.config.parametros_websearch or "").strip()
-        if ruta and plantilla in PLANTILLAS:
+        if ruta.lower().startswith("/zfp/") and _parece_busqueda(ruta) and plantilla in PLANTILLAS:
             return ruta, plantilla
         return "", ""
 
@@ -546,6 +546,10 @@ class Buscador:
         resultado = _aparece(numero, datos)
         self._memoria[numero] = resultado
         return Consulta(resultado)
+
+    def renovar_consultas(self) -> None:
+        """Una revision manual debe ver lo publicado desde la consulta anterior."""
+        self._memoria.clear()
 
     def indice(self, numero: str) -> Optional[Indice]:
         """Los indices que Web Search tiene de esa bitacora, si la tiene.

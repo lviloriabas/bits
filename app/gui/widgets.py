@@ -854,7 +854,14 @@ class SpinBoxWithButtons(QWidget):
             QSizePolicy.Policy.Preferred,
             QSizePolicy.Policy.Fixed,
         )
-        spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        # Algunos estilos de Qt dejan el editor de NoButtons con un pixel
+        # de ancho al aplicar QSS. Se conservan los subcontroles y se ocultan
+        # con medidas cero para que el numero siempre siga siendo legible.
+        spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+        spin.setStyleSheet(
+            spin.styleSheet() + "QSpinBox::up-button, QSpinBox::down-button "
+            "{ width: 0; height: 0; border: 0; }"
+        )
 
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)

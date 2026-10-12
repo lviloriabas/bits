@@ -27,9 +27,9 @@ from __future__ import annotations
 from app.utils.mensajes import mensaje_aviso
 
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSignalBlocker, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -37,11 +37,13 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
     QSizePolicy,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -49,6 +51,7 @@ from PySide6.QtWidgets import (
 from app.airvault.mapping import fecha_airvault
 from app.airvault.model import EstadoRegistro, Registro
 from app.gui.responsive import Density, fit_to_screen
+from app.gui.batches_sidebar import agregar_filtros_al_menu
 from app.gui.table_sort import ColumnSortController
 from app.gui.theme import gestor_tema
 from app.gui.tokens import SPACE_S, paleta
@@ -56,6 +59,7 @@ from app.gui.widgets import (
     ElidedLabel,
     align_vertical_scrollbar_to_header,
     data_table_qss,
+    configure_menu_button,
     pane_status_colors,
     pintar_celda_del_tema,
     pintar_del_tema,
@@ -323,6 +327,8 @@ class _ListaBuscable(QDialog):
         exactas: list[int] = []
         parciales: list[int] = []
         for fila in range(self.tabla.rowCount()):
+            if self.tabla.isRowHidden(fila):
+                continue
             for columna in self._columnas_buscables():
                 item = self.tabla.item(fila, columna)
                 valor = item.text().strip().casefold() if item else ""
@@ -632,10 +638,14 @@ class VistaPreviaBatches(_ListaBuscable):
         previstos: Sequence,
         csv: Path | str = "",
         parent: QWidget | None = None,
+        filtros: Sequence = (),
+        filtrar: Callable[[Sequence], Sequence] | None = None,
     ) -> None:
         super().__init__(parent)
         self._previstos = list(previstos)
         self._csv = Path(csv) if csv else None
+        self._filtros = tuple(filtros)
+        self._filtrar = filtrar
         # Las ventanas de bitácoras que se hayan abierto desde aquí. Sin
         # esta referencia, Qt las destruiría al volver de este método.
         self._abiertas: list[BitacorasDelBatch] = []
@@ -649,35 +659,45 @@ class VistaPreviaBatches(_ListaBuscable):
         cuerpo.setContentsMargins(margen, margen, margen, margen)
         cuerpo.setSpacing(self._densidad.root_spacing)
 
-        por_subir = [p for p in self._previstos if not p.subido]
-        bitacoras = sum(len(p.bitacoras) for p in self._previstos)
-        intro = QLabel(
-            f"{_plural(len(self._previstos), 'batch', 'batches')} con "
-            f"{_plural(bitacoras, 'bitácora', 'bitácoras')} en total, "
-            f"{len(por_subir)} sin subir todavía."
-        )
-        intro.setWordWrap(True)
-        cuerpo.addWidget(intro)
+        self.intro = QLabel()
+        self.intro.setWordWrap(True)
+        cuerpo.addWidget(self.intro)
 
         self.tabla = _tabla(
             self.COLUMNAS,
-            "Batches de la entrega. Los que ya están en AirVault salen con "
-            "su estado; los demás se crearían al subir.",
+            "Todos los batches locales y los previstos para la entrega. "
+            "Los que ya están en AirVault salen con su estado.",
         )
         self.tabla.itemDoubleClicked.connect(self._abrir_bitacoras)
         self.tabla.itemSelectionChanged.connect(self._ajustar_boton)
         self._llenar()
         size_columns_once(self.tabla, stretch_last=True)
-        cuerpo.addLayout(
-            self._fila_de_busqueda(
-                self._PISTA,
-                "Busca en la lista de batches. Cada coincidencia selecciona "
-                "su fila; se recorren con ‹ y ›.",
-            )
+        busqueda = self._fila_de_busqueda(
+            self._PISTA,
+            "Busca en la lista de batches visibles. Cada coincidencia selecciona "
+            "su fila; se recorren con ‹ y ›.",
         )
+        if self._filtros:
+            menu = QMenu(self)
+            menu.setToolTipsVisible(True)
+            self.segun_marcas_accion = menu.addAction("Mostrar según las casillas")
+            self.segun_marcas_accion.setCheckable(True)
+            self.segun_marcas_accion.setToolTip(
+                "Aplica las casillas del panel lateral. Sin esta marca se muestran todos los batches."
+            )
+            self.segun_marcas_accion.toggled.connect(self._aplicar_filtros)
+            menu.addSeparator()
+            self.acciones_filtro = agregar_filtros_al_menu(menu, self._filtros)
+            for control in self._filtros:
+                control.toggled.connect(self._aplicar_filtros)
+            self.boton_mostrar = QToolButton()
+            self.boton_mostrar.setText("Mostrar batches")
+            configure_menu_button(self.boton_mostrar, menu)
+            busqueda.addWidget(self.boton_mostrar)
+        cuerpo.addLayout(busqueda)
         cuerpo.addWidget(self.tabla, 1)
         self.orden = ColumnSortController(self.tabla)
-        self.orden.sortChanged.connect(self._olvidar_busqueda)
+        self.orden.sortChanged.connect(self._aplicar_filtros)
 
         self.ayuda = QLabel(
             "Elija un batch para ver las bitácoras que lleva dentro."
@@ -702,8 +722,66 @@ class VistaPreviaBatches(_ListaBuscable):
         fila.addWidget(self.boton_cerrar)
         cuerpo.addLayout(fila)
 
-        if self._previstos:
-            self.tabla.selectRow(0)
+        self._aplicar_filtros()
+
+    def actualizar(self, previstos: Sequence) -> None:
+        """Refleja cambios de la cola conservando el orden y el batch elegido."""
+        nuevos = list(previstos)
+        if nuevos == self._previstos:
+            self._aplicar_filtros()
+            return
+        elegido = self._elegido()
+        clave = self._clave(elegido) if elegido else None
+        columna, descendente = self.orden.sorted_column, self.orden.descending
+        scroll = self.tabla.verticalScrollBar().value()
+        bloqueo = QSignalBlocker(self.tabla)
+        self.tabla.setUpdatesEnabled(False)
+        self._previstos = nuevos
+        self._llenar()
+        self.orden.reset()
+        self.orden.restore(columna, descendente)
+        for fila in range(self.tabla.rowCount()):
+            indice = self.tabla.item(fila, 0).data(Qt.ItemDataRole.UserRole)
+            if self._clave(self._previstos[indice]) == clave:
+                self.tabla.selectRow(fila)
+                break
+        self._aplicar_filtros()
+        self.tabla.verticalScrollBar().setValue(scroll)
+        self.tabla.setUpdatesEnabled(True)
+        del bloqueo
+
+    @staticmethod
+    def _clave(previsto):
+        return previsto.carpeta or (str(Path(previsto.csv_origen)).casefold(), previsto.nombre)
+
+    def _aplicar_filtros(self, *_args) -> None:
+        """Alterna toda la lista y la vista marcada, sin perder sus batches."""
+        filtrar = (bool(self._filtros) and self.segun_marcas_accion.isChecked()
+                   and self._filtrar is not None)
+        marcados = {id(p) for p in self._filtrar(self._previstos)} if filtrar else set()
+        visibles = []
+        for fila in range(self.tabla.rowCount()):
+            indice = self.tabla.item(fila, 0).data(Qt.ItemDataRole.UserRole)
+            previsto = self._previstos[indice]
+            visible = not filtrar or id(previsto) in marcados
+            self.tabla.setRowHidden(fila, not visible)
+            if visible:
+                visibles.append(previsto)
+        bitacoras = sum(len(p.bitacoras) for p in visibles)
+        self.intro.setText(
+            f"{_plural(len(visibles), 'batch', 'batches')} con "
+            f"{_plural(bitacoras, 'bitácora', 'bitácoras')} en total, "
+            f"{sum(not p.subido for p in visibles)} sin subir todavía."
+        )
+        if self._elegido() is None:
+            self.tabla.clearSelection()
+            self.tabla.setCurrentItem(None)
+            for fila in range(self.tabla.rowCount()):
+                if not self.tabla.isRowHidden(fila):
+                    self.tabla.selectRow(fila)
+                    break
+        self._ajustar_boton()
+        self._olvidar_busqueda()
 
     def _llenar(self) -> None:
         self.tabla.setRowCount(0)
@@ -736,7 +814,7 @@ class VistaPreviaBatches(_ListaBuscable):
 
     def _elegido(self):
         fila = self.tabla.currentRow()
-        item = self.tabla.item(fila, 0) if fila >= 0 else None
+        item = self.tabla.item(fila, 0) if fila >= 0 and not self.tabla.isRowHidden(fila) else None
         indice = item.data(Qt.ItemDataRole.UserRole) if item else None
         if not isinstance(indice, int) or indice >= len(self._previstos):
             return None
@@ -752,7 +830,7 @@ class VistaPreviaBatches(_ListaBuscable):
         ventana = BitacorasDelBatch(
             previsto.nombre,
             previsto.registros,
-            csv=self._csv or "",
+            csv=previsto.csv_origen or self._csv or "",
             completado=bool(previsto.completado),
             parent=self,
         )

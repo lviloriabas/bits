@@ -129,7 +129,7 @@ class AirVaultConfig:
     completar_batch: bool | None = None
     # La comprobacion sigue avisando; solo esta preferencia decide si bloquea.
     detener_por_duplicados: bool = True
-    porcentaje_duplicados: int = 1
+    porcentaje_duplicados: int = 5
     # Como se representa la fecha en el CSV: «month_end» o «specific_day».
     # Tampoco tiene valor impuesto por el programa. Es una decision de quien
     # entrega, no del archivo que se abre, asi que la instalacion conserva
