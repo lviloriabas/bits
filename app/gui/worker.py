@@ -438,13 +438,17 @@ class OutputsWorker(QThread):
     def run(self) -> None:
         """Punto de entrada del hilo de generación de salidas."""
         try:
+            from contextlib import nullcontext
+            from app.reports.exclusiones import turno_datos
             from app.reports.outputs import write_outputs
 
-            output_dir = write_outputs(
-                self.reports,
-                self.options,
-                on_stage=self._on_stage,
-            )
+            turno = turno_datos(self.options.run_dir) if self.options.run_dir is not None else nullcontext()
+            with turno:
+                output_dir = write_outputs(
+                    self.reports,
+                    self.options,
+                    on_stage=self._on_stage,
+                )
         except Exception as exc:  # noqa: BLE001 - la GUI muestra el error
             logger.exception("No se pudieron generar las salidas")
             self.failed.emit(mensaje_error(exc, "No se pudieron guardar los resultados. Cierre los archivos abiertos y vuelva a intentarlo."))

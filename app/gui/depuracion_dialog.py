@@ -21,28 +21,32 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QImage, QPixmap, QShortcut, QKeySequence
+from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QLabel,
-    QGroupBox,
     QHBoxLayout,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
+    QScrollArea,
     QWidget,
 )
 
 from app.gui.responsive import fit_to_screen
+from app.gui.exclusion_previa import PreviaExclusion
+from app.reports.exclusiones import motivo_restauracion
 from app.gui.theme import gestor_tema
 from app.gui.tokens import SPACE_S, on_accent_text, paleta
 from app.gui.widgets import (
     TABLE_RADIUS,
-    TABLE_SELECTION_BG,
     pintar_del_tema,
     window_stylesheet,
+    zoom_overlay_qss,
+    scrollbars_qss,
 )
 from app.validation.depuracion import (
     PaginaDepurable,
@@ -50,11 +54,13 @@ from app.validation.depuracion import (
     contar_depuracion,
     grupos_duplicados,
     paginas_en_blanco,
+    claves_depurables,
+    paginas_depurables,
 )
 
 DEPURAR_TOOLTIP = (
-    "Quita de la ejecución las páginas repetidas o en blanco. El CSV y el "
-    "JSON se reescriben sin ellas."
+    "Compare las páginas repetidas o en blanco, elija cuáles excluir y "
+    "restaure la última exclusión si necesita corregirla. Los originales se conservan."
 )
 
 # Lo que se contesta a quien intenta marcar la última aparición libre de una
@@ -103,38 +109,35 @@ def _texto_conteo(cantidad: int) -> str:
 
 
 def _etiqueta(pagina: PaginaDepurable, sufijo: str = "") -> str:
-    """Cómo se nombra una página en las listas del cuadro.
-
-    Detrás del archivo y la página va lo que la bitácora dice de sí misma.
-    Lo que no se leyó no se escribe: un hueco vacío entre dos guiones se
-    lee como un dato y no lo es. Una página sin nada legible se queda con
-    su nombre, que ya es toda la respuesta que hay.
-    """
-    escritos = [
-        dato for dato in (pagina.matricula, pagina.fecha, pagina.vuelo)
-        if dato
-    ]
-    cabeza = f"{pagina.archivo}, página {pagina.pagina}{sufijo}"
-    return f"{cabeza} - {', '.join(escritos)}" if escritos else cabeza
+    """Identifica cada pagina y nombra los datos que faltan."""
+    return (
+        f"Página {pagina.pagina}{sufijo}, archivo: {pagina.archivo}\n"
+        f"Matrícula: {pagina.matricula or 'No disponible'}, "
+        f"fecha: {pagina.fecha or 'No disponible'}, "
+        f"vuelo: {pagina.vuelo or 'No disponible'}"
+    )
 
 
 class DepurarPaginasDialog(QDialog):
     """Elige qué páginas se quitan y enseña cuáles son antes de hacerlo."""
 
-    def __init__(self, reports, parent: QWidget | None = None) -> None:
+    def __init__(self, reports, parent: QWidget | None = None, *, run_dir=None) -> None:
         super().__init__(parent)
         self._reports = list(reports)
-        self._preview_cache = {}
+        self.restaurar = False
+        self._run_dir = run_dir
+        self._pagina_actual = None
+        self._paginas = {p.clave: p for p in paginas_depurables(self._reports)}
         # El conteo por criterio no cambia mientras el cuadro está abierto:
         # se mide una vez sobre los reportes y las casillas solo eligen
         # cuáles de esas páginas entran en el total.
         self._disponibles = contar_depuracion(self._reports, True, True)
         self._grupos = grupos_duplicados(self._reports)
         self._blancas = paginas_en_blanco(self._reports)
-        self.setWindowTitle("Depurar páginas")
+        self.setWindowTitle("Revisar páginas repetidas y en blanco")
         # Como el resto de los cuadros: la pantalla decide el tamaño, que en
         # un portátil bajo el alto pedido deja los botones fuera del borde.
-        self._density = fit_to_screen(self, 760, 700)
+        self._density = fit_to_screen(self, 1040, 780)
         self._aplicar_hoja()
         self._build_ui()
         # La hoja lleva el fragmento de la densidad, así que la rehace el
@@ -143,31 +146,43 @@ class DepurarPaginasDialog(QDialog):
 
     def _aplicar_hoja(self) -> None:
         """La hoja del cuadro, con los tonos y las medidas de ahora."""
-        self.setStyleSheet(window_stylesheet(self._density.qss))
+        self.setStyleSheet(window_stylesheet(self._density.qss + zoom_overlay_qss()
+                                            + scrollbars_qss("QScrollArea")))
 
     def _al_cambiar_tema(self, _nombre: str) -> None:
         """Rehace la hoja del cuadro con los tonos del tema nuevo."""
         self._aplicar_hoja()
+        for arbol in (self.arbol_duplicados, self.arbol_blancas):
+            arbol.setStyleSheet(_arbol_qss())
 
     def _build_ui(self) -> None:
-        layout = QVBoxLayout(self)
+        raiz = QVBoxLayout(self)
         margin = max(SPACE_S, self._density.window_margin)
-        layout.setContentsMargins(margin, margin, margin, margin)
+        raiz.setContentsMargins(margin, margin, margin, margin)
+        raiz.setSpacing(SPACE_S)
+        scroll = QScrollArea()
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setWidgetResizable(True)
+        contenido = QWidget()
+        layout = QVBoxLayout(contenido)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(SPACE_S)
+        scroll.setWidget(contenido)
+        raiz.addWidget(scroll, 1)
         intro = QLabel(
-            "Marque las páginas que quiere quitar. Se actualizarán el CSV, "
-            "el JSON y las estadísticas; los PDF cambiarán cuando vuelva a "
-            "exportar."
+            "Compare las imágenes y marque las páginas que desea excluir de la entrega. "
+            "Seleccionar una fila muestra su imagen; marcar su casilla la excluye. "
+            "Puede conservar todas si necesita revisarlas después."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
         self.check_duplicados = QCheckBox(
-            f"Duplicados: {_texto_conteo(self._disponibles.duplicadas)}"
+            f"Marcar repeticiones: {_texto_conteo(self._disponibles.duplicadas)}"
         )
         self.check_duplicados.setToolTip(
-            "Bitácoras que aparecen más de una vez. Se quitan las "
-            "repeticiones y se queda una; abajo puede elegir cuál."
+            "Marca las apariciones posteriores para excluirlas. La primera aparición "
+            "solo indica el orden: compare las imágenes y cambie las marcas si lo necesita."
         )
         self.check_duplicados.setEnabled(bool(self._disponibles.duplicadas))
         self.check_duplicados.toggled.connect(self._marcar_duplicados)
@@ -179,6 +194,7 @@ class DepurarPaginasDialog(QDialog):
             "cada grupo se queda siempre."
         )
         self._llenar_duplicados()
+        self.arbol_duplicados.setMaximumHeight(150)
         layout.addWidget(self.arbol_duplicados, 1)
 
         self.check_blancas = QCheckBox(
@@ -197,12 +213,31 @@ class DepurarPaginasDialog(QDialog):
             "conservar."
         )
         self._llenar_blancas()
+        self.arbol_blancas.setMaximumHeight(85)
+        self.arbol_blancas.setVisible(bool(self._blancas))
         layout.addWidget(self.arbol_blancas, 1)
 
+        self.contexto = QLabel("Seleccione una página para comparar sus imágenes.")
+        self.contexto.setWordWrap(True)
+        layout.addWidget(self.contexto)
+        comparacion = QHBoxLayout()
+        comparacion.addWidget(QLabel("Comparar con:"))
+        self.comparar_combo = QComboBox()
+        self.comparar_combo.setAccessibleName("Página con la que se compara la bitácora")
+        self.comparar_combo.setMinimumContentsLength(15)
+        self.comparar_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.comparar_combo.setEnabled(False)
+        self.comparar_combo.currentIndexChanged.connect(lambda _: self._refrescar_vistas())
+        comparacion.addWidget(self.comparar_combo, 1)
+        layout.addLayout(comparacion)
         previews = QHBoxLayout()
-        self.previa_elegida = self._miniatura("Página seleccionada", previews)
-        self.previa_comparada = self._miniatura("Otra copia de la bitácora", previews)
-        layout.addLayout(previews)
+        self.vista_elegida = PreviaExclusion("Página seleccionada")
+        self.vista_comparada = PreviaExclusion("Página comparada")
+        previews.addWidget(self.vista_elegida, 1)
+        previews.addWidget(self.vista_comparada, 1)
+        self.previa_elegida = self.vista_elegida.imagen
+        self.previa_comparada = self.vista_comparada.imagen
+        layout.addLayout(previews, 4)
         for arbol in (self.arbol_duplicados, self.arbol_blancas):
             arbol.currentItemChanged.connect(self._mostrar_previa)
             for tecla in ("Return", "Enter"):
@@ -215,7 +250,13 @@ class DepurarPaginasDialog(QDialog):
             self.total_label, lambda: f"color: {paleta().TEXT_SECONDARY};"
         )
         self.total_label.setWordWrap(True)
-        layout.addWidget(self.total_label)
+        raiz.addWidget(self.total_label)
+        efectos = QLabel(
+            "Al aplicar se actualizarán los datos procesados. Los PDF de la entrega "
+            "cambiarán cuando vuelva a exportar. Los archivos originales se conservan."
+        )
+        efectos.setWordWrap(True)
+        raiz.addWidget(efectos)
 
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -224,29 +265,30 @@ class DepurarPaginasDialog(QDialog):
         self.boton_eliminar = self.buttons.button(
             QDialogButtonBox.StandardButton.Ok
         )
-        self.boton_eliminar.setText("Eliminar")
+        self.boton_eliminar.setText("Excluir páginas")
         self.boton_eliminar.setAutoDefault(False)
         self.buttons.button(
             QDialogButtonBox.StandardButton.Cancel
         ).setText("Cancelar")
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
-        layout.addWidget(self.buttons)
+        self.boton_restaurar = self.buttons.addButton(
+            "Restaurar última exclusión", QDialogButtonBox.ButtonRole.ActionRole
+        )
+        self.boton_restaurar.setAutoDefault(False)
+        motivo = motivo_restauracion(self._run_dir)
+        self.boton_restaurar.setEnabled(not motivo)
+        self.boton_restaurar.setToolTip(motivo or "Recupera los datos anteriores sin volver a leer las páginas.")
+        self.boton_restaurar.clicked.connect(self._pedir_restauracion)
+        raiz.addWidget(self.buttons)
 
         # Ninguna marcada de entrada: el cuadro se abre sin nada que borrar y
         # es quien lo abre el que elige, no el que descubre lo ya marcado.
         self._refrescar_total()
 
-    def _miniatura(self, titulo, fila):
-        grupo = QGroupBox(titulo)
-        columna = QVBoxLayout(grupo)
-        imagen = QLabel("Seleccione una página")
-        imagen.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        imagen.setMinimumWidth(160)
-        imagen.setFixedHeight(190)
-        columna.addWidget(imagen)
-        fila.addWidget(grupo, 1)
-        return imagen
+    def _pedir_restauracion(self):
+        self.restaurar = True
+        self.accept()
 
     def _alternar_elegida(self, arbol):
         item = arbol.currentItem()
@@ -257,44 +299,42 @@ class DepurarPaginasDialog(QDialog):
 
     def _mostrar_previa(self, item, _anterior=None):
         clave = item.data(0, _CLAVE) if item is not None else None
-        self._pintar_miniatura(self.previa_elegida, clave)
-        otra = next((p.clave for _, paginas in self._grupos
-                     if any(p.clave == clave for p in paginas)
-                     for p in paginas if p.clave != clave), None)
-        self._pintar_miniatura(self.previa_comparada, otra)
+        self._pagina_actual = clave
+        anterior = self.comparar_combo.currentData()
+        self.comparar_combo.blockSignals(True)
+        self.comparar_combo.clear()
+        paginas = next((paginas for _, paginas in self._grupos
+                        if any(p.clave == clave for p in paginas)), [])
+        for pagina in paginas:
+            if pagina.clave != clave:
+                self.comparar_combo.addItem(f"Página {pagina.pagina}, archivo: {pagina.archivo}", pagina.clave)
+        indice = self.comparar_combo.findData(anterior)
+        self.comparar_combo.setCurrentIndex(max(0, indice) if self.comparar_combo.count() else -1)
+        self.comparar_combo.setEnabled(self.comparar_combo.count() > 1)
+        self.comparar_combo.blockSignals(False)
+        if paginas:
+            self.contexto.setText(f"Número de bitácora: {paginas[0].log_number:07d}. "
+                                  f"Se encontraron {len(paginas)} páginas con este número de bitácora.")
+        else:
+            self.contexto.setText("Página detectada como en blanco. Revise la imagen antes de excluirla."
+                                  if clave else "Seleccione una página para comparar sus imágenes.")
+        self._refrescar_vistas()
 
-    def _pintar_miniatura(self, etiqueta, clave):
-        etiqueta.clear()
-        if clave is None:
-            etiqueta.setText("Sin página para comparar")
-            return
-        try:
-            pixmap = self._preview_cache.get(clave)
-            if pixmap is None:
-                import pymupdf
-                from app.utils.io import resolve_processed_path
-                ruta = resolve_processed_path(Path(self._reports[clave[0]].pdf_path))
-                with pymupdf.open(ruta) as pdf:
-                    pagina = pdf[clave[1] - 1]
-                    escala = min(500 / pagina.rect.width, 380 / pagina.rect.height)
-                    pixels = pagina.get_pixmap(matrix=pymupdf.Matrix(escala, escala), colorspace=pymupdf.csRGB, alpha=False)
-                    imagen = QImage(pixels.samples, pixels.width, pixels.height,
-                                    pixels.stride, QImage.Format.Format_RGB888).copy()
-                    pixmap = QPixmap.fromImage(imagen)
-                if len(self._preview_cache) >= 16:
-                    self._preview_cache.pop(next(iter(self._preview_cache)))
-                self._preview_cache[clave] = pixmap
-            etiqueta.setPixmap(pixmap.scaled(etiqueta.size(),
-                               Qt.AspectRatioMode.KeepAspectRatio,
-                               Qt.TransformationMode.SmoothTransformation))
-        except (OSError, RuntimeError, ValueError, IndexError):
-            etiqueta.setText("No se pudo abrir la página original")
+    def _refrescar_vistas(self):
+        excluidas = self.claves()
+        for vista, clave in ((self.vista_elegida, self._pagina_actual),
+                             (self.vista_comparada, self.comparar_combo.currentData())):
+            pagina = self._paginas.get(clave)
+            ruta = Path(self._reports[clave[0]].pdf_path) if pagina is not None else None
+            vista.mostrar(pagina, ruta, excluida=clave in excluidas)
 
     def _nuevo_arbol(self, ayuda: str) -> QTreeWidget:
         arbol = QTreeWidget()
         arbol.setHeaderHidden(True)
         arbol.setToolTip(ayuda)
-        arbol.setUniformRowHeights(True)
+        arbol.setUniformRowHeights(False)
+        arbol.setWordWrap(True)
+        arbol.setMinimumHeight(75)
         arbol.setRootIsDecorated(True)
         arbol.setAlternatingRowColors(False)
         arbol.setStyleSheet(_arbol_qss())
@@ -325,14 +365,14 @@ class DepurarPaginasDialog(QDialog):
         for numero, paginas in self._grupos:
             cabeza = QTreeWidgetItem(
                 self.arbol_duplicados,
-                [f"{numero:07d}: {len(paginas)} apariciones"],
+                [f"Número de bitácora: {numero:07d}, encontrada en {len(paginas)} páginas"],
             )
             # La cabecera agrupa, no se elige: marcarla no querría decir
             # nada, porque borrar el grupo entero pierde la bitácora.
             cabeza.setFlags(Qt.ItemFlag.ItemIsEnabled)
             cabeza.setExpanded(True)
             for orden, pagina in enumerate(paginas):
-                sufijo = " (primera)" if orden == 0 else ""
+                sufijo = " (primera aparición)" if orden == 0 else ""
                 self._nueva_hoja(pagina, _etiqueta(pagina, sufijo), cabeza)
 
     def _llenar_blancas(self) -> None:
@@ -386,6 +426,13 @@ class DepurarPaginasDialog(QDialog):
     def _al_cambiar_marca(self, item, _columna: int) -> None:
         if self._deshacer_si_vacia_el_grupo(item):
             return
+        clave = item.data(0, _CLAVE)
+        for arbol in (self.arbol_duplicados, self.arbol_blancas):
+            arbol.blockSignals(True)
+            for hoja in self._hojas(arbol):
+                if hoja.data(0, _CLAVE) == clave:
+                    hoja.setCheckState(0, item.checkState(0))
+            arbol.blockSignals(False)
         self._refrescar_total()
 
     def _deshacer_si_vacia_el_grupo(self, item) -> bool:
@@ -419,17 +466,32 @@ class DepurarPaginasDialog(QDialog):
         return True
 
     def _refrescar_total(self, aviso: str = "") -> None:
+        elegidas = claves_depurables(self._reports, self.claves())
+        for arbol in (self.arbol_duplicados, self.arbol_blancas):
+            arbol.blockSignals(True)
+            for item in self._hojas(arbol):
+                clave = item.data(0, _CLAVE)
+                item.setCheckState(0, Qt.CheckState.Checked if clave in elegidas else Qt.CheckState.Unchecked)
+                pagina = self._paginas[clave]
+                estado = "Se excluirá" if clave in elegidas else "Se conservará"
+                primera = item.parent() is not None and item.parent().child(0) is item
+                item.setText(0, f"{_etiqueta(pagina, ' (primera aparición)' if primera else '')}\n{estado}")
+                item.setToolTip(0, f"{_etiqueta(pagina)}\n{estado}")
+            arbol.blockSignals(False)
         resumen = self.resumen()
         if resumen.total:
             texto = (
-                f"Se eliminarán {_texto_conteo(resumen.total)} de la ejecución."
+                f"Se excluirán {_texto_conteo(resumen.total)} de la entrega. "
+                "Las páginas sin marcar se conservarán."
             )
         elif not self._disponibles.total:
             texto = "La ejecución no tiene páginas repetidas ni en blanco."
         else:
-            texto = "Marque al menos un criterio."
+            texto = "Todas las páginas se conservarán. Marque las que desea excluir."
         self.total_label.setText(f"{aviso} {texto}" if aviso else texto)
         self.boton_eliminar.setEnabled(bool(resumen.total))
+        self.boton_eliminar.setText(f"Excluir {_texto_conteo(resumen.total)}" if resumen.total else "Excluir páginas")
+        self._refrescar_vistas()
 
     def _claves_de(self, arbol: QTreeWidget) -> set:
         return {
