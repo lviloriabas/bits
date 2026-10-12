@@ -164,6 +164,42 @@ def observaciones_de_websearch(
     """
     observaciones: List[Observacion] = []
     total = len(claves)
+    consultar = getattr(buscador, "consultar_indices", None)
+    if callable(consultar):
+        por_libro = [bitacoras_del_libro(clave, cuantas) for clave in claves]
+        vistos: set[str] = set()
+        hechos = 0
+
+        def recibir(numero, _indice):
+            nonlocal hechos
+            vistos.add(numero)
+            terminados = sum(all(n in vistos for n in grupo) for grupo in por_libro)
+            while hechos < terminados:
+                hechos += 1
+                if al_avanzar is not None:
+                    al_avanzar(hechos, total)
+
+        indices = consultar(
+            [numero for grupo in por_libro for numero in grupo],
+            al_recibir=recibir,
+        )
+        for grupo in por_libro:
+            for numero in grupo:
+                indice = indices.get(numero)
+                if indice is not None and indice.util:
+                    observaciones.append(Observacion(
+                        log_number=numero,
+                        matricula=normalizar_matricula(indice.matricula),
+                        fecha=_fecha(indice.fecha),
+                        fuente="Web Search",
+                    ))
+        # Un libro con clave invalida no genera consultas, pero cuenta como
+        # revisado igual que en el recorrido en serie.
+        while hechos < total:
+            hechos += 1
+            if al_avanzar is not None:
+                al_avanzar(hechos, total)
+        return observaciones
     for hechos, clave in enumerate(claves, start=1):
         for numero in bitacoras_del_libro(clave, cuantas):
             indice = buscador.indice(numero)

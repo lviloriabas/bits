@@ -773,27 +773,40 @@ def _con_relecturas(
     hasta que cuadren o se acaben las esperas. Una lectura buena nunca se
     deshace, y una pagina cuyo problema es del manifiesto no se relee.
     """
-    batch_id = manifiesto.batch_id or ""
-    registros = list(manifiesto.bitacoras())
-    dormir = dormir or time.sleep
-    revisiones: Dict[int, _Revision] = {}
+    return _con_relecturas_varias(
+        cliente, [(manifiesto, revisar, al_avanzar)], esperas, dormir,
+    )[0]
 
-    def leer_todas(por_leer: Sequence[Registro], relectura: bool) -> None:
+
+def _con_relecturas_varias(cliente, revisores, esperas=(), dormir=None):
+    """Reparte las paginas de todos los batches dentro de un solo limite.
+
+    Las conexiones solo leen; las comparaciones, el progreso y cualquier
+    cambio en los registros se hacen en el hilo que llama.
+    """
+    registros = [list(manifiesto.bitacoras()) for manifiesto, _, _ in revisores]
+    dormir = dormir or time.sleep
+    revisiones: Dict[tuple[int, int], _Revision] = {}
+
+    def leer_todas(por_leer, relectura: bool) -> None:
         """Lee las paginas repartidas y las compara aqui, de una en una.
 
         ``revisar`` puede anotar la pagina en el manifiesto, asi que corre
         en este hilo aunque la lectura venga de otro carril. La barra solo
         avanza en la primera lectura; las relecturas son de unas pocas.
         """
-        hechas = 0
+        hechas = [0] * len(revisores)
 
-        def leer(conexion, registro: Registro):
+        def leer(conexion, tarea):
+            numero, registro = tarea
+            manifiesto = revisores[numero][0]
             return conexion.leer_pagina(
-                batch_id, registro.pagina_batch or registro.seq
+                manifiesto.batch_id or "", registro.pagina_batch or registro.seq
             )
 
-        def recibir(registro: Registro, remota, error) -> bool:
-            nonlocal hechas
+        def recibir(tarea, remota, error) -> bool:
+            numero, registro = tarea
+            manifiesto, revisar, al_avanzar = revisores[numero]
             pagina = registro.pagina_batch or registro.seq
             if isinstance(error, FALLOS_DE_CAMINO):
                 raise error
@@ -805,52 +818,63 @@ def _con_relecturas(
                 )
             else:
                 revision = revisar(registro, remota, pagina)
-            revisiones[registro.seq] = revision
-            hechas += 1
+            revisiones[numero, registro.seq] = revision
+            hechas[numero] += 1
             if relectura:
                 if revision.valida:
                     logger.info(
                         "Batch {}: la pagina {} quedo confirmada al releerla",
-                        batch_id, pagina,
+                        manifiesto.batch_id, pagina,
                     )
-            elif al_avanzar and hechas < len(registros):
-                al_avanzar(hechas, len(registros))
+            elif al_avanzar and hechas[numero] < len(registros[numero]):
+                al_avanzar(hechas[numero], len(registros[numero]))
             return True
 
-        repartir(cliente, por_leer, leer, recibir)
+        repartir(cliente, por_leer, leer, recibir, minimo_para_repartir=2)
 
-    if al_avanzar:
-        al_avanzar(0, len(registros))
-    leer_todas(registros, relectura=False)
+    for numero, (_, _, al_avanzar) in enumerate(revisores):
+        if al_avanzar:
+            al_avanzar(0, len(registros[numero]))
+    # Intercalar batches tambien permite verificarlos a la vez cuando cada
+    # uno tiene mas paginas que el numero de conexiones disponibles.
+    tareas = [
+        (numero, grupo[pagina])
+        for pagina in range(max((len(grupo) for grupo in registros), default=0))
+        for numero, grupo in enumerate(registros) if pagina < len(grupo)
+    ]
+    leer_todas(tareas, relectura=False)
     for ronda, espera in enumerate(esperas, start=1):
         dudosas = [
-            registro for registro in registros
-            if not revisiones[registro.seq].valida
-            and not revisiones[registro.seq].definitiva
+            (numero, registro) for numero, registro in tareas
+            if not revisiones[numero, registro.seq].valida
+            and not revisiones[numero, registro.seq].definitiva
         ]
         if not dudosas:
             break
         logger.info(
-            "Batch {}: {} paginas sin confirmar ({}); se releen en {:.0f} s "
+            "Verificacion: {} paginas sin confirmar; se releen en {:.0f} s "
             "(relectura {}/{})",
-            batch_id, len(dudosas), revisiones[dudosas[0].seq].problemas[0],
-            espera, ronda, len(esperas),
+            len(dudosas), espera, ronda, len(esperas),
         )
         dormir(espera)
         leer_todas(dudosas, relectura=True)
-    if al_avanzar:
-        al_avanzar(len(registros), len(registros))
-    validas = sum(1 for revision in revisiones.values() if revision.valida)
-    problemas = [
-        problema for registro in registros
-        for problema in revisiones[registro.seq].problemas
-    ]
-    if problemas:
-        logger.warning(
-            "Batch {}: {}/{} paginas confirmadas. Primer problema: {}",
-            batch_id, validas, len(registros), problemas[0],
-        )
-    return validas, len(registros), problemas
+    resultados = []
+    for numero, (manifiesto, _, al_avanzar) in enumerate(revisores):
+        grupo = registros[numero]
+        if al_avanzar:
+            al_avanzar(len(grupo), len(grupo))
+        validas = sum(revisiones[numero, registro.seq].valida for registro in grupo)
+        problemas = [
+            problema for registro in grupo
+            for problema in revisiones[numero, registro.seq].problemas
+        ]
+        if problemas:
+            logger.warning(
+                "Batch {}: {}/{} paginas confirmadas. Primer problema: {}",
+                manifiesto.batch_id, validas, len(grupo), problemas[0],
+            )
+        resultados.append((validas, len(grupo), problemas))
+    return resultados
 
 
 def verificar_revision(
@@ -864,6 +888,12 @@ def verificar_revision(
     Exigir Valid a esas paginas repetia un guardado que ya habia terminado.
     Esta comprobacion no publica ni completa el batch.
     """
+    return _con_relecturas(
+        cliente, manifiesto, _revisor_revision(manifiesto), esperas, dormir, al_avanzar,
+    )
+
+
+def _revisor_revision(manifiesto):
     from app.airvault.ecn import conservar_razones
 
     def revisar(registro: Registro, remota, pagina: int) -> _Revision:
@@ -885,9 +915,7 @@ def verificar_revision(
         registro.pagina_batch = pagina
         return _Revision(True)
 
-    return _con_relecturas(
-        cliente, manifiesto, revisar, esperas, dormir, al_avanzar,
-    )
+    return revisar
 
 
 def verificar_lote(
@@ -903,6 +931,10 @@ def verificar_lote(
     antes de contarlas como problema (ver :func:`_con_relecturas`).
     """
 
+    return _con_relecturas(cliente, manifiesto, _revisor_lote(), esperas, dormir)
+
+
+def _revisor_lote():
     def revisar(registro: Registro, remota, pagina: int) -> _Revision:
         problemas: List[str] = []
         work_location = str(
@@ -970,4 +1002,18 @@ def verificar_lote(
             definitiva=not fecha_esperada or registro.fecha_dudosa,
         )
 
-    return _con_relecturas(cliente, manifiesto, revisar, esperas, dormir)
+    return revisar
+
+
+def verificar_lotes(cliente, manifiestos, esperas=(), dormir=None, al_avanzar=None):
+    """Verifica varios batches sin multiplicar las conexiones por cada uno."""
+    revisores = []
+    for manifiesto in manifiestos:
+        revisar = (_revisor_revision(manifiesto) if manifiesto.solo_subir
+                   else _revisor_lote())
+        avisar = None
+        if al_avanzar is not None:
+            def avisar(hechas, total, propio=manifiesto):
+                al_avanzar(propio, hechas, total)
+        revisores.append((manifiesto, revisar, avisar))
+    return _con_relecturas_varias(cliente, revisores, esperas, dormir)
