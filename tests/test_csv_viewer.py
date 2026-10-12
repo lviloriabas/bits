@@ -35,6 +35,21 @@ from app.templates.schema import FieldTemplate, Template
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
+def test_pending_pdf_refresh_is_cancelled_when_the_viewer_is_destroyed(app, monkeypatch):
+    from shiboken6 import delete
+
+    viewer = EmbeddedPdfViewer()
+    app.processEvents()
+    refreshes = []
+    monkeypatch.setattr(viewer, "_refresh_view", lambda: refreshes.append(True))
+    viewer._schedule_refresh()
+    viewer.shutdown()
+    delete(viewer)
+    app.processEvents()
+
+    assert refreshes == []
+
+
 def _columns() -> list[str]:
     return [
         "file",
