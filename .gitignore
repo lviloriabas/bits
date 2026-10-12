@@ -56,7 +56,6 @@ interfaz.json
 .codex*/
 .codex*/*
 img/
-AGENTS.md
 
 # Cache de flota que arma el indexado de AirVault
 airvault_flota.json
