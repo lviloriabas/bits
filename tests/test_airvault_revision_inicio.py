@@ -59,6 +59,12 @@ def crear_trabajo(raiz, nombre, subida=None, batch_id=None, completado=False):
     return Trabajo(AirVaultConfig(), raiz / "output" / "airvault" / nombre, manifiesto)
 
 
+@pytest.fixture(autouse=True)
+def _chequeo_que_arranca_solo(monkeypatch):
+    """Este modulo cubre el chequeo automatico, que hoy esta apagado."""
+    monkeypatch.setattr(modulo, "CHEQUEO_WEBSEARCH_AUTOMATICO", True)
+
+
 @pytest.fixture
 def ventana(app, tmp_path, monkeypatch):
     monkeypatch.setattr(modulo, "TrabajoAirVaultWorker", WorkerFalso)

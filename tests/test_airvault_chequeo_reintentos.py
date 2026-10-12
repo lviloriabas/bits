@@ -354,6 +354,9 @@ def _bitacora(ventana):
 
 
 def test_un_chequeo_que_no_pudo_empezar_se_repite_solo(ventana, tmp_path, monkeypatch):
+    # «Revisar en AirVault» solo empieza por Web Search con el chequeo
+    # automatico encendido; es la cadena que esta prueba sigue.
+    monkeypatch.setattr("app.gui.airvault_window.CHEQUEO_WEBSEARCH_AUTOMATICO", True)
     trabajos = _en_la_ventana(ventana, tmp_path)
     monkeypatch.setattr(ventana, "_encolar", lambda *_: pytest.fail("No hay nada revisado todavia"))
     ventana._revisar_a_mano()
@@ -399,7 +402,8 @@ def test_la_cuenta_del_chequeo_va_por_delante_de_la_revision_periodica(ventana, 
     assert viva.startswith("Depende de AirVault: próxima revisión en")
 
 
-def test_gastados_los_intentos_el_chequeo_queda_pendiente_y_se_dice(ventana, tmp_path):
+def test_gastados_los_intentos_el_chequeo_queda_pendiente_y_se_dice(ventana, tmp_path, monkeypatch):
+    monkeypatch.setattr("app.gui.airvault_window.CHEQUEO_WEBSEARCH_AUTOMATICO", True)
     _en_la_ventana(ventana, tmp_path)
     ventana._revisar_a_mano()
     for _ in modulo.MINUTOS_ENTRE_CHEQUEOS:

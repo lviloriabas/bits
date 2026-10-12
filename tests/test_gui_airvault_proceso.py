@@ -56,6 +56,9 @@ def test_pausar_y_continuar_conserva_el_trabajo_y_el_ancho_del_boton(app, tmp_pa
 
 
 def test_la_pausa_detiene_tambien_lecturas_y_comprobaciones_pendientes(app, tmp_path, monkeypatch):
+    # Con el chequeo automatico encendido, la lectura cortada se apunta para
+    # que la retome la confirmacion del proceso.
+    monkeypatch.setattr("app.gui.airvault_window.CHEQUEO_WEBSEARCH_AUTOMATICO", True)
     ventana = AirVaultWindow(tmp_path)
     cancelados = []
     worker = SimpleNamespace(cancelar=lambda: cancelados.append("proceso"))

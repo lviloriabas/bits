@@ -307,6 +307,16 @@ MINUTOS_TRAS_FALLOS = 15
 # revisión periódica, que mira la cola de Web Index y no esto.
 MINUTOS_ENTRE_CHEQUEOS = (2, 5, 10, 15)
 
+# Si el chequeo de Web Search arranca solo. Por ahora no: se pide a mano, con
+# «Verificar subidas en Web Search» o «Verificar todas las bitácoras en Web
+# Search». Empezar o continuar el proceso, la revisión periódica y «Revisar
+# en AirVault» siguen con lo suyo (subir, indexar, completar) sin consultar
+# Web Search. Antes, empezar el proceso lanzaba además la revisión de todos
+# los batches ya subidos, y el proceso no se daba por terminado hasta que
+# esa lectura acabara. Lo que sí sigue solo es lo que un chequeo pedido a
+# mano deja pendiente: su nuevo intento y la resubida de lo que no encontró.
+CHEQUEO_WEBSEARCH_AUTOMATICO = False
+
 # Líneas que conserva la bitácora. Con la comprobación automática corriendo
 # toda una tarde, sin tope crecería sin fin.
 LIMITE_BITACORA = 300
@@ -2089,6 +2099,9 @@ class AirVaultWindow(QDialog):
         self._cancelacion_solicitada = False
         self._controles_ocupados = False
         self._continuacion_lector = None
+        # Si al pausar había además subida o indexado en marcha: al continuar
+        # se retoman las dos cosas y no solo el chequeo que se pidió a mano.
+        self._continuacion_principal = False
         # Fallos seguidos sin ninguna comprobación buena por medio. Es lo
         # que separa un tropiezo de AirVault de un problema que tarda en
         # arreglarse; ver `FALLOS_SEGUIDOS_ANTES_DE_ESPACIAR`.
@@ -4469,17 +4482,43 @@ class AirVaultWindow(QDialog):
         self._proceso_iniciado = True
         if continuar:
             self._anotar("Continuando el proceso desde lo guardado")
+            lecturas = self._continuacion_lector
+            self._continuacion_lector = None
+            solo_chequeo = lecturas is not None and not self._continuacion_principal
+            self._continuacion_principal = False
             if self._preparacion_pendiente:
                 self._subir_a_mano()
-            elif self._continuacion_lector is not None:
-                trabajos = self._continuacion_lector
-                self._continuacion_lector = None
-                self._iniciar_confirmacion(trabajos, automatico=False)
-            else:
+            elif not solo_chequeo:
                 self._continuar_pendiente()
+            if lecturas is not None:
+                self._iniciar_confirmacion(lecturas, automatico=False)
+            if not solo_chequeo:
+                self._retomar_ausentes()
         else:
             self._subir_a_mano()
+            self._retomar_ausentes()
         self._actualizar_botones_proceso()
+
+    def _retomar_ausentes(self) -> None:
+        """Pone en turno los batches que un chequeo dejó como no publicados.
+
+        Continuar el proceso es terminar todo lo que no esté completado, y
+        esos batches son los que más falta hace: se marcaron como subidos y
+        Web Search contestó que no los tiene. Volver a subirlos pasa por la
+        misma comprobación de siempre, que no manda un PDF si alguna de sus
+        bitácoras sigue publicada.
+        """
+        ausentes = [
+            trabajo for trabajo in self._filtrar_trabajos(self._trabajos)
+            if trabajo.manifiesto.websearch_resultado == "ausente"
+            and not trabajo.manifiesto.cancelado
+        ]
+        if ausentes:
+            self._encolar(
+                "recuperar_ausentes", ausentes,
+                "Se retoma 1 batch que no está en Web Search" if len(ausentes) == 1
+                else f"Se retoman {len(ausentes)} batches que no están en Web Search",
+            )
 
     def _detener_cadena(self) -> None:
         self._parar_vigilancia()
@@ -4503,13 +4542,18 @@ class AirVaultWindow(QDialog):
         en_espera = list(self._chequeo_por_repetir.values())
         lecturas += en_espera
         lecturas = list({str(t.carpeta): t for t in lecturas}.values())
-        self._continuacion_lector = (
-            lecturas if principal is None and (lector is not None or en_espera) else None
-        )
+        hay_chequeo = lector is not None or bool(en_espera)
+        if CHEQUEO_WEBSEARCH_AUTOMATICO:
+            # Con trabajo en marcha lo retoma la confirmación automática.
+            self._continuacion_lector = lecturas if principal is None and hay_chequeo else None
+        else:
+            self._continuacion_lector = lecturas if hay_chequeo else None
+        self._continuacion_principal = principal is not None
         for trabajo in lecturas:
             clave = str(trabajo.carpeta)
             self._websearch_revisados.pop(clave, None)
-            self._websearch_inicio_por_revisar.add(clave)
+            if CHEQUEO_WEBSEARCH_AUTOMATICO:
+                self._websearch_inicio_por_revisar.add(clave)
         self._pausado = True
         self._proceso_iniciado = True
         self._cancelacion_solicitada = False
@@ -5837,7 +5881,8 @@ class AirVaultWindow(QDialog):
         return pendientes
 
     def _ajustar_confirmacion(self) -> None:
-        if (not hasattr(self, "auto_check") or self._deteniendo
+        if (not CHEQUEO_WEBSEARCH_AUTOMATICO
+                or not hasattr(self, "auto_check") or self._deteniendo
                 or self._pausado or self._cancelacion_solicitada):
             if self._confirmador is not None:
                 self._confirmador.stop()
@@ -5857,7 +5902,8 @@ class AirVaultWindow(QDialog):
             self._confirmador.start(0)
 
     def _confirmar_solo(self) -> None:
-        if self._deteniendo or self._pausado or self._cancelacion_solicitada:
+        if (not CHEQUEO_WEBSEARCH_AUTOMATICO or self._deteniendo
+                or self._pausado or self._cancelacion_solicitada):
             return
         trabajos = self._pendientes_websearch_automaticos()
         if not trabajos:
@@ -6097,9 +6143,18 @@ class AirVaultWindow(QDialog):
         «Completar batch», los completa. Antes solo subía si además estaba
         marcada la revisión periódica, así que con ella apagada el botón
         miraba la cola y no terminaba nada.
+
+        No consulta Web Search mientras ese chequeo sea solo manual: mira la
+        cola de AirVault, que es lo que su nombre promete, y retoma además
+        lo que un chequeo anterior dejó como no publicado.
         """
-        self._revision_airvault_pendiente = True
         self._subidas_del_ciclo.clear()
+        if not CHEQUEO_WEBSEARCH_AUTOMATICO:
+            self._cadena_manual = True
+            self._comprobar()
+            self._retomar_ausentes()
+            return
+        self._revision_airvault_pendiente = True
         self._buscar_websearch()
 
     def _indexar(self, automatico: bool = False) -> None:
@@ -6227,7 +6282,7 @@ class AirVaultWindow(QDialog):
             return
         if self._worker is not None and self._worker.isRunning():
             return
-        if not self._websearch_proceso_activo:
+        if CHEQUEO_WEBSEARCH_AUTOMATICO and not self._websearch_proceso_activo:
             self._websearch_inicio = {
                 str(t.carpeta) for t in self._subidos_por_confirmar_websearch()
             }

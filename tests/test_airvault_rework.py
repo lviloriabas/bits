@@ -334,6 +334,8 @@ def test_ocultar_indexados_sin_completar_conserva_cien_por_ciento(app, tmp_path)
 
 
 def test_revision_empieza_sin_intervalo_y_consulta_todos_aunque_haya_subida(app, tmp_path, monkeypatch):
+    # El chequeo automatico esta apagado por ahora; esto cubre su arranque.
+    monkeypatch.setattr("app.gui.airvault_window.CHEQUEO_WEBSEARCH_AUTOMATICO", True)
     ventana = AirVaultWindow(tmp_path)
     ventana._trabajos = [trabajo(tmp_path, n) for n in ("primero", "segundo", "tercero")]
     from app.airvault.model import EstadoEtapa

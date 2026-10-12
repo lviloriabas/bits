@@ -241,16 +241,24 @@ def test_subir_con_batches_ya_subidos_retoma_los_que_faltan(cadena):
     _todo_terminado(ventana, cliente, trabajos, fallos)
 
 
+@pytest.mark.parametrize("chequeo_automatico", [False, True], ids=["chequeo-manual", "chequeo-automatico"])
 @pytest.mark.parametrize("reloj", [True, False], ids=["con-reloj", "sin-reloj"])
-def test_revisar_en_airvault_termina_todo_lo_que_falta(cadena, reloj):
-    """Sube lo que falta, indexa y completa, con o sin revisión periódica."""
+def test_revisar_en_airvault_termina_todo_lo_que_falta(cadena, reloj, chequeo_automatico, monkeypatch):
+    """Sube lo que falta, indexa y completa, con o sin revisión periódica.
+
+    Con el chequeo de Web Search solo manual, que es como está, la revisión
+    mira la cola de AirVault y termina igual; no empieza por Web Search.
+    """
+    monkeypatch.setattr("app.gui.airvault_window.CHEQUEO_WEBSEARCH_AUTOMATICO", chequeo_automatico)
     ventana, cliente, trabajos, fallos, modos = cadena
     ventana.auto_check.setChecked(reloj)
 
     ventana.boton_revisar.trigger()
 
     _todo_terminado(ventana, cliente, trabajos, fallos)
-    assert modos[0] == "recuperar_ausentes"
+    assert modos[0] == ("recuperar_ausentes" if chequeo_automatico else "comprobar")
+    if not chequeo_automatico:
+        assert "recuperar_ausentes" not in modos
 
 
 def test_continuar_pendiente_termina_todo_lo_que_falta(cadena):
