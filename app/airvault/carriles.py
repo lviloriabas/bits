@@ -66,6 +66,8 @@ def repartir(
     tareas: Iterable[T],
     hacer: Hacer,
     recibir: Recibir,
+    *,
+    minimo_para_repartir: int = MINIMO_PARA_REPARTIR,
 ) -> None:
     """Hace ``hacer(cliente, tarea)`` con cada tarea y entrega cada resultado.
 
@@ -79,11 +81,19 @@ def repartir(
 
     Sin carriles (un cliente sin :meth:`carril`, ``carriles_indexado`` en 1
     o pocas tareas) todo va en serie con ``cliente``, igual que siempre.
+    Las comprobaciones pueden pedir reparto desde dos tareas. Si no hay
+    suficientes para medir, se reparten sin una muestra previa en serie.
     """
     pendientes: Deque[T] = deque(tareas)
     carriles = _carriles_de(cliente)
-    if carriles < 2 or len(pendientes) < MINIMO_PARA_REPARTIR:
+    if carriles < 2 or len(pendientes) < max(2, minimo_para_repartir):
         _en_serie(cliente, pendientes, hacer, recibir)
+        return
+    carriles = min(carriles, len(pendientes))
+    if len(pendientes) < MINIMO_PARA_REPARTIR:
+        resto = _en_paralelo(cliente, carriles, pendientes, hacer, recibir, 0.0)
+        if resto:
+            _en_serie(cliente, resto, hacer, recibir)
         return
     tiempos: List[float] = []
     while pendientes and len(tiempos) < MUESTRA_EN_SERIE:
@@ -152,6 +162,7 @@ def _en_paralelo(
 
     ``None`` si ``recibir`` pidio parar o ya no queda nada.
     """
+    carriles = min(carriles, len(pendientes))
     abiertos: List[object] = []
     libres: "queue.SimpleQueue[object]" = queue.SimpleQueue()
     try:

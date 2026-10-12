@@ -184,11 +184,12 @@ class AirVaultConfig:
     # Cuanto se espera a que alguien entre a AirVault en la ventana que abre
     # el programa. Cinco minutos dan de sobra para un segundo factor.
     espera_login_s: float = 300.0
-    # Conexiones con las que se leen y escriben a la vez las paginas de un
-    # batch al indexar, verificar y reintentar las amarillas. La subida no
-    # entra aqui: sigue siendo de un archivo en uno. Cada lectura o escritura
-    # mide si repartir de verdad acelera y, si AirVault atiende de una en una
-    # las peticiones de la sesion, vuelve sola a una sola conexion. Con 1 no
+    # Conexiones para leer y escribir paginas, verificar batches disponibles
+    # y consultar Web Search. Una verificacion de varios batches comparte
+    # este limite. La subida y la espera a que aparezca cada carga siguen de
+    # una en una. Los recorridos largos miden si repartir acelera y, si
+    # AirVault atiende de una en una las peticiones de la sesion, vuelve a
+    # una sola conexion. Con 1 no
     # se reparte nunca.
     carriles_indexado: int = 4
     # Perfil de Edge propio del programa. Vacio usa el de portable/.

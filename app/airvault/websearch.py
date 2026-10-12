@@ -45,12 +45,15 @@ from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from loguru import logger
 
+from app.airvault.carriles import repartir
+from app.airvault.client import ClienteHttp
 from app.airvault.config import (
     CAMPO_LOG_NUMBER,
     AirVaultConfig,
     guardar_ruta_websearch,
 )
 from app.airvault.mapping import fecha_desde_airvault
+from app.airvault.session import SesionCancelada
 
 # Portada del modulo. De aqui salen la ruta base y los scripts que se leen.
 PORTADA = "/zfp/"
@@ -412,6 +415,8 @@ class Buscador:
         """Si esa ruta devuelve esa bitacora. None si ni siquiera contesto."""
         try:
             datos = self._pedir(ruta, plantilla, numero)
+        except SesionCancelada:
+            raise
         except Exception as exc:  # noqa: BLE001 - se prueba la siguiente
             logger.debug("Web Search {} ({}): {}", ruta, plantilla, exc)
             return None
@@ -532,6 +537,8 @@ class Buscador:
             return Consulta(None, self._motivo)
         try:
             datos = self._pedir(self._ruta, self._plantilla, numero)
+        except SesionCancelada:
+            raise
         except Exception as exc:  # noqa: BLE001 - una consulta que no sale
             motivo = f"Web Search no contesto: {exc}"
             logger.info(motivo)
@@ -560,6 +567,8 @@ class Buscador:
             return None
         try:
             datos = self._pedir(self._ruta, self._plantilla, numero)
+        except SesionCancelada:
+            raise
         except Exception as exc:  # noqa: BLE001 - una consulta que no sale
             logger.info("Web Search no contesto por {}: {}", numero, exc)
             return None
@@ -572,6 +581,86 @@ class Buscador:
             # nada.
             self._memoria[numero] = True
         return encontrado
+
+    def _pedir_varios(self, numeros: Sequence[str], recibir) -> None:
+        """Consulta la ruta descubierta con conexiones propias de cada hilo.
+
+        La ruta, la memoria y los resultados solo se actualizan en el hilo
+        propietario. Los fallos de sesion o red de un carril se reintentan
+        por la conexion principal antes de dar una consulta por incierta.
+        """
+        forma = PLANTILLAS[self._plantilla]
+
+        def pedir(conexion, numero):
+            if conexion.sesion is self.sesion:
+                return self._pedir(self._ruta, self._plantilla, numero)
+            return conexion.sesion.get(
+                self._ruta, forma.construir(numero, self.config)
+            )
+
+        def entregar(numero, datos, error):
+            if isinstance(error, SesionCancelada):
+                raise error
+            recibir(numero, datos, error)
+
+        repartir(ClienteHttp(self.sesion, self.config), numeros, pedir, entregar,
+                 minimo_para_repartir=2)
+
+    def consultar_publicadas(self, numeros: Sequence[str]) -> Dict[str, Consulta]:
+        """Comprueba varias bitacoras sin repetir el descubrimiento ni la memoria."""
+        numeros = list(dict.fromkeys(
+            str(n or "").strip() for n in numeros if str(n or "").strip()
+        ))
+        resultados = {
+            n: Consulta(self._memoria[n]) for n in numeros if n in self._memoria
+        }
+        pendientes = [n for n in numeros if n not in resultados]
+        if pendientes and not self.preparar():
+            resultados.update({n: Consulta(None, self._motivo) for n in pendientes})
+        elif pendientes:
+            def recibir(numero, datos, error):
+                if error is not None:
+                    resultados[numero] = Consulta(None, f"Web Search no contesto: {error}")
+                else:
+                    publicada = _aparece(numero, datos)
+                    self._memoria[numero] = publicada
+                    resultados[numero] = Consulta(publicada)
+
+            self._pedir_varios(pendientes, recibir)
+        return {n: resultados[n] for n in numeros}
+
+    def consultar_indices(
+        self, numeros: Sequence[str], al_recibir=None,
+    ) -> Dict[str, Optional[Indice]]:
+        """Lee varios indices; descubre la ruta una vez antes de repartir."""
+        pendientes = list(dict.fromkeys(
+            str(n or "").strip() for n in numeros if str(n or "").strip()
+        ))
+        resultados: Dict[str, Optional[Indice]] = {}
+
+        def anotar(numero, indice):
+            resultados[numero] = indice
+            if indice is not None:
+                self._memoria[numero] = True
+            if al_recibir is not None:
+                al_recibir(numero, indice)
+
+        if pendientes:
+            self.preparar()
+        # Sin control positivo se puede adoptar una ruta que encuentre un
+        # numero de esta tanda. Ese descubrimiento usa solo la sesion principal.
+        while pendientes and not self._ruta:
+            numero = pendientes.pop(0)
+            anotar(numero, self.indice(numero))
+
+        def recibir(numero, datos, error):
+            if error is not None:
+                logger.info("Web Search no contesto por {}: {}", numero, error)
+            anotar(numero, None if error is not None else indice_en(datos, numero))
+
+        if pendientes:
+            self._pedir_varios(pendientes, recibir)
+        return resultados
 
 
 def muestra_de(
@@ -643,8 +732,12 @@ def revisar_batch(
             motivo="el batch no trae numeros de bitacora que buscar"
         )
     veredicto = Veredicto()
+    consultar = getattr(buscador, "consultar_publicadas", None)
+    consultas = consultar(muestra) if callable(consultar) else {
+        numero: buscador.publicada(numero) for numero in muestra
+    }
     for numero in muestra:
-        consulta = buscador.publicada(numero)
+        consulta = consultas[numero]
         if consulta.publicada is True:
             veredicto.publicadas.append(numero)
         elif consulta.publicada is False:

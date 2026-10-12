@@ -218,7 +218,8 @@ class ClienteHttp:
                                           SesionCancelada)
 
         nombres = list(dict.fromkeys(nombres))
-        if len(nombres) < 2 or not callable(getattr(self.sesion, "clonar", None)):
+        carriles = min(4, self.carriles(), len(nombres))
+        if carriles < 2:
             for nombre in nombres:
                 yield nombre, self.listar_lotes(nombre)
             return
@@ -234,7 +235,7 @@ class ClienteHttp:
                 sesion.http.close()
 
         restantes = iter(nombres)
-        ejecutor = ThreadPoolExecutor(max_workers=4)
+        ejecutor = ThreadPoolExecutor(max_workers=carriles)
         futuros = {}
         try:
             def enviar():
@@ -244,7 +245,7 @@ class ClienteHttp:
                     sesion = self.sesion.clonar(renovable=False)
                     futuros[ejecutor.submit(consultar, sesion, nombre)] = nombre
 
-            for _ in range(min(4, len(nombres))):
+            for _ in range(carriles):
                 enviar()
             while futuros:
                 terminados, _ = wait(futuros, return_when=FIRST_COMPLETED)

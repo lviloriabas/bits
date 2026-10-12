@@ -29,6 +29,7 @@ from loguru import logger
 
 from app.airvault import manifest as manifiestos
 from app.airvault.client import ResumenLote
+from app.airvault.carriles import repartir
 from app.airvault.config import (
     CAMPO_BATCH_NAME,
     CAMPO_END_DATE,
@@ -45,7 +46,7 @@ from app.airvault.discovery import (
     recien_llegados,
 )
 from app.airvault.discovery import buscar as buscar_lote
-from app.airvault.indexer import Indexador, Plan, Resultado, verificar_lote
+from app.airvault.indexer import Indexador, Plan, Resultado, verificar_lote, verificar_lotes
 from app.airvault.mapping import (
     ResolutorFlota,
     leer_csv_corrida,
@@ -1817,12 +1818,19 @@ class Trabajo:
                 cliente, self.manifiesto, al_avanzar=al_avanzar,
                 esperas=esperas, dormir=dormir,
             )
-            detalle = (f"{validas}/{total} con los datos disponibles revisados; "
-                       "las incidencias quedan para revision humana")
         else:
             validas, total, problemas = verificar_lote(
                 cliente, self.manifiesto, esperas=esperas, dormir=dormir,
             )
+        self.registrar_verificacion(validas, total, problemas)
+        return validas, total, problemas
+
+    def registrar_verificacion(self, validas: int, total: int, problemas) -> None:
+        """Guarda el resultado en el hilo propietario, despues de las lecturas."""
+        if self.manifiesto.solo_subir:
+            detalle = (f"{validas}/{total} con los datos disponibles revisados; "
+                       "las incidencias quedan para revision humana")
+        else:
             detalle = f"{validas}/{total} en Valid"
         if validas != total and problemas:
             detalle += f"; {problemas[0]}"
@@ -1831,7 +1839,6 @@ class Trabajo:
             detalle,
         )
         self.guardar()
-        return validas, total, problemas
 
     def completar(
         self, cliente, automatico: bool = False
@@ -5270,13 +5277,7 @@ def _mapa_del_lote(trabajo: "Trabajo", cliente) -> Optional[list]:
         return None
 
 
-def _nada_en_verde(trabajo: "Trabajo", cliente) -> bool:
-    """Si el mapa del batch dice que ninguna pagina esta en verde."""
-    paginas = _mapa_del_lote(trabajo, cliente)
-    return bool(paginas) and not any(p.valida for p in paginas)
-
-
-def _sigue_sin_terminar(trabajo: "Trabajo", cliente) -> bool:
+def _sigue_sin_terminar(trabajo: "Trabajo", paginas: Optional[list]) -> bool:
     """Si el mapa dice que alguna bitacora sigue fuera de verde.
 
     Es para un batch que ya quedo incompleto en una verificacion anterior:
@@ -5285,7 +5286,6 @@ def _sigue_sin_terminar(trabajo: "Trabajo", cliente) -> bool:
     minutos. Las divisorias no cuentan: nunca estan en verde y no se
     verifican.
     """
-    paginas = _mapa_del_lote(trabajo, cliente)
     if not paginas:
         return False
     divisorias = {
@@ -5315,7 +5315,27 @@ def detectar_indexados(
     se pueden planificar de nuevo con el estado remoto mas reciente.
     """
     detectados: List[EstadoParte] = []
-    for parte in estados:
+    por_revisar = [
+        (numero, parte) for numero, parte in enumerate(estados)
+        if parte.estado in (LISTO, INCOMPLETO)
+        and not (parte.lote and parte.lote.bloqueado_por)
+    ]
+    mapas: dict[int, Optional[list]] = {}
+
+    def leer(conexion, tarea):
+        return _mapa_del_lote(tarea[1].trabajo, conexion)
+
+    def recibir(tarea, paginas, error):
+        if error is not None:
+            raise error
+        mapas[tarea[0]] = paginas
+        if avisar is not None:
+            avisar("Revisando el estado de los batches en AirVault",
+                   len(mapas), len(por_revisar))
+
+    repartir(cliente, por_revisar, leer, recibir, minimo_para_repartir=2)
+    verificables = []
+    for numero, parte in enumerate(estados):
         trabajo = parte.trabajo
         if (
             parte.estado not in (LISTO, INCOMPLETO)
@@ -5330,25 +5350,33 @@ def detectar_indexados(
                 0,
                 0,
             )
-        if parte.estado == INCOMPLETO and _sigue_sin_terminar(trabajo, cliente):
+        paginas = mapas[numero]
+        if parte.estado == INCOMPLETO and _sigue_sin_terminar(trabajo, paginas):
             # Ya se verifico y quedo incompleto, y el mapa dice que sigue
             # igual: una lectura en vez de una por pagina.
             detectados.append(parte)
             continue
-        if parte.estado != INCOMPLETO and _nada_en_verde(trabajo, cliente):
+        if (parte.estado != INCOMPLETO and paginas
+                and not any(p.valida for p in paginas)):
             # Recien publicado ninguna pagina esta en verde y releerlas una
             # por una solo confirmaria eso. Con varios batches de 500
             # paginas eran miles de lecturas en cada revision periodica.
             detectados.append(parte)
             continue
-        validas, total, _problemas = trabajo.verificar(cliente)
+        detectados.append(parte)
+        verificables.append((numero, trabajo))
+    resultados = _verificar_trabajos(
+        [trabajo for _, trabajo in verificables], cliente, avisar=avisar,
+    )
+    for (numero, trabajo), (validas, total, _problemas) in zip(verificables, resultados):
+        parte = estados[numero]
         completo = total > 0 and validas == total
-        detectados.append(EstadoParte(
+        detectados[numero] = EstadoParte(
             trabajo,
             INDEXADO if completo else INCOMPLETO,
             trabajo.manifiesto.etapa("verificar").detalle,
             parte.lote,
-        ))
+        )
     return detectados
 
 
@@ -5517,21 +5545,45 @@ def verificar_partes(
     """Relee todas las partes y suma como quedaron."""
     validas = total = 0
     problemas: List[str] = []
-    for trabajo in trabajos:
+    resultados = _verificar_trabajos(trabajos, cliente, avisar, esperas, dormir)
+    for trabajo, (propias, suyas, suyos) in zip(trabajos, resultados):
         cabeza = _prefijo(trabajo)
-        if avisar and trabajo.manifiesto.solo_subir:
-            propias, suyas, suyos = trabajo.verificar(
-                cliente, al_avanzar=lambda n, t: avisar(
-                    f"{cabeza}Revisando datos guardados", n, t,
-                ),
-                esperas=esperas, dormir=dormir,
-            )
-        else:
-            propias, suyas, suyos = trabajo.verificar(
-                cliente, esperas=esperas, dormir=dormir,
-            )
         validas += propias
         total += suyas
         problemas.extend(f"{cabeza}{p}" for p in suyos)
         registro_entrega.anotar(trabajo.carpeta, [trabajo])
     return validas, total, problemas
+
+
+def _verificar_trabajos(trabajos, cliente, avisar=None, esperas=(), dormir=None):
+    """Lee varios batches a la vez y guarda sus resultados en este hilo."""
+    if not trabajos:
+        return []
+    por_manifiesto = {id(t.manifiesto): t for t in trabajos}
+    avances = {clave: 0 for clave in por_manifiesto}
+    total_general = sum(len(t.manifiesto.bitacoras()) for t in trabajos)
+
+    def avanzar(manifiesto, hechas, total):
+        avances[id(manifiesto)] = hechas
+        if avisar is not None:
+            if len(trabajos) > 1:
+                avisar("Revisando datos guardados de los batches",
+                       sum(avances.values()), total_general)
+            else:
+                avisar(f"{_prefijo(por_manifiesto[id(manifiesto)])}Revisando datos guardados",
+                       hechas, total)
+
+    if len(trabajos) == 1:
+        trabajo = trabajos[0]
+        return [trabajo.verificar(
+            cliente, esperas=esperas, dormir=dormir,
+            al_avanzar=(lambda n, t: avanzar(trabajo.manifiesto, n, t))
+            if avisar and trabajo.manifiesto.solo_subir else None,
+        )]
+    resultados = verificar_lotes(
+        cliente, [t.manifiesto for t in trabajos], esperas, dormir,
+        al_avanzar=avanzar if avisar is not None else None,
+    )
+    for trabajo, cuenta in zip(trabajos, resultados):
+        trabajo.registrar_verificacion(*cuenta)
+    return resultados
