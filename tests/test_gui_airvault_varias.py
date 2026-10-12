@@ -253,6 +253,6 @@ def test_la_cola_muestra_al_menos_cuatro_batches_completos(app, tmp_path, monkey
     app.processEvents()
     assert ventana.lotes.viewport().height() >= ventana.lotes.rowHeight(0) * 4
     assert ventana.width() <= ancho and ventana.height() <= alto
-    cerrar = ventana.boton_cerrar
-    posicion = cerrar.mapTo(ventana, QPoint())
-    assert posicion.y() + cerrar.height() <= ventana.height()
+    cancelar = ventana.boton_cancelar
+    posicion = cancelar.mapTo(ventana, QPoint())
+    assert posicion.y() + cancelar.height() <= ventana.height()

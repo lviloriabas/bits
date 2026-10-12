@@ -351,7 +351,7 @@ def test_la_cola_tiene_su_espacio_y_la_barra_bajo_el_header(app, ventana):
     assert ventana.divisor_batches.widget(0).isAncestorOf(tabla)
 
 
-def test_revisar_airvault_esta_a_la_derecha_de_subir(ventana):
+def test_los_controles_del_proceso_son_empezar_pausar_y_cancelar(ventana):
     botones = ventana.layout().itemAt(ventana.layout().count() - 1).layout()
     widgets = [
         botones.itemAt(indice).widget()
@@ -359,10 +359,8 @@ def test_revisar_airvault_esta_a_la_derecha_de_subir(ventana):
         if botones.itemAt(indice).widget() is not None
     ]
 
-    assert ventana.boton_revisar.text() == "Revisar en AirVault"
-    assert widgets.index(ventana.boton_revisar) == (
-        widgets.index(ventana.boton_subir) + 1
-    )
+    assert [boton.text() for boton in widgets] == ["Empezar proceso", "Pausar", "Cancelar"]
+    assert not hasattr(ventana, "boton_cerrar")
 
 
 def test_el_usuario_puede_elegir_el_limite_antes_de_subir(ventana, tmp_path):
@@ -1614,7 +1612,7 @@ def test_sin_completar_batch_la_meta_es_quedar_indexado(ventana):
     })
     ventana._al_terminar()
     assert ventana.progreso.value() == 100
-    assert ventana.progreso.text() == "100% - Proceso terminado"
+    assert ventana.progreso.text() == "100%"
 
     ventana.completar_check.setChecked(True)
     assert ventana.progreso.value() == 90
@@ -1636,7 +1634,7 @@ def test_el_fin_espera_al_ultimo_hilo_y_queda_en_la_bitacora(ventana, estado):
     )
     ventana._al_terminar()
 
-    assert ventana.progreso.text() == "100% - Proceso terminado"
+    assert ventana.progreso.text() == "100%"
     assert "Proceso terminado: 1 completado." in ventana.resumen.text()
     assert "No queda trabajo automático pendiente" in ventana.bitacora.item(
         ventana.bitacora.count() - 1
@@ -1703,7 +1701,7 @@ def test_el_fin_de_revisar_distingue_la_revision_manual(ventana):
     })
     ventana._al_terminar()
 
-    assert ventana.progreso.text() == "100% - Proceso terminado"
+    assert ventana.progreso.text() == "100%"
     ultima = ventana.bitacora.item(ventana.bitacora.count() - 1).text()
     assert "No queda trabajo automático pendiente" in ultima
     assert "REVISAR quedan para revisión manual" in ultima
@@ -1829,7 +1827,8 @@ def test_mientras_trabaja_siempre_hay_algo_que_pulsar(ventana):
     """
     ventana._habilitar(False)
     assert ventana.boton_cancelar.isEnabled()
-    assert ventana.boton_cerrar.isEnabled()
+    assert ventana.boton_pausar.isEnabled()
+    assert ventana.windowFlags() & Qt.WindowType.WindowCloseButtonHint
     ventana._habilitar(True)
     assert not ventana.boton_cancelar.isEnabled()
 
@@ -2607,13 +2606,13 @@ def test_la_bitacora_lista_cada_batch_en_su_propia_linea(ventana):
     assert len(lineas) == 4
     assert "DP | BITS -1" in lineas[1]
     assert "DP | BITS -2" in lineas[2]
-    # Sangradas bajo el encabezado, no bajo la hora: la columna de horas
-    # se sigue leyendo de un vistazo.
-    assert lineas[1].startswith(" " * 10)
+    # El delegado alinea las continuaciones bajo el texto usando su fuente.
+    # La copia conserva el contenido sin sangrias artificiales.
+    assert not lineas[1].startswith(" ")
 
 
 def test_un_mensaje_de_varios_parrafos_se_apunta_por_su_primera_frase(ventana):
-    """El motivo entero esta en el resumen; en la bitacora tapaba las horas."""
+    """El registro conserva el motivo completo como ayuda al pasar por la entrada."""
     ventana._al_fallar(
         "No se pudo abrir la sesion. Revise el usuario y la contrasenya en "
         "la configuracion de AirVault y vuelva a intentarlo."
@@ -2623,6 +2622,7 @@ def test_un_mensaje_de_varios_parrafos_se_apunta_por_su_primera_frase(ventana):
     assert "Se detuvo: Inicie sesión" in ultima
     assert "Total:" in ultima
     assert "configuracion" not in ultima
+    assert ventana.bitacora.item(ventana.bitacora.count() - 1).toolTip() == ventana.resumen.text()
 
 
 def test_una_carga_que_no_salio_no_se_cuenta_como_subida(ventana):

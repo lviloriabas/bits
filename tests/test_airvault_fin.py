@@ -75,7 +75,7 @@ def test_fin_corta_la_cadena_y_la_lectura_auxiliar(app, tmp_path, monkeypatch, e
 
     assert lector.isRunning(), "El fin no espera la respuesta de AirVault"
     assert lector.cancelaciones == 1
-    assert ventana.progreso.text() == "100% - Proceso terminado"
+    assert ventana.progreso.text() == "100%"
     assert "Todo lo solicitado se completó" in ventana.resumen.text()
     assert not ventana._vigilante.isActive()
     assert not ventana._confirmador.isActive()

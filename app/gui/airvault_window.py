@@ -35,14 +35,15 @@ from typing import Dict, Optional, Sequence
 from loguru import logger
 from PySide6.QtCore import (QEvent, QItemSelection, QItemSelectionModel, QRectF,
                             QSignalBlocker, Qt, QThread, QTimer, Signal)
-from PySide6.QtGui import (QBrush, QColor, QGuiApplication, QIcon,
-                           QKeySequence, QPainter, QPen, QPixmap, QShortcut)
+from PySide6.QtGui import (QAction, QBrush, QColor, QGuiApplication, QIcon,
+                           QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut)
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox,
                                QDialog, QGridLayout, QGroupBox, QHBoxLayout,
                                QLabel, QLayout, QLineEdit, QListView,
                                QListWidgetItem, QMenu, QMessageBox,
                                QProgressBar, QPushButton, QSizePolicy, QSpinBox,
-                               QSplitter, QStyle, QStyleOptionComboBox, QStylePainter,
+                               QSplitter, QStyledItemDelegate, QStyle,
+                               QStyleOptionComboBox, QStyleOptionViewItem, QStylePainter,
                                QTableWidgetItem, QToolButton,
                                QVBoxLayout, QWidget)
 
@@ -50,6 +51,7 @@ from app.airvault.config import (AIRVAULT_FILENAME, AirVaultConfig,
                                  guardar_paginas_por_batch)
 from app.airvault.session import SesionCancelada
 from app.gui.airvault_busqueda import buscar_en_la_cola, frase_de
+from app.gui.airvault_bitacora import RegistroAirVaultDelegate
 from app.gui.batches_sidebar import BatchesSidebar, agregar_filtros_al_menu
 from app.gui.automatizacion import (COMPLETAR, MenuAutomatizacion,
                                     OpcionesAutomatizacion)
@@ -561,6 +563,7 @@ class SelectorEjecuciones(QComboBox):
     def __init__(self) -> None:
         super().__init__()
         self.permitir_marcar = True
+        self.view().setItemDelegate(_CasillasEjecuciones(self.view()))
         self.view().viewport().installEventFilter(self)
         self.view().installEventFilter(self)
 
@@ -609,6 +612,46 @@ class SelectorEjecuciones(QComboBox):
         opcion.currentText = f"{cantidad} ejecuciones seleccionadas"
         pintor.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, opcion)
         pintor.drawControl(QStyle.ControlElement.CE_ComboBoxLabel, opcion)
+
+
+class _CasillasEjecuciones(QStyledItemDelegate):
+    """Pinta una casilla estable tambien en filas sin seleccionar."""
+
+    def paint(self, painter, option, index):
+        opcion = QStyleOptionViewItem(option)
+        self.initStyleOption(opcion, index)
+        if index.row() > 0:
+            opcion.features |= QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
+            opcion.checkState = (Qt.CheckState.Checked
+                                if index.data(Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked
+                                else Qt.CheckState.Unchecked)
+            if not index.data(ROL_SE_PUEDE_SUBIR):
+                opcion.state &= ~QStyle.StateFlag.State_Enabled
+        estilo = opcion.widget.style() if opcion.widget is not None else self.parent().style()
+        estilo.drawControl(QStyle.ControlElement.CE_ItemViewItem, opcion, painter, opcion.widget)
+        if index.row() == 0:
+            return
+        caja = QRectF(estilo.subElementRect(QStyle.SubElement.SE_ItemViewItemCheckIndicator, opcion, opcion.widget))
+        c = paleta()
+        habilitada = bool(index.data(ROL_SE_PUEDE_SUBIR))
+        marcado = opcion.checkState == Qt.CheckState.Checked
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(c.TEXT_SECONDARY if habilitada else c.TEXT_TERTIARY), 1.2))
+        painter.setBrush(QColor(c.PANE_CONTROL_HOVER if marcado else c.PANE_CONTROL_BG))
+        painter.drawRoundedRect(caja.adjusted(0.6, 0.6, -0.6, -0.6), 3, 3)
+        if marcado:
+            trazo = QPainterPath()
+            trazo.moveTo(caja.x() + caja.width() * 0.22, caja.y() + caja.height() * 0.52)
+            trazo.lineTo(caja.x() + caja.width() * 0.43, caja.y() + caja.height() * 0.73)
+            trazo.lineTo(caja.x() + caja.width() * 0.8, caja.y() + caja.height() * 0.28)
+            pluma = QPen(QColor(c.PANE_TEXT), 1.8)
+            pluma.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pluma.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pluma)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(trazo)
+        painter.restore()
 
 
 class TrabajoCancelado(BaseException):
@@ -1696,6 +1739,11 @@ class AirVaultWindow(QDialog):
         self._websearch_inicio_por_revisar: set[str] = set()
         self._websearch_proceso_activo = False
         self._deteniendo = False
+        self._proceso_iniciado = False
+        self._pausado = False
+        self._cancelacion_solicitada = False
+        self._controles_ocupados = False
+        self._continuacion_lector = None
         # Fallos seguidos sin ninguna comprobación buena por medio. Es lo
         # que separa un tropiezo de AirVault de un problema que tarda en
         # arreglarse; ver `FALLOS_SEGUIDOS_ANTES_DE_ESPACIAR`.
@@ -1882,8 +1930,7 @@ class AirVaultWindow(QDialog):
         acciones = QHBoxLayout()
         acciones.setSpacing(SPACE_S)
         acciones.addStretch()
-        for boton in (self.boton_automatizacion, self.boton_continuar, self.boton_reiniciar):
-            acciones.addWidget(boton)
+        acciones.addWidget(self.boton_automatizacion)
         contenido.addLayout(acciones)
         self._formulario_ancho = None
         self._distribuir_formulario(False)
@@ -1898,7 +1945,7 @@ class AirVaultWindow(QDialog):
         # La cola tiene prioridad: en pantallas bajas necesita mostrar
         # varios batches a la vez. El registro sigue siendo desplazable.
 
-        self.resumen = ElidedLabel(TEXTO_SIN_SUBIR)
+        self.resumen = ElidedLabel(TEXTO_SIN_SUBIR, parent=self)
         pintar_del_tema(
             self.resumen, lambda: f"color: {color_ayuda()};"
         )
@@ -1906,7 +1953,7 @@ class AirVaultWindow(QDialog):
         self.resumen.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
         )
-        cuerpo.addWidget(self.resumen)
+        self.resumen.hide()
 
         cuerpo.addLayout(self._fila_botones())
 
@@ -2426,7 +2473,7 @@ class AirVaultWindow(QDialog):
     def _iniciar_confirmacion(self, trabajos, automatico: bool = False) -> None:
         """La lectura tiene su hilo y su estado, independientes de subida e indexado."""
         trabajos = list(trabajos)
-        if not trabajos or self._deteniendo:
+        if not trabajos or self._deteniendo or (automatico and (self._pausado or self._cancelacion_solicitada)):
             return
         lector = self.lectura_websearch()
         if self._worker_websearch is not None:
@@ -2455,7 +2502,8 @@ class AirVaultWindow(QDialog):
         worker.paso.connect(self._mostrar_paso_websearch)
         worker.buscado.connect(self._al_buscar_websearch)
         worker.fallo.connect(self._al_fallar_websearch)
-        worker.cancelado.connect(lambda: self._anotar("Búsqueda en Web Search cancelada")
+        worker.cancelado.connect(lambda: self._anotar("Búsqueda en Web Search pausada" if self._pausado
+                                                     else "Búsqueda en Web Search cancelada")
                                  if not automatico or self._fin_confirmado is None else None)
         worker.finished.connect(self._al_terminar_websearch)
         self._worker_websearch = worker
@@ -2463,6 +2511,7 @@ class AirVaultWindow(QDialog):
         self._anotar(f"Web Search: buscando números de bitácora de {len(trabajos)} batches en paralelo")
         worker.start()
         self._actualizar_latido()
+        self._actualizar_botones_proceso()
 
     def _mostrar_paso_websearch(self, texto: str, hechas: int, total: int) -> None:
         if self._fin_confirmado is not None and self._lectura_websearch_pendiente() is None:
@@ -2476,7 +2525,7 @@ class AirVaultWindow(QDialog):
                 and self._worker_websearch.estado.get("confirmacion_automatica")):
             return
         mensaje = mensaje_error(mensaje, "No se pudo consultar Web Search.")
-        self._anotar("Web Search: " + primera_frase(mensaje))
+        self._anotar("Web Search: " + primera_frase(mensaje), ayuda=mensaje)
         if self.hilo() is None:
             self.resumen.setText("Web Search: " + mensaje)
 
@@ -2490,6 +2539,11 @@ class AirVaultWindow(QDialog):
         self.boton_cancelar.setEnabled(self.hilo() is not None)
         self._actualizar_latido()
         self._publicar_avance()
+        self._actualizar_botones_proceso()
+        if self._pausado or self._cancelacion_solicitada:
+            self._websearch_pendientes.clear()
+            self._websearch_manual_pendiente = False
+            return
         self._anunciar_fin()
         pendientes = list(self._websearch_pendientes.values())
         manual = self._websearch_manual_pendiente
@@ -2677,7 +2731,16 @@ class AirVaultWindow(QDialog):
         if fila < 0 or fila >= len(self._partes_en_cola()):
             return
         menu = self._acciones_de_la_cola(self._elegidas(fila))
-        menu.exec(self.lotes.viewport().mapToGlobal(punto))
+        anterior = getattr(self, "_menu_batches_abierto", None)
+        if anterior is not None:
+            anterior.close()
+        self._menu_batches_abierto = menu
+        menu.aboutToHide.connect(lambda: self._cerrar_menu_batches(menu))
+        menu.popup(self.lotes.viewport().mapToGlobal(punto))
+
+    def _cerrar_menu_batches(self, menu: QMenu) -> None:
+        if self._menu_batches_abierto is menu:
+            self._menu_batches_abierto = None
         menu.deleteLater()
 
     def _elegidas(self, fila: int) -> list:
@@ -2843,7 +2906,6 @@ class AirVaultWindow(QDialog):
             ),
         )
         menu.addSeparator()
-        menu.addAction(self.boton_previa)
         agregar_filtros_al_menu(menu, self._controles_filtro_batches())
         return menu
 
@@ -3494,27 +3556,20 @@ class AirVaultWindow(QDialog):
         self.completar_check.toggled.connect(self._al_cambiar_completar)
         fila.addWidget(self.completar_check, inicio + 1, 0)
 
-        # Continuar y reiniciar vivían escondidos detrás de «Automatización…»,
-        # junto a unas casillas que ahora son un menú. Son acciones de esta
-        # ventana, no ajustes, así que se quedan a la vista: son lo que se
-        # pulsa cuando un batch quedó a medias.
-        self.boton_continuar = QPushButton("Continuar")
+        # La botonera del proceso sustituye las acciones manuales de arriba.
+        self.boton_continuar = QAction("Continuar", self)
         self.boton_continuar.setToolTip(
             "Continúa desde el primer paso sin terminar; no repite las "
             "páginas en verde."
         )
-        self.boton_continuar.clicked.connect(self._continuar_pendiente)
-        self.boton_continuar.setMaximumWidth(160)
-        fila.addWidget(self.boton_continuar, inicio + 1, 1)
+        self.boton_continuar.triggered.connect(self._continuar_pendiente)
 
-        self.boton_reiniciar = QPushButton("Reiniciar")
+        self.boton_reiniciar = QAction("Reiniciar", self)
         self.boton_reiniciar.setToolTip(
             "Reinicia el estado local del batch elegido, o de todos los "
             "incompletos si no hay ninguno. No borra nada en AirVault."
         )
-        self.boton_reiniciar.clicked.connect(self._reiniciar_incompleto)
-        self.boton_reiniciar.setMaximumWidth(self.minutos_control.maximumWidth())
-        fila.addWidget(self.boton_reiniciar, inicio + 1, 2)
+        self.boton_reiniciar.triggered.connect(self._reiniciar_incompleto)
 
     def _al_cambiar_automatizacion(self, paso: str, marcado: bool) -> None:
         """Refleja lo que se eligió en la ventana principal.
@@ -3558,10 +3613,8 @@ class AirVaultWindow(QDialog):
         self.progreso.setToolTip(
             "Avance de toda la cola: subir y cumplir la meta elegida, indexar o completar."
         )
-        # Cuánto lleva el paso actual. Sin esto, una espera de AirVault y un
-        # programa colgado se ven exactamente igual. Vive dentro de la barra
-        # para no reservarle una columna y dejar el progreso corto.
-        self.reloj_label = QLabel("", self.progreso)
+        # Conserva la cuenta interna del paso; la barra muestra solo el porcentaje.
+        self.reloj_label = QLabel("", self)
         pintar_del_tema(
             self.reloj_label, lambda: f"color: {color_ayuda()};"
         )
@@ -3569,10 +3622,8 @@ class AirVaultWindow(QDialog):
         self.reloj_label.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        reloj = QHBoxLayout(self.progreso)
-        reloj.setContentsMargins(SPACE_S, 0, SPACE_S, 0)
-        reloj.addStretch()
-        reloj.addWidget(self.reloj_label)
+        self.reloj_label.hide()
+        self.progreso.setFormat("%p%")
         fila.addWidget(self.progreso, 1)
         return fila
 
@@ -3598,6 +3649,7 @@ class AirVaultWindow(QDialog):
             QAbstractItemView.SelectionMode.ExtendedSelection
         )
         self.bitacora = lista
+        lista.setItemDelegate(RegistroAirVaultDelegate(lista))
         return lista
 
     def _fila_politica_duplicados(self, fila: QGridLayout, inicio: int) -> None:
@@ -3634,7 +3686,8 @@ class AirVaultWindow(QDialog):
 
         fila.addStretch()
 
-        self.boton_subir = QPushButton("Subir a AirVault")
+        self.boton_subir = QPushButton("Empezar proceso")
+        self.boton_proceso = self.boton_subir
         self.boton_subir.setObjectName("primaryButton")
         self.boton_subir.setEnabled(False)
         self.boton_subir.setToolTip(
@@ -3642,27 +3695,35 @@ class AirVaultWindow(QDialog):
             "falten. Si uno se queda atascado, al pulsarlo de nuevo se "
             "reenvía."
         )
-        self.boton_subir.clicked.connect(self._subir_a_mano)
+        self.boton_subir.setFixedWidth(max(
+            160, self.boton_subir.fontMetrics().horizontalAdvance("Continuar proceso") + SPACE_L * 2,
+        ))
+        self.boton_subir.clicked.connect(self._empezar_o_continuar)
 
-        self.boton_revisar = QPushButton("Revisar en AirVault")
+        self.boton_revisar = QAction("Revisar en AirVault", self)
         self.boton_revisar.setEnabled(False)
         self.boton_revisar.setToolTip(
             "Comprueba en AirVault cada batch y termina lo que falte: sube "
             "los que no se subieron, indexa los confirmados y, con «Completar "
             "batch», los completa."
         )
-        self.boton_revisar.clicked.connect(self._revisar_a_mano)
+        self.boton_revisar.triggered.connect(self._revisar_a_mano)
         # Conserva el nombre interno que usa la comprobación automática y
         # el código que habilita los controles mientras trabaja el hilo.
         self.boton_comprobar = self.boton_revisar
 
-        self.boton_indexar = QPushButton("Indexar")
+        self.boton_indexar = QAction("Indexar", self)
         self.boton_indexar.setEnabled(False)
         self.boton_indexar.setToolTip(
             "Escribe en AirVault los datos de los batches listos y borra las "
             "páginas separadoras. Las bloqueadas se saltan."
         )
-        self.boton_indexar.clicked.connect(self._indexar)
+        self.boton_indexar.triggered.connect(self._indexar)
+
+        self.boton_pausar = QPushButton("Pausar")
+        self.boton_pausar.setEnabled(False)
+        self.boton_pausar.setToolTip("Pausa el proceso y conserva lo guardado para continuarlo.")
+        self.boton_pausar.clicked.connect(self._pausar_proceso)
 
         # Siempre disponible mientras hay trabajo en vuelo. Es lo que
         # convierte una espera larga en algo de lo que se puede salir: sin
@@ -3676,15 +3737,81 @@ class AirVaultWindow(QDialog):
         )
         self.boton_cancelar.clicked.connect(self._cancelar)
 
-        self.boton_cerrar = QPushButton("Cerrar")
-        self.boton_cerrar.clicked.connect(self.close)
-
         for boton in (
-            self.boton_subir, self.boton_revisar,
-            self.boton_indexar, self.boton_cancelar, self.boton_cerrar,
+            self.boton_subir, self.boton_pausar, self.boton_cancelar,
         ):
             fila.addWidget(boton)
         return fila
+
+    def _actualizar_botones_proceso(self) -> None:
+        if not hasattr(self, "boton_pausar"):
+            return
+        liberando = any(hilo.isRunning() for hilo in self._soltando)
+        ocupado = (self._controles_ocupados or liberando
+                   or self.hilo() is not None or self.lectura_websearch() is not None)
+        en_curso = ocupado or self._vigilando()
+        self.boton_proceso.setText("Continuar proceso" if self._pausado else "Empezar proceso")
+        self.boton_proceso.setEnabled(
+            not ocupado if self._pausado else not en_curso and self._listo_para_subir
+        )
+        terminado = self._fin_confirmado is not None and not self._proceso_iniciado and not self._pausado
+        self.boton_pausar.setEnabled(en_curso and not self._pausado and not self._cancelacion_solicitada and not terminado)
+        self.boton_cancelar.setEnabled((en_curso or self._pausado) and not self._cancelacion_solicitada and not terminado)
+
+    def _empezar_o_continuar(self) -> None:
+        if (self.hilo() is not None or self.lectura_websearch() is not None
+                or any(hilo.isRunning() for hilo in self._soltando)):
+            return
+        continuar = self._pausado
+        self._pausado = False
+        self._cancelacion_solicitada = False
+        self._proceso_iniciado = True
+        if continuar:
+            self._anotar("Continuando el proceso desde lo guardado")
+            if self._continuacion_lector is not None:
+                trabajos = self._continuacion_lector
+                self._continuacion_lector = None
+                self._iniciar_confirmacion(trabajos, automatico=False)
+            else:
+                self._continuar_pendiente()
+        else:
+            self._subir_a_mano()
+        self._actualizar_botones_proceso()
+
+    def _detener_cadena(self) -> None:
+        self._parar_vigilancia()
+        if self._confirmador is not None:
+            self._confirmador.stop()
+        self._parar_reloj()
+        self._comprobar_al_terminar = False
+        self._subir_al_terminar = False
+        self._indexar_al_terminar = False
+        self._websearch_proceso_activo = False
+        self._websearch_pendientes.clear()
+        self._websearch_manual_pendiente = False
+
+    def _pausar_proceso(self) -> None:
+        principal, lector = self.hilo(), self.lectura_websearch()
+        lecturas = list(lector.estado.get("buscar_trabajos", [])) if lector is not None else []
+        lecturas += list(self._websearch_pendientes.values())
+        lecturas = list({str(t.carpeta): t for t in lecturas}.values())
+        self._continuacion_lector = lecturas if principal is None and lector is not None else None
+        for trabajo in lecturas:
+            clave = str(trabajo.carpeta)
+            self._websearch_revisados.pop(clave, None)
+            self._websearch_inicio_por_revisar.add(clave)
+        self._pausado = True
+        self._proceso_iniciado = True
+        self._cancelacion_solicitada = False
+        self._detener_cadena()
+        for worker in (principal, lector):
+            if worker is not None:
+                worker.cancelar()
+        if principal is None:
+            self._controles_ocupados = False
+        self._anotar("Pausa solicitada: lo guardado se conserva para continuar")
+        self.estado_label.setText("Proceso pausado")
+        self._actualizar_botones_proceso()
 
     # ── el historial ───────────────────────────────────────────────
 
@@ -3802,13 +3929,12 @@ class AirVaultWindow(QDialog):
             Qt.ItemDataRole.ToolTipRole,
         )
         self.historial.setItemData(indice, listo, ROL_SE_PUEDE_SUBIR)
-        if listo:
-            self.historial.setItemData(
-                indice,
-                Qt.CheckState.Checked if str(csv) in self._corridas_marcadas
-                else Qt.CheckState.Unchecked,
-                Qt.ItemDataRole.CheckStateRole,
-            )
+        self.historial.setItemData(
+            indice,
+            Qt.CheckState.Checked if listo and str(csv) in self._corridas_marcadas
+            else Qt.CheckState.Unchecked,
+            Qt.ItemDataRole.CheckStateRole,
+        )
         if not listo:
             # Sale en la lista igualmente: quien la busca tiene que verla, y
             # el gris es lo que dice que todavía le falta exportarla.
@@ -3961,6 +4087,10 @@ class AirVaultWindow(QDialog):
 
         misma = conservar_seleccion and str(csv) == self._corrida
         if not misma:
+            self._pausado = False
+            self._cancelacion_solicitada = False
+            self._proceso_iniciado = False
+            self._continuacion_lector = None
             self._alcance_proceso = None
             self._avance_por_batch.clear()
         nombre_previo = self.lote_edit.text() if misma else None
@@ -4472,7 +4602,7 @@ class AirVaultWindow(QDialog):
         entrega, listo = estado_de_entrega(csv)
         self._mostrar_reparto(reparto_de_revision(csv))
         self._listo_para_subir = listo
-        self.boton_subir.setEnabled(listo)
+        self._actualizar_botones_proceso()
         if listo:
             self.resumen.setText(TEXTO_SIN_SUBIR)
         elif entrega == "Sin exportar":
@@ -4930,6 +5060,9 @@ class AirVaultWindow(QDialog):
         se deja de preguntar en vez
         de golpear el servidor toda la tarde.
         """
+        if self._pausado or self._cancelacion_solicitada:
+            self._parar_vigilancia()
+            return
         self._ajustar_confirmacion()
         if not self.auto_check.isChecked() or not self._falta_esperar():
             self._parar_vigilancia()
@@ -4982,7 +5115,10 @@ class AirVaultWindow(QDialog):
         return pendientes
 
     def _ajustar_confirmacion(self) -> None:
-        if not hasattr(self, "auto_check") or self._deteniendo:
+        if (not hasattr(self, "auto_check") or self._deteniendo
+                or self._pausado or self._cancelacion_solicitada):
+            if self._confirmador is not None:
+                self._confirmador.stop()
             return
         pendientes = self._pendientes_websearch_automaticos()
         sesion = self._estado.get("sesion") or self._estado_websearch.get("sesion")
@@ -4999,7 +5135,7 @@ class AirVaultWindow(QDialog):
             self._confirmador.start(0)
 
     def _confirmar_solo(self) -> None:
-        if self._deteniendo:
+        if self._deteniendo or self._pausado or self._cancelacion_solicitada:
             return
         trabajos = self._pendientes_websearch_automaticos()
         if not trabajos:
@@ -5058,7 +5194,7 @@ class AirVaultWindow(QDialog):
 
     def _comprobar_solo(self) -> None:
         """Lo que dispara el reloj. Se salta el turno si hay algo en vuelo."""
-        if self.hilo() is not None:
+        if self._pausado or self._cancelacion_solicitada or self.hilo() is not None:
             return
         if not self._resultado_fallido and self._firma_de_fin() is not None:
             self._fin_pendiente = True
@@ -5143,9 +5279,11 @@ class AirVaultWindow(QDialog):
         csv = self._corrida.strip()
         if not csv:
             self.resumen.setText("Falta elegir la ejecución.")
+            self._anotar(self.resumen.text())
             return None
         if not self.lote_edit.text().strip():
             self.resumen.setText("Falta el nombre del batch.")
+            self._anotar(self.resumen.text())
             return None
         job = carpeta_de_corrida(csv).name
         self._estado.update({
@@ -5197,6 +5335,7 @@ class AirVaultWindow(QDialog):
                     f"{carpeta_de_corrida(csv).name}: "
                     + mensaje_error(exc, "Vuelva a exportar la ejecución antes de subirla.")
                 )
+                self._anotar(self.resumen.text())
                 return
             self._cadena_manual = True
             self._subir(varias=True)
@@ -5370,6 +5509,9 @@ class AirVaultWindow(QDialog):
         self.boton_indexar.setEnabled(True)
 
     def _lanzar(self, modo: str, estado: dict) -> None:
+        self._pausado = False
+        self._cancelacion_solicitada = False
+        self._proceso_iniciado = True
         if modo == "buscar_websearch":
             self._iniciar_confirmacion(estado.get("buscar_trabajos", []),
                                       automatico=bool(estado.get("confirmacion_automatica")))
@@ -5440,8 +5582,10 @@ class AirVaultWindow(QDialog):
         # Con el hilo ya en marcha, para que la línea de pasos de la ventana
         # principal pase a «en curso» al empezar y no al terminar.
         self._publicar_avance()
+        self._actualizar_botones_proceso()
 
     def _habilitar(self, activo: bool) -> None:
+        self._controles_ocupados = not activo
         # Estas tres opciones se aplican al trabajo en curso y deben poder
         # cambiarse mientras los controles que lanzarían otra acción quedan
         # bloqueados.
@@ -5471,9 +5615,7 @@ class AirVaultWindow(QDialog):
         self.boton_automatizacion.setEnabled(True)
         self.boton_continuar.setEnabled(activo)
         self.boton_reiniciar.setEnabled(activo and bool(self._trabajos))
-        # Cerrar y Cancelar nunca se apagan a la vez: mientras hay trabajo
-        # en vuelo tiene que haber siempre algo que pulsar, o la ventana se
-        # queda muda durante una espera de minutos.
+        # Mientras hay trabajo en vuelo, Cancelar permite detener la espera.
         self.boton_cancelar.setEnabled(not activo or self.lectura_websearch() is not None)
         self.boton_indexar.setEnabled(
             activo and (
@@ -5485,6 +5627,7 @@ class AirVaultWindow(QDialog):
                 or bool(self._corrida.strip())
             )
         )
+        self._actualizar_botones_proceso()
 
     # ── el reloj del paso ──────────────────────────────────────────
 
@@ -5649,10 +5792,8 @@ class AirVaultWindow(QDialog):
             100 if terminado else
             0 if avance is None else min(99, round(avance * 100))
         )
-        self.progreso.setFormat(
-            "%p% - Proceso terminado" if terminado else "%p%"
-        )
-        self.reloj_label.setVisible(not terminado)
+        self.progreso.setFormat("%p%")
+        self.reloj_label.hide()
 
     # ── la línea viva de la bitácora ───────────────────────────────
 
@@ -5760,7 +5901,7 @@ class AirVaultWindow(QDialog):
             parando = getattr(worker, "hay_que_parar", lambda: False)()
             esperando = total <= 0 and any(p in self._ultimo_paso.casefold()
                                            for p in ("esperando", "airvault está", "airvault arma", "entrando"))
-            texto = ("Cancelando" if parando else "Buscando números en Web Search" if lector
+            texto = ("Pausando" if parando and self._pausado else "Cancelando" if parando else "Buscando números en Web Search" if lector
                      else "Esperando respuesta de AirVault" if esperando
                      else "BITS trabajando") + f" ({_minutos(time.monotonic() - self._inicio_paso)})"
             if total > 0:
@@ -5831,7 +5972,7 @@ class AirVaultWindow(QDialog):
             self._anotar(visible)
             self._ajustar_confirmacion()
 
-    def _anotar(self, texto: str, detalles: Sequence[str] = ()) -> None:
+    def _anotar(self, texto: str, detalles: Sequence[str] = (), *, ayuda: str = "") -> None:
         """Apunta el paso en la bitácora, con su hora.
 
         ``detalles`` es la lista que acompaña al paso (los batches que se
@@ -5840,18 +5981,20 @@ class AirVaultWindow(QDialog):
         «;», había que leerla entera para encontrar un batch.
         """
         hora = time.strftime("%H:%M:%S")
-        sangria = " " * (len(hora) + 2)
         lineas = [f"{hora}  {texto}"]
-        lineas += [f"{sangria}{detalle}" for detalle in detalles]
-        lineas.append(f"{sangria}{self._totales_bitacoras()}")
+        lineas += [str(detalle).strip() for detalle in detalles]
+        lineas.append(self._totales_bitacoras())
+        entrada = QListWidgetItem("\n".join(lineas))
+        if ayuda:
+            entrada.setToolTip(ayuda)
         # Por encima de la línea viva, que es siempre la última: como el
         # cursor de una terminal, lo que pasa se escribe antes que él.
         if self._linea_viva is not None:
             self.bitacora.insertItem(
-                self.bitacora.row(self._linea_viva), "\n".join(lineas)
+                self.bitacora.row(self._linea_viva), entrada
             )
         else:
-            self.bitacora.addItem("\n".join(lineas))
+            self.bitacora.addItem(entrada)
         while self.bitacora.count() > LIMITE_BITACORA:
             self.bitacora.takeItem(0)
         self.bitacora.scrollToBottom()
@@ -6220,7 +6363,7 @@ class AirVaultWindow(QDialog):
         if worker is not None and getattr(worker, "modo", "") == "buscar_websearch":
             mensaje = mensaje_error(mensaje, "No se pudo verificar la publicación en Web Search.")
             self.resumen.setText("Web Search pendiente: " + mensaje)
-            self._anotar("AirVault no permitió verificar la publicación: " + primera_frase(mensaje))
+            self._anotar("AirVault no permitió verificar la publicación: " + primera_frase(mensaje), ayuda=mensaje)
             self._ajustar_confirmacion()
             self._pintar_avance()
             return
@@ -6256,12 +6399,19 @@ class AirVaultWindow(QDialog):
             mensaje += f" Se reintenta en {self._minutos_de_vigilancia()} min."
         self.resumen.setText(mensaje)
         self.estado_label.setText("El indexado no pudo continuar")
-        # El mensaje entero queda en el resumen, que se lee de una vez.
-        self._anotar(f"Se detuvo: {primera_frase(mensaje)}")
+        # El detalle completo se puede consultar al pasar por la entrada del registro.
+        self._anotar(f"Se detuvo: {primera_frase(mensaje)}", ayuda=mensaje)
         self._limpiar_progreso()
 
     def _al_cancelar(self) -> None:
         """Lo paró quien lo lanzó: se dice y se sueltan los batches."""
+        if self._pausado:
+            self._fin_pendiente = False
+            self._resultado_fallido = False
+            self.estado_label.setText("Proceso pausado")
+            self._anotar("Proceso pausado: pulse Continuar proceso para retomarlo")
+            self._soltar_lotes()
+            return
         self._fin_pendiente = False
         self._resultado_fallido = True
         self._fin_confirmado = None
@@ -6291,6 +6441,12 @@ class AirVaultWindow(QDialog):
             self._websearch_proceso_activo = False
             self._cerrar_al_terminar = False
             self.close()
+            return
+        if self._pausado or self._cancelacion_solicitada:
+            self._detener_cadena()
+            self._cadena_manual = False
+            self._publicar_avance()
+            self._actualizar_botones_proceso()
             return
         # Las metas ya confirmadas cierran la cadena antes de otra consulta.
         # Las acciones pedidas desde la cola conservan su turno.
@@ -6330,7 +6486,7 @@ class AirVaultWindow(QDialog):
 
     def _anunciar_fin(self) -> bool:
         """Deja el final en la barra y la bitacora cuando ya no falta nada."""
-        if not self._fin_pendiente or self._resultado_fallido:
+        if not self._fin_pendiente or self._resultado_fallido or self._pausado or self._cancelacion_solicitada:
             return False
         firma = self._firma_de_fin()
         lector = self.lectura_websearch()
@@ -6375,6 +6531,8 @@ class AirVaultWindow(QDialog):
             self.proceso_terminado.emit(texto)
         self._pintar_avance()
         self._publicar_avance()
+        self._proceso_iniciado = False
+        self._actualizar_botones_proceso()
         return True
 
     # ── lo que ve la ventana principal ─────────────────────────────
@@ -6515,13 +6673,24 @@ class AirVaultWindow(QDialog):
 
     def _cancelar(self) -> None:
         """Le pide al hilo que pare. No espera: esperar congelaría esto."""
+        self._cancelacion_solicitada = True
+        self._pausado = False
+        self._proceso_iniciado = False
+        self._continuacion_lector = None
+        self._detener_cadena()
+        self._cola_de_acciones.clear()
         worker = self.hilo()
+        lector = self.lectura_websearch()
+        if lector is not None:
+            lector.cancelar()
         if worker is None:
-            lector = self.lectura_websearch()
+            self._controles_ocupados = False
             if lector is not None:
-                lector.cancelar()
                 self.boton_cancelar.setEnabled(False)
                 self.estado_label.setText("Cancelando búsqueda en Web Search")
+            else:
+                self._anotar("Proceso cancelado: lo guardado se conserva")
+            self._actualizar_botones_proceso()
             return
         if self._confirmador is not None:
             self._confirmador.stop()
@@ -6585,4 +6754,5 @@ class AirVaultWindow(QDialog):
         self._soltando.append(hilo)
         hilo.finished.connect(lambda: self._soltando.remove(hilo)
                               if hilo in self._soltando else None)
+        hilo.finished.connect(self._actualizar_botones_proceso)
         hilo.start()

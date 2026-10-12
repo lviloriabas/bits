@@ -77,7 +77,7 @@ def test_reabrir_una_ejecucion_terminada_recupera_el_cien_por_ciento(
     monkeypatch.setattr("app.airvault.flujo.cargar_trabajos_pendientes", lambda *a: [])
     ventana._corrida = str(tmp_path / "output/prueba/datos/prueba.CSV")
     ventana._cargar_trabajos(tmp_path / "job", tmp_path / "prueba.CSV")
-    assert ventana.progreso.text() == "100% - Proceso terminado"
+    assert ventana.progreso.text() == "100%"
     assert ventana.estado_label.text() == "Proceso terminado"
     assert "REVISAR quedan para revisión manual" in ventana.resumen.text()
     assert "Sin subir" not in ventana.resumen.text()
@@ -98,6 +98,6 @@ def test_el_aviso_de_fin_no_se_pierde_si_el_hilo_aun_esta_terminando(
     assert ventana._fin_pendiente
     monkeypatch.setattr(ventana, "hilo", lambda: None)
     ventana._anunciar_fin()
-    assert ventana.progreso.text() == "100% - Proceso terminado"
+    assert ventana.progreso.text() == "100%"
     assert not ventana._fin_pendiente
     ventana.close()

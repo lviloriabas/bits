@@ -76,10 +76,12 @@ def test_margen_exterior_alinea_avance_y_botones(
             ventana.panel_batches.mapTo(ventana, QPoint()).x()
             + ventana.panel_batches.width()
         )
-        assert ventana.reloj_label.parentWidget() is ventana.progreso
-        cerrar = ventana.boton_cerrar.mapTo(ventana, QPoint())
+        assert not ventana.reloj_label.isVisibleTo(ventana)
+        assert not ventana.resumen.isVisibleTo(ventana)
+        assert ventana.progreso.format() == "%p%"
+        cancelar = ventana.boton_cancelar.mapTo(ventana, QPoint())
         espacio_inferior = (
-            ventana.height() - cerrar.y() - ventana.boton_cerrar.height()
+            ventana.height() - cancelar.y() - ventana.boton_cancelar.height()
         )
         assert espacio_inferior >= margenes.bottom()
     finally:
@@ -98,8 +100,7 @@ def test_el_contenido_no_puede_estirar_la_ventana_fuera_del_escritorio(
         app.processEvents()
         assert ventana.minimumSizeHint().width() <= 1024
         assert ventana.minimumWidth() <= 1024
-        for control in (ventana.boton_cerrar, ventana.boton_subir,
-                        ventana.boton_continuar, ventana.boton_reiniciar):
+        for control in (ventana.boton_cancelar, ventana.boton_proceso, ventana.boton_pausar):
             assert ventana.rect().contains(control.mapTo(ventana, control.rect().topLeft()))
             assert ventana.rect().contains(control.mapTo(ventana, control.rect().bottomRight()))
     finally:
@@ -140,8 +141,8 @@ def test_reordenar_campos_al_estrechar_no_recorta_ni_superpone_controles(
                 ventana.fecha_combo, ventana.cookie_edit, ventana.auto_check,
                 ventana.minutos_control, ventana.completar_check,
                 ventana.detener_duplicados_check, ventana.porcentaje_duplicados_control,
-                ventana.boton_automatizacion, ventana.boton_continuar,
-                ventana.boton_reiniciar, ventana.bitacora,
+                ventana.boton_automatizacion, ventana.boton_proceso,
+                ventana.boton_pausar, ventana.boton_cancelar, ventana.bitacora,
             )
             rectangulos = [QRect(control.mapTo(ventana, QPoint()), control.size())
                            for control in controles]

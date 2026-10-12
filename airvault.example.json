@@ -17,5 +17,5 @@
   "buscar_publicadas": false,
   "csv_date_mode": "specific_day",
   "detener_por_duplicados": true,
-  "porcentaje_duplicados": 1
+  "porcentaje_duplicados": 5
 }
