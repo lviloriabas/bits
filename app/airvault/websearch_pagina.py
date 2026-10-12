@@ -3,10 +3,10 @@
 from pathlib import Path
 from threading import Lock
 import json
+import re
 
 from app.airvault.cookies import dominio
 from app.airvault.correcciones import (
-    _LEER_REJILLA,
     _NavegadorDeCorrecciones,
     _REJILLA_CARGADA,
 )
@@ -16,10 +16,31 @@ from app.airvault.web_reports import ConsultaCancelada, _Pagina, url_busqueda_lo
 
 
 _ACCESO_PEDIDO = (
-    "location.href.toLowerCase().includes('/signin2/') || "
-    "location.hostname.toLowerCase() === 'login.microsoftonline.com'"
+    "location.pathname.toLowerCase().includes('/signin2/') || "
+    "location.hostname.toLowerCase() === 'login.microsoftonline.com' || "
+    "!!document.querySelector('form[action*=dosignin], input[name=wresult]')"
 )
 _LISTA_O_ACCESO = f"({_REJILLA_CARGADA}) || ({_ACCESO_PEDIDO})"
+
+_LEER_MUESTRA = """(function(){
+  var tabla = document.querySelector('.ui-jqgrid-btable');
+  if (!tabla || !window.jQuery || !jQuery.getResultRowData) return null;
+  if (tabla.grid && tabla.grid.hDiv && tabla.grid.hDiv.loading) return null;
+  var total = jQuery(tabla).jqGrid('getGridParam', 'records');
+  var visibles = jQuery(tabla).jqGrid('getGridParam', 'reccount');
+  if (!/^\\d+$/.test(String(total)) || !/^\\d+$/.test(String(visibles))) return null;
+  var filas = tabla.querySelectorAll('tr.jqgrow');
+  if (filas.length !== Number(visibles) || Number(total) < filas.length) return null;
+  var salida = [];
+  for (var i = 0; i < filas.length; i++) {
+    var datos;
+    try { datos = jQuery.getResultRowData(filas[i].id); } catch (e) { return null; }
+    if (!datos || typeof datos.LogNo === 'undefined') return null;
+    if (!/^\\d{7}$/.test(String(datos.LogNo).trim())) return null;
+    salida.push({log: String(datos.LogNo).trim()});
+  }
+  return salida;
+})()"""
 
 
 class AccesoWebSearch:
@@ -34,6 +55,7 @@ class AccesoWebSearch:
         self.version = None
         self.generacion = 0
         self._acceso = Lock()
+        self._error_acceso = None
 
     def __enter__(self):
         self.avisar("Iniciando sesión en Web Search")
@@ -87,10 +109,18 @@ class AccesoWebSearch:
         with self._acceso:
             if generacion != self.generacion:
                 return
+            if self._error_acceso is not None:
+                raise self._error_acceso
             self.avisar("Web Search pide acceso; iniciando sesión de nuevo")
-            self.sesion.renovar_en_navegador(self.avisar)
-            comprobar_o_renovar(self.sesion, self.avisar, websearch=True)
-            self._usar_cookies()
+            try:
+                self.sesion.renovar_en_navegador(self.avisar)
+                comprobar_o_renovar(self.sesion, self.avisar, websearch=True)
+                if self.navegador is not None:
+                    self.version = self.navegador.abrir(self.config.url_sso, espera_s=self.config.espera_login_s)
+                self._usar_cookies()
+            except Exception as exc:
+                self._error_acceso = exc
+                raise
             self.generacion += 1
 
 
@@ -125,8 +155,9 @@ class LectorWebSearch:
                 raise TimeoutError("Web Search no terminó de responder la búsqueda.")
             if self.pagina.evaluar(_ACCESO_PEDIDO):
                 raise ErrorDeSesion("Web Search pide iniciar sesión de nuevo.")
-            filas = self.pagina.evaluar(_LEER_REJILLA)
-            if not isinstance(filas, list):
+            filas = self.pagina.evaluar(_LEER_MUESTRA)
+            if (not isinstance(filas, list) or any(not isinstance(fila, dict)
+                    or not re.fullmatch(r"\d{7}", str(fila.get("log", "")).strip()) for fila in filas)):
                 raise RuntimeError("No se pudieron leer los resultados de Web Search.")
             return {"rows": [{"LogNo": str(fila.get("log", "")).strip()}
                              for fila in filas if isinstance(fila, dict)]}

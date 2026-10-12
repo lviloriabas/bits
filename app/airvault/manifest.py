@@ -23,7 +23,7 @@ _CANDADOS: dict[str, RLock] = {}
 _GUARDIA = RLock()
 _CAMPOS_CONFIRMACION = ("websearch_confirmado", "websearch_muestra", "websearch_detalle",
                         "websearch_metodo", "websearch_batch_id", "websearch_revision", "websearch_cotejadas",
-                        "websearch_huella")
+                        "websearch_huella", "websearch_resultado")
 _CIERRE_POR_MUESTRA = "Confirmado por muestra en Web Search"
 
 
@@ -46,12 +46,26 @@ def copiar_confirmacion(origen: Manifiesto, destino: Manifiesto) -> None:
           and "completar" not in origen.etapas):
         destino.etapas.pop("completar")
     destino.websearch_revision = origen.websearch_revision
+    if origen.websearch_resultado == "ausente":
+        for nombre in ("completar", "verificar"):
+            if nombre not in origen.etapas:
+                destino.etapas.pop(nombre, None)
 
 
 def _aplicar_cierre_por_muestra(manifiesto):
     """Mantiene el cierre local ligado a la muestra y al contenido comprobado."""
     from app.airvault.confirmacion import METODOS_MUESTRA
+    from app.airvault.confirmacion import huella_de_numeros
 
+    if (manifiesto.websearch_resultado and manifiesto.websearch_huella
+            and manifiesto.websearch_huella != huella_de_numeros(manifiesto)):
+        manifiesto.websearch_resultado = ""
+
+    if manifiesto.websearch_resultado == "ausente":
+        nuevas = [manifiesto.etapas.get(nombre) for nombre in ("subir", "completar")]
+        if any(etapa and etapa.actualizada and etapa.actualizada > manifiesto.websearch_revision for etapa in nuevas):
+            manifiesto.websearch_resultado = ""
+        return
     if manifiesto.websearch_metodo not in METODOS_MUESTRA:
         return
     from app.airvault.flujo import websearch_confirmacion_valida
@@ -125,8 +139,7 @@ def guardar(manifiesto: Manifiesto, carpeta_job: Path | str) -> Path:
         except (OSError, ValueError):
             actual = None
         if actual is not None and actual.websearch_revision > manifiesto.websearch_revision:
-            for campo in _CAMPOS_CONFIRMACION:
-                setattr(manifiesto, campo, getattr(actual, campo))
+            copiar_confirmacion(actual, manifiesto)
             if actual.websearch_confirmado and not manifiesto.batch_id:
                 manifiesto.batch_id = actual.websearch_batch_id
     _aplicar_cierre_por_muestra(manifiesto)
@@ -165,13 +178,22 @@ def guardar_confirmacion(datos: dict, carpeta_job: Path | str) -> Manifiesto:
         manifiesto.batch_id.casefold() != datos["batch_id"].casefold()
     ):
         raise ValueError("La identidad del batch cambió durante la consulta.")
-    if datos["websearch_confirmado"]:
+    if datos["websearch_confirmado"] or datos.get("websearch_resultado") == "ausente":
         from app.airvault.confirmacion import huella_de_batch
         huella = huella_de_numeros(manifiesto) if por_numero else huella_de_batch(manifiesto, datos["batch_id"])
         if datos["websearch_huella"] != huella:
             raise ValueError("El contenido del batch cambió durante la consulta.")
+    if datos.get("websearch_resultado") == "ausente":
+        for nombre, clave in (("subir", "subida_revisada"), ("completar", "cierre_revisado")):
+            etapa = manifiesto.etapas.get(nombre)
+            actualizada = etapa.actualizada if etapa else ""
+            if clave in datos and actualizada != datos[clave]:
+                raise ValueError("El batch avanzó durante el chequeo. Se verificará de nuevo.")
     for campo in _CAMPOS_CONFIRMACION:
-        setattr(manifiesto, campo, datos[campo])
+        setattr(manifiesto, campo, datos.get(campo, "") if campo == "websearch_resultado" else datos[campo])
+    if manifiesto.websearch_resultado == "ausente":
+        for nombre in ("completar", "verificar"):
+            manifiesto.etapas.pop(nombre, None)
     if datos["websearch_confirmado"]:
         from app.airvault.model import EstadoEtapa
         if not por_numero:

@@ -3206,7 +3206,11 @@ def subir_partes(
                     )
                 continue
             if publicado is not None:
+                trabajo._duplicado_permitido = False
                 trabajo.anotar_lote(cliente, publicado)
+                if trabajo.manifiesto.websearch_resultado == "ausente":
+                    trabajo.manifiesto.websearch_resultado = "en_cola"
+                    trabajo.guardar()
                 publicar(trabajo)
                 if avisar is not None:
                     avisar(
@@ -3596,6 +3600,7 @@ def reiniciar_subida(trabajo: "Trabajo") -> None:
 def _reiniciar_subida_ausente(trabajo: "Trabajo") -> None:
     """Quita la suposicion local de un batch que AirVault no devolvio."""
     manifiesto = trabajo.manifiesto
+    manifiesto.websearch_resultado = ""
     manifiesto.batch_id = None
     manifiesto.lotes_previos = []
     manifiesto.intentos_identificacion = 0
@@ -4165,6 +4170,8 @@ def estado_local(trabajo: "Trabajo") -> EstadoParte:
     lo dice :func:`comprobar_partes`, que si pregunta.
     """
     manifiesto = trabajo.manifiesto
+    if getattr(manifiesto, "websearch_resultado", "") == "ausente" and not manifiesto.cancelado:
+        return EstadoParte(trabajo, NO_ENCONTRADO, manifiesto.websearch_detalle)
     completar = manifiesto.etapas.get("completar")
     if completar and completar.estado is EstadoEtapa.HECHA:
         return _cierre_de(trabajo)

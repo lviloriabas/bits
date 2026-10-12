@@ -14,6 +14,7 @@ sin subir.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -111,6 +112,15 @@ def cadena(app, tmp_path, monkeypatch):
         if modo != "resubir":
             estado["forzados"] = []
         estado.update(cliente=cliente, sesion=SesionFalsa(), tanda_hecha=True)
+        if modo == "recuperar_ausentes":
+            from app.airvault.config import CAMPO_LOG_NUMBER
+            estado["buscador"] = SimpleNamespace(
+                sesion=SimpleNamespace(), config=ventana._config,
+                consultar_numero=lambda numero, _presupuesto: {"rows": [
+                    {"LogNo": numero} for batch_id in cliente.completados
+                    for pagina in cliente.por_lote[batch_id].values()
+                    if pagina.valores.get(CAMPO_LOG_NUMBER) == numero]},
+            )
         worker = TrabajoAirVaultWorker(modo, estado, ventana)
 
         def conectar():
@@ -135,6 +145,28 @@ def cadena(app, tmp_path, monkeypatch):
         ventana._al_terminar()
 
     monkeypatch.setattr(ventana, "_lanzar", lanzar)
+
+    def iniciar_confirmacion(trabajos, automatico=False):
+        from app.airvault.config import CAMPO_LOG_NUMBER
+
+        def consultar(numero, _presupuesto):
+            cliente.eventos.append(("consultar", numero))
+            return {"rows": [{"LogNo": numero} for batch_id in cliente.completados
+                             for pagina in cliente.por_lote[batch_id].values()
+                             if pagina.valores.get(CAMPO_LOG_NUMBER) == numero]}
+
+        buscador = SimpleNamespace(consultar_numero=consultar,
+                                   sesion=SimpleNamespace(), config=ventana._config)
+        worker = TrabajoAirVaultWorker("buscar_websearch", {
+            "buscar_trabajos": trabajos, "buscador": buscador,
+            "revisar_todos": True, "confirmacion_automatica": automatico,
+        }, ventana)
+        worker.buscado.connect(ventana._al_buscar_websearch)
+        worker.fallo.connect(fallos.append)
+        worker._buscar_websearch()
+        ventana._al_terminar_websearch()
+
+    monkeypatch.setattr(ventana, "_iniciar_confirmacion", iniciar_confirmacion)
 
     # La primera tanda: sube el primero, lo indexa y lo completa; sube el
     # segundo, que AirVault no termina de armar, y ahí se detiene para no
@@ -218,7 +250,7 @@ def test_revisar_en_airvault_termina_todo_lo_que_falta(cadena, reloj):
     ventana.boton_revisar.trigger()
 
     _todo_terminado(ventana, cliente, trabajos, fallos)
-    assert modos[0] == "comprobar"
+    assert modos[0] == "recuperar_ausentes"
 
 
 def test_continuar_pendiente_termina_todo_lo_que_falta(cadena):
@@ -255,7 +287,7 @@ def test_la_cadena_termina_y_no_queda_nada_por_hacer(cadena):
 
     ventana.boton_revisar.trigger()
 
-    assert cliente.eventos == eventos
+    assert [e for e in cliente.eventos if e[0] != "consultar"] == [e for e in eventos if e[0] != "consultar"]
     assert modos == ["comprobar"]
     assert fallos == []
     assert ventana.progreso.text() == "100%"

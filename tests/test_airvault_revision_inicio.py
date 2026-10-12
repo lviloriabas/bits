@@ -83,7 +83,7 @@ def test_inicio_revisa_subidos_pendientes_y_deja_nuevos_fuera(ventana, tmp_path)
     ventana._confirmar_solo()
     assert ventana._worker.isRunning()
     assert ventana._worker_websearch.isRunning()
-    assert ventana._worker_websearch.estado["buscar_trabajos"] == [anterior]
+    assert ventana._worker_websearch.estado["buscar_trabajos"] == [anterior, terminado]
     assert ventana._worker_websearch.estado is not ventana._estado
 
     nuevo.manifiesto.etapa("subir").marcar(EstadoEtapa.HECHA)

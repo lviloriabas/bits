@@ -45,7 +45,7 @@ class Etapa(BaseModel):
     def marcar(self, estado: EstadoEtapa, detalle: str = "") -> None:
         self.estado = estado
         self.detalle = detalle
-        self.actualizada = datetime.now().isoformat(timespec="seconds")
+        self.actualizada = datetime.now().isoformat(timespec="microseconds")
 
 
 class Registro(BaseModel):
@@ -197,6 +197,9 @@ class Manifiesto(BaseModel):
     websearch_revision: str = ""
     websearch_cotejadas: int = 0
     websearch_huella: str = ""
+    # Solo encontrado y ausente prueban que la muestra se consulto entera.
+    # Un error de acceso o lectura nunca autoriza reenviar el archivo.
+    websearch_resultado: str = ""
     no_encontrado_desde: str = ""
     doc_type: str = "Log Page"
     audit_status: str = "PUBLISHED"

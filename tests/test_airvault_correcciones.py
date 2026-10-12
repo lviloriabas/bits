@@ -353,7 +353,7 @@ def test_cancelar_entre_copias_detiene_el_borrado_y_conserva_la_elegida(monkeypa
         return copias_en(filas, "2008159")
 
     monkeypatch.setattr(corrector, "_releer", releer)
-    monkeypatch.setattr(corrector, "_borrar_copia", lambda _pagina, copia: borradas.append(copia.clave))
+    monkeypatch.setattr(corrector, "_borrar_copia", lambda _pagina, copia, _conservada: borradas.append(copia.clave))
     with pytest.raises(ConsultaCancelada):
         corrector._borrar(pagina, correccion, copias_en(filas, "2008159"), False)
     assert borradas == [filas[0]["clave"]]

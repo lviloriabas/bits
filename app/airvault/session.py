@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Optional, Tuple
+from urllib.parse import urlparse
 
 import requests
 from loguru import logger
@@ -605,8 +606,8 @@ class SesionAirVault:
 
     @staticmethod
     def _pide_login(texto: str, url: str) -> bool:
-        minuscula = (url or "").lower()
-        if "/signin2/" in minuscula or "login.microsoftonline.com" in minuscula:
+        destino = urlparse(url or "")
+        if "/signin2/" in destino.path.lower() or destino.hostname == "login.microsoftonline.com":
             return True
         parciales = ("dosignin", "wsignin1.0")
         return any(p in (texto or "").lower()[:4000] for p in parciales)
@@ -621,6 +622,7 @@ class SesionAirVault:
         ahora, y la unica senal de que caduco es que el servidor devuelve la
         pagina de acceso en vez de datos.
         """
+        self._comprobar_en_websearch = False
         datos = self.get(RUTA_DE_PRUEBA, dict(CONSULTA_DE_PRUEBA))
         if isinstance(datos, Mapping):
             try:

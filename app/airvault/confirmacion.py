@@ -14,9 +14,8 @@ from app.airvault.websearch import PLANTILLAS, _aparece
 METODO_MUESTRA = "muestra_por_numero"
 METODOS_MUESTRA = (METODO_MUESTRA, "muestra_distribuida")
 MAX_BATCHES_PARALELOS = 32
-PORCENTAJE_MUESTRA = 2
+PORCENTAJE_MUESTRA = 5
 MINIMO_MUESTRA = 7
-MAXIMO_MUESTRA = 15
 
 
 @dataclass(frozen=True)
@@ -27,21 +26,26 @@ class ConfirmacionBatch:
     detalle: str
     batch_id: str = ""
     muestra: tuple[str, ...] = ()
+    consulta_completa: bool = False
+
+
+def _numeros_validos(manifiesto):
+    return list(dict.fromkeys(
+        str(r.log_number).strip()
+        for r in manifiesto.bitacoras()
+        if re.fullmatch(r"\d{7}", str(r.log_number).strip())
+    ))
 
 
 def _muestra(manifiesto):
     """Elige identidades distintas desde el principio hasta el final.
 
-    Se consulta el 2 % con un minimo de siete y un maximo de quince. Es una
+    Se consulta al menos el 5 % con un minimo de siete. Es una
     senal de publicacion del batch, no una auditoria de todas sus paginas.
     Los extremos permiten detectar una publicacion que solo llego al inicio.
     """
-    unicos = list(dict.fromkeys(
-        str(r.log_number).strip()
-        for r in manifiesto.bitacoras()
-        if re.fullmatch(r"\d{7}", str(r.log_number).strip())
-    ))
-    cantidad = min(len(unicos), MAXIMO_MUESTRA,
+    unicos = _numeros_validos(manifiesto)
+    cantidad = min(len(unicos),
                    max(MINIMO_MUESTRA, (len(unicos) * PORCENTAJE_MUESTRA + 99) // 100))
     if len(unicos) <= cantidad:
         return unicos
@@ -61,6 +65,16 @@ def _filas(datos):
             if isinstance(datos.get(clave), (dict, list)):
                 return _filas(datos[clave])
     return []
+
+
+def _respuesta_legible(datos):
+    if isinstance(datos, list):
+        return all(isinstance(fila, dict) for fila in datos)
+    if isinstance(datos, dict):
+        return any(_respuesta_legible(datos[clave]) for clave in
+                   ("rows", "data", "results", "items", "documents", "Results")
+                   if isinstance(datos.get(clave), (dict, list)))
+    return False
 
 
 def _campo(fila, nombres):
@@ -120,18 +134,19 @@ class _LecturaAcotada:
         return self._sesion.get(*args, **kwargs)
 
 
-def verificar_batch(buscador, trabajo, avisar=None, presupuesto_s=60.0, cancelado=lambda: False) -> ConfirmacionBatch:
+def verificar_batch(buscador, trabajo, avisar=None, presupuesto_s=60.0, cancelado=lambda: False,
+                    revisar_todas=False) -> ConfirmacionBatch:
     """Busca solo la muestra y confirma cuando aparece toda en Web Search."""
     manifiesto = trabajo.manifiesto
-    muestra = _muestra(manifiesto)
+    muestra = _numeros_validos(manifiesto) if revisar_todas else _muestra(manifiesto)
     numeros = tuple(muestra)
     esperadas = len(muestra)
     encontradas = 0
     identidad = str(manifiesto.batch_id or "").casefold()
 
-    def resultado(confirmado, detalle):
+    def resultado(confirmado, detalle, consulta_completa=False):
         return ConfirmacionBatch(confirmado, encontradas, esperadas, detalle,
-                                 identidad, numeros)
+                                 identidad, numeros, consulta_completa)
 
     if not muestra:
         return resultado(False, "Faltan números válidos para buscar una muestra de bitácoras.")
@@ -175,6 +190,8 @@ def verificar_batch(buscador, trabajo, avisar=None, presupuesto_s=60.0, cancelad
                 datos = (directa(numero, max(0.0, presupuesto_s - (time.monotonic() - inicio)))
                          if callable(directa) else buscador.sesion.get(
                              buscador.ruta, forma.construir(numero, buscador.config)))
+                if not _respuesta_legible(datos):
+                    return resultado(False, "Web Search devolvió resultados ilegibles. Se verificará de nuevo.")
                 consultas[numero] = _filas(datos)
         except (ErrorDeSesion, SesionCancelada):
             raise
@@ -191,9 +208,9 @@ def verificar_batch(buscador, trabajo, avisar=None, presupuesto_s=60.0, cancelad
                 continue
             aparece = True
             break
-        if not aparece:
-            return resultado(False, f"{encontradas} de {esperadas} números de bitácora de la muestra encontrados en Web Search. Falta confirmar la subida.")
-        encontradas += 1
+        encontradas += bool(aparece)
+    if encontradas != esperadas:
+        return resultado(False, f"{encontradas} de {esperadas} números de bitácora de la muestra encontrados en Web Search. Falta confirmar la subida.", True)
     if avisar:
         avisar(f"Muestra de «{manifiesto.nombre_batch}» encontrada en Web Search", encontradas, esperadas)
-    return resultado(True, f"Muestra de {esperadas} bitácoras encontrada en Web Search, de {len(manifiesto.bitacoras())} en el batch. Batch marcado como completado.")
+    return resultado(True, f"Muestra de {esperadas} bitácoras encontrada en Web Search, de {len(manifiesto.bitacoras())} en el batch. Batch marcado como completado.", True)

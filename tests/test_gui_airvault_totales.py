@@ -69,6 +69,40 @@ def test_antes_de_preparar_los_batches_usa_el_total_de_la_ejecucion(ventana):
     assert "0 de 25 bitácoras subidas, 0 de 25 indexadas" in ventana.bitacora.item(0).text()
 
 
+def test_el_total_excluye_el_historial_y_conserva_los_terminados_del_proceso(ventana):
+    actual = trabajo("actual", "Actual", 4, subido=True)
+    historico = trabajo("historico", "Historico", 30, subido=True)
+    ajeno = trabajo("ajeno", "Ajeno", 12)
+    historico.manifiesto.etapa("completar").marcar(EstadoEtapa.HECHA)
+    ventana._trabajos = [actual, historico, ajeno]
+    ventana._estado["trabajos"] = list(ventana._trabajos)
+    ventana._alcance_proceso = {str(actual.carpeta)}
+    assert "4 de 4 bitácoras subidas, 0 de 4 indexadas" in ventana._totales_bitacoras()
+
+    actual.manifiesto.etapa("completar").marcar(EstadoEtapa.HECHA)
+    assert "4 de 4 bitácoras subidas, 4 de 4 indexadas" in ventana._totales_bitacoras()
+
+
+def test_el_total_del_envio_no_cambia_con_el_filtro_visual(ventana):
+    primero = trabajo("uno", "Uno", 4, subido=True)
+    segundo = trabajo("dos", "Dos", 6)
+    ventana._trabajos = [primero, segundo]
+    ventana._alcance_proceso = {str(t.carpeta) for t in ventana._trabajos}
+    ventana._corrida = primero.manifiesto.csv_origen
+    esperado = "4 de 10 bitácoras subidas, 0 de 10 indexadas"
+    assert esperado in ventana._totales_bitacoras()
+    ventana.solo_ejecucion_check.setChecked(True)
+    assert esperado in ventana._totales_bitacoras()
+
+
+def test_antes_del_envio_no_suma_batches_completados(ventana):
+    pendiente = trabajo("pendiente", "Pendiente", 3)
+    terminado = trabajo("terminado", "Terminado", 20, subido=True)
+    terminado.manifiesto.etapa("completar").marcar(EstadoEtapa.HECHA)
+    ventana._trabajos = [pendiente, terminado]
+    assert "0 de 3 bitácoras subidas, 0 de 3 indexadas" in ventana._totales_bitacoras()
+
+
 def test_la_linea_viva_actualiza_el_total_entre_pasos_del_mismo_batch(ventana):
     actual = trabajo("actual", "Actual", 3, subido=True)
     ventana._trabajos = [actual]

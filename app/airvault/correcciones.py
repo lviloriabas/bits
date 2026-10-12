@@ -507,7 +507,50 @@ _REJILLA_CON_UNA_FILA = r"""(function(){
 # ahi y no por el menu porque el menu lo abre el boton derecho del raton y
 # lo que hace al soltarlo es justo esta llamada; ademas el menu no lleva
 # identificadores estables y el cliente lo comparte con el visor.
-_ABRIR_CUADRO = r"""(function(clave, operacion){
+_VALIDAR_BORRADO = r"""function(clave, conservada){
+  if (!clave || !conservada || clave === conservada) {
+    return 'no se elimina: debe conservarse una copia distinta';
+  }
+  var tablas = document.querySelectorAll('.ui-jqgrid-btable');
+  if (tablas.length !== 1) return 'no se pudo confirmar la selección de una sola copia';
+  var filas = document.querySelectorAll('.ui-jqgrid-btable tr.jqgrow');
+  var elegidas = [], originales = [];
+  try {
+    Array.prototype.forEach.call(filas, function(fila){
+      var datos = jQuery.getResultRowData(fila.id) || {};
+      if (String(datos.DocKey || '') === clave) elegidas.push({fila: fila, datos: datos});
+      if (String(datos.DocKey || '') === conservada) originales.push(datos);
+    });
+    if (elegidas.length !== 1 || originales.length !== 1) {
+      return 'la copia elegida o la original ya no aparecen con una identidad única';
+    }
+    var copia = elegidas[0].datos, original = originales[0];
+    if (!String(copia.DocID || '') || !String(original.DocID || '') ||
+        String(copia.DocID) === String(original.DocID) ||
+        !String(copia.LogNo || '').trim() ||
+        String(copia.LogNo).trim() !== String(original.LogNo || '').trim()) {
+      return 'no se pudo confirmar que la original sea otra copia de la misma bitácora';
+    }
+    if ([copia, original].some(function(datos){
+      return String(datos.ImageCount) !== '1' ||
+        String(datos.DocType || '').trim().toUpperCase() !== 'LOG PAGE';
+    })) return 'no se confirmó una bitácora de una sola imagen';
+    var rejilla = jQuery(tablas[0]);
+    var seleccion = rejilla.jqGrid('getGridParam', 'selarrrow');
+    var ultima = rejilla.jqGrid('getGridParam', 'selrow');
+    var multiple = rejilla.jqGrid('getGridParam', 'multiselect');
+    if (String(ultima || '') !== elegidas[0].fila.id ||
+        (multiple === true && (!Array.isArray(seleccion) || seleccion.length !== 1)) ||
+        (Array.isArray(seleccion) && seleccion.some(function(id){
+          return String(id) !== elegidas[0].fila.id;
+        })) || (multiple !== true && multiple !== false)) {
+      return 'no se pudo confirmar la selección de una sola copia; no se elimina nada';
+    }
+  } catch (e) { return 'no se pudo comprobar la copia original y la selección'; }
+  return '';
+}"""
+
+_ABRIR_CUADRO = r"""(function(clave, operacion, conservada){
   var fila = null;
   var filas = document.querySelectorAll('.ui-jqgrid-btable tr.jqgrow');
   Array.prototype.forEach.call(filas, function(otra){
@@ -531,12 +574,20 @@ _ABRIR_CUADRO = r"""(function(clave, operacion){
       ' en esta búsqueda; revise los permisos de su cuenta con el administrador de AirVault';
   }
   try {
-    jQuery(fila).closest('table.ui-jqgrid-btable')
-      .jqGrid('setSelection', fila.id);
-  } catch (e) { }
+    var rejilla = jQuery(fila).closest('table.ui-jqgrid-btable');
+    // setSelection suma o alterna filas; no limpia una selección anterior.
+    if (operacion === 'onDeletePage') rejilla.jqGrid('resetSelection');
+    rejilla.jqGrid('setSelection', fila.id);
+  } catch (e) {
+    if (operacion === 'onDeletePage') return 'no se pudo seleccionar únicamente la copia sobrante';
+  }
+  if (operacion === 'onDeletePage') {
+    var fallo = (__VALIDAR_BORRADO__)(clave, conservada);
+    if (fallo) return fallo;
+  }
   accion(fila);
   return 'OK';
-})(%s, %s)"""
+})(%s, %s, %s)""".replace('__VALIDAR_BORRADO__', _VALIDAR_BORRADO)
 
 # Lo que AirVault contesta cuando no deja hacer la operacion: un cuadro de
 # aviso con el motivo escrito («The specified document page is locked by
@@ -548,10 +599,13 @@ _MENSAJE = r"""(function(){
   return (aviso.innerText || '').replace(/\s+/g, ' ').trim();
 })()"""
 
-_CONFIRMAR_BORRADO = r"""(function(textos){
+_CONFIRMAR_BORRADO = r"""(function(clave, conservada, textos){
   var cuadro = document.getElementById('deletePageDialog');
-  if (!cuadro) return 'la ventana de eliminación se cerró antes de confirmar';
-  var todas = document.getElementById('rdAllPages');
+  if (!cuadro || cuadro.offsetParent === null) return 'la ventana de eliminación se cerró antes de confirmar';
+  var comprobar = (__VALIDAR_BORRADO__);
+  var fallo = comprobar(clave, conservada);
+  if (fallo) return fallo;
+  var todas = cuadro.querySelector('#rdAllPages');
   if (!todas) return 'la ventana de eliminación no permite seleccionar la copia completa';
   if (!todas.checked) todas.click();
   if (!todas.checked) return 'AirVault no permitió seleccionar la copia completa';
@@ -566,9 +620,11 @@ _CONFIRMAR_BORRADO = r"""(function(textos){
       }
     });
   if (!boton) return 'la ventana de eliminación no muestra el botón para eliminar la copia';
+  fallo = comprobar(clave, conservada);
+  if (fallo) return fallo;
   boton.click();
   return 'OK';
-})(%s)"""
+})(%s, %s, %s)""".replace('__VALIDAR_BORRADO__', _VALIDAR_BORRADO)
 
 # El cuadro de reindexado esta listo cuando trae el campo del avion, que
 # es el ultimo que llega y el unico que aqui se reescribe.
@@ -1026,14 +1082,15 @@ class CorrectorLogPageAudit:
                     f"{se_van}."
                 ),
             )
-        if any(not copia.clave for copia in sobran):
+        if any(not copia.clave or not copia.documento for copia in copias):
             return Resultado(
                 correccion,
                 detalle=(
                     'No se identificaron todas las copias. Vuelva a cargar Web Search.'
                 ),
             )
-        if len({c.clave for c in copias}) != len(copias):
+        if (len({c.clave for c in copias}) != len(copias)
+                or len({c.documento for c in copias}) != len(copias)):
             return Resultado(correccion, detalle=(
                 'Web Search repite el mismo documento. Vuelva a cargar la búsqueda.'
             ))
@@ -1047,10 +1104,12 @@ class CorrectorLogPageAudit:
             if se_queda.clave in elegidas:
                 return Resultado(correccion, detalle="Debe conservar la copia original (la más antigua).")
             sobran = [c for c in copias if c.clave in elegidas]
+        pendientes = {c.clave: c for c in copias}
         for copia in sobran:
             actuales = self._releer(pagina, correccion.log_number)
-            conocidas = {c.clave: c for c in copias}
-            if any(c.clave not in conocidas or not self._misma_copia(c, conocidas[c.clave]) for c in actuales):
+            if (len(actuales) != len(pendientes)
+                    or {c.clave for c in actuales} != set(pendientes)
+                    or any(not self._misma_copia(c, pendientes[c.clave]) for c in actuales)):
                 raise ControlNoEncontrado(
                     'La búsqueda cambió. Revise las copias y vuelva a consultar el reporte.'
                 )
@@ -1063,7 +1122,8 @@ class CorrectorLogPageAudit:
                     'La copia elegida ya no aparece. Vuelva a consultar el reporte.'
                 )
             self._registrar("borrado_solicitado", correccion, copia)
-            self._borrar_copia(pagina, copia)
+            self._borrar_copia(pagina, copia, se_queda)
+            del pendientes[copia.clave]
         # Se vuelve a mirar la pantalla en vez de dar por hecho que la orden
         # surtio efecto. Un control que se pulsa pero no borra (permisos,
         # una confirmacion que nadie contesto) dejaria si no una corrida que
@@ -1071,7 +1131,9 @@ class CorrectorLogPageAudit:
         quedan = self._releer(pagina, correccion.log_number)
         una = len(sobran) == 1
         cuantas = "1 copia" if una else f"{len(sobran)} copias"
-        if len(quedan) != len(copias) - len(sobran) or not any(c.clave == se_queda.clave for c in quedan):
+        if (len(quedan) != len(pendientes)
+                or {c.clave for c in quedan} != set(pendientes)
+                or any(not self._misma_copia(c, pendientes[c.clave]) for c in quedan)):
             return Resultado(
                 correccion,
                 detalle=(
@@ -1298,6 +1360,7 @@ class CorrectorLogPageAudit:
         operacion: str,
         cuadro: str,
         control: str,
+        conservada: Copia | None = None,
     ) -> None:
         """Abre el cuadro de esa fila y no vuelve hasta que se puede usar.
 
@@ -1307,7 +1370,10 @@ class CorrectorLogPageAudit:
         se buscaba el campo del avion y no estaba.
         """
         abierto = pagina.evaluar(
-            _ABRIR_CUADRO % (json.dumps(copia.clave), json.dumps(operacion))
+            _ABRIR_CUADRO % (
+                json.dumps(copia.clave), json.dumps(operacion),
+                json.dumps(conservada.clave if conservada else ""),
+            )
         )
         accion = (
             "eliminar la copia" if cuadro == "deletePageDialog"
@@ -1397,9 +1463,14 @@ class CorrectorLogPageAudit:
             raise ControlNoEncontrado(mensaje_airvault(aviso, accion))
 
     @classmethod
-    def _borrar_copia(cls, pagina: _Pagina, copia: Copia) -> None:
+    def _borrar_copia(cls, pagina: _Pagina, copia: Copia, conservada: Copia) -> None:
         """Elimina únicamente documentos de bitácora con una sola imagen."""
-        if copia.imagenes != 1 or copia.tipo.upper() != "LOG PAGE":
+        if (not copia.clave or not conservada.clave
+                or not copia.documento or not conservada.documento
+                or copia.clave == conservada.clave
+                or copia.documento == conservada.documento):
+            raise ControlNoEncontrado("Debe conservar una copia distinta y comprobada de la bitácora.")
+        if any(c.imagenes != 1 or c.tipo.upper() != "LOG PAGE" for c in (copia, conservada)):
             raise ControlNoEncontrado(
                 'No se confirmó una sola imagen. Revise la copia en Web Search antes de eliminarla.'
             )
@@ -1408,11 +1479,15 @@ class CorrectorLogPageAudit:
             copia,
             "onDeletePage",
             "deletePageDialog",
-            "document.getElementById('rdAllPages')",
+            "document.querySelector('#deletePageDialog #rdAllPages')",
+            conservada,
         )
         with cls._soltando(pagina, "deletePageDialog"):
             hecho = pagina.evaluar(
-                _CONFIRMAR_BORRADO % json.dumps(list(TEXTOS_BORRAR))
+                _CONFIRMAR_BORRADO % (
+                    json.dumps(copia.clave), json.dumps(conservada.clave),
+                    json.dumps(list(TEXTOS_BORRAR)),
+                )
             )
             if hecho != "OK":
                 logger.warning("AirVault no eliminó la copia: {}", hecho)

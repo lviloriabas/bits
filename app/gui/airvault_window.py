@@ -720,6 +720,10 @@ class TrabajoAirVaultWorker(QThread):
             sesion = self.estado.get("sesion")
             if sesion is not None:
                 sesion.cancelar()
+            for lectura in tuple(self._lecturas_websearch):
+                cancelar = getattr(lectura, "cancelar", None)
+                if callable(cancelar):
+                    cancelar()
 
     def hay_que_parar(self) -> bool:
         return self._parar or self.isInterruptionRequested()
@@ -731,6 +735,7 @@ class TrabajoAirVaultWorker(QThread):
             "subir": self._subir,
             "subir_pendientes": self._subir_pendientes,
             "resubir": self._subir_pendientes,
+            "recuperar_ausentes": self._recuperar_ausentes,
             "comprobar": self._comprobar,
             "buscar_websearch": self._buscar_websearch,
             "indexar": self._indexar,
@@ -800,6 +805,9 @@ class TrabajoAirVaultWorker(QThread):
 
         cliente = self.estado.get("cliente")
         if cliente is not None:
+            sesion = self.estado.get("sesion") or getattr(cliente, "sesion", None)
+            if callable(getattr(sesion, "comprobar", None)):
+                comprobar_o_renovar(sesion, avisar=lambda texto: self._avisar(texto, 0, 0))
             self._detectar_pendientes()
             self._preparar_buscador()
             return cliente
@@ -808,10 +816,12 @@ class TrabajoAirVaultWorker(QThread):
             self._avisar(texto, 0, 0)
 
         self._avisar("Entrando a AirVault", 0, 0)
-        sesion = abrir_sesion(
-            self.estado["config"], cookie=self.estado.get("cookie") or None,
-            avisar=avisar_texto,
-        )
+        sesion = self.estado.get("sesion")
+        if sesion is None:
+            sesion = abrir_sesion(
+                self.estado["config"], cookie=self.estado.get("cookie") or None,
+                avisar=avisar_texto,
+            )
         # Comprobar antes de subir nada: si la sesión guardada ya no vale,
         # esto vuelve a abrir el navegador en lugar de morir en la primera
         # página con un mensaje que manda a copiar cookies a mano.
@@ -855,7 +865,7 @@ class TrabajoAirVaultWorker(QThread):
         from dataclasses import is_dataclass, replace
         from datetime import datetime
         from threading import Lock
-        from app.airvault.confirmacion import MAX_BATCHES_PARALELOS, METODO_MUESTRA, huella_de_numeros, verificar_batch
+        from app.airvault.confirmacion import ConfirmacionBatch, MAX_BATCHES_PARALELOS, METODO_MUESTRA, huella_de_numeros, muestra_de_batch, verificar_batch
         from app.airvault.flujo import Trabajo, websearch_confirmacion_valida
         from app.airvault.manifest import copiar_confirmacion, guardar_confirmacion
         from app.airvault.session import ErrorDeSesion, SesionAirVault
@@ -883,7 +893,6 @@ class TrabajoAirVaultWorker(QThread):
 
         if callable(getattr(buscador.sesion, "clonar", None)):
             lectura = buscador.sesion.clonar(renovable=True, cancelacion_independiente=True)
-            lectura.config = lectura.config.with_overrides(timeout_s=5.0, reintentos=1)
             buscador = con_sesion(buscador, lectura)
         self.estado["sesion"] = buscador.sesion
         self.estado["buscador"] = buscador
@@ -902,9 +911,12 @@ class TrabajoAirVaultWorker(QThread):
                 self._lecturas_websearch.clear()
                 raise
         trabajos = [t for t in self.estado["buscar_trabajos"]
-                    if not t.manifiesto.cancelado and not websearch_confirmacion_valida(t.manifiesto)]
+                    if not t.manifiesto.cancelado and (self.estado.get("revisar_todos")
+                                                       or not websearch_confirmacion_valida(t.manifiesto))]
         candado = Lock()
         revisados = confirmados = 0
+        ausentes = {}
+        errores = 0
 
         def cerrar(sesion):
             http = getattr(sesion, "http", None)
@@ -925,9 +937,10 @@ class TrabajoAirVaultWorker(QThread):
                 else:
                     local = con_sesion(buscador, buscador.sesion)
             try:
+                presupuesto = max(60.0, len(muestra_de_batch(copia.manifiesto)) * 10.0)
                 try:
                     resultado = verificar_batch(local, copia, self._avisar,
-                                                presupuesto_s=60.0, cancelado=self.hay_que_parar)
+                                                presupuesto_s=presupuesto, cancelado=self.hay_que_parar)
                 except ErrorDeSesion:
                     if acceso is None:
                         raise
@@ -935,7 +948,7 @@ class TrabajoAirVaultWorker(QThread):
                     acceso.renovar(local.generacion)
                     local = acceso.crear_lector()
                     resultado = verificar_batch(local, copia, self._avisar,
-                                                presupuesto_s=60.0, cancelado=self.hay_que_parar)
+                                                presupuesto_s=presupuesto, cancelado=self.hay_que_parar)
                 return copia, resultado, local
             finally:
                 if acceso is not None:
@@ -956,12 +969,12 @@ class TrabajoAirVaultWorker(QThread):
                     except SesionCancelada:
                         raise
                     except Exception as exc:
-                        trabajo.manifiesto.websearch_detalle = mensaje_error(exc, "No se pudieron consultar sus bitácoras en Web Search.")
-                        revisados += 1
-                        self.buscado.emit(dict(resultados=[(trabajo, False)], revisados=revisados,
-                                               confirmados=confirmados, total=len(trabajos), terminado=False,
-                                               automatico=bool(self.estado.get("confirmacion_automatica"))))
-                        continue
+                        copia = Trabajo(trabajo.config, trabajo.carpeta, trabajo.manifiesto.model_copy(deep=True))
+                        muestra = tuple(muestra_de_batch(copia.manifiesto))
+                        resultado = ConfirmacionBatch(False, 0, len(muestra),
+                            mensaje_error(exc, "No se pudieron consultar sus bitácoras en Web Search."),
+                            str(copia.manifiesto.batch_id or ""), muestra)
+                        local = None
                     with candado:
                         for campo in ("_ruta", "_plantilla", "_candidatas"):
                             if getattr(local, campo, None):
@@ -971,15 +984,27 @@ class TrabajoAirVaultWorker(QThread):
                                  websearch_muestra=list(resultado.muestra), websearch_detalle=resultado.detalle,
                                  websearch_metodo=METODO_MUESTRA, websearch_batch_id=resultado.batch_id,
                                  websearch_revision=momento, websearch_cotejadas=resultado.encontradas,
-                                 websearch_huella=huella_de_numeros(copia.manifiesto), batch_id=resultado.batch_id)
+                                 websearch_huella=huella_de_numeros(copia.manifiesto), batch_id=resultado.batch_id,
+                                 websearch_resultado=("encontrado" if resultado.confirmado else
+                                                      "ausente" if resultado.consulta_completa else "error"))
+                    for nombre, clave in (("subir", "subida_revisada"), ("completar", "cierre_revisado")):
+                        etapa = copia.manifiesto.etapas.get(nombre)
+                        datos[clave] = etapa.actualizada if etapa else ""
                     confirmado = resultado.confirmado
                     try:
                         actual = guardar_confirmacion(datos, trabajo.carpeta)
                     except (OSError, ValueError) as exc:
                         trabajo.manifiesto.websearch_detalle = str(exc) + " Se verificará de nuevo."
+                        trabajo.manifiesto.websearch_resultado = "error"
                         confirmado = False
+                        errores += 1
                     else:
                         copiar_confirmacion(actual, trabajo.manifiesto)
+                        if actual.websearch_resultado == "ausente":
+                            ausentes[str(trabajo.carpeta)] = Trabajo(trabajo.config, trabajo.carpeta,
+                                                                   actual.model_copy(deep=True))
+                        elif actual.websearch_resultado == "error":
+                            errores += 1
                     revisados += 1
                     confirmados += confirmado
                     self.buscado.emit(dict(resultados=[(trabajo, confirmado)], revisados=revisados,
@@ -992,7 +1017,123 @@ class TrabajoAirVaultWorker(QThread):
             self._lecturas_websearch.clear()
         self.buscado.emit(dict(resultados=[], revisados=revisados, confirmados=confirmados,
                                total=len(trabajos), terminado=True,
+                               ausentes=[ausentes[str(t.carpeta)] for t in trabajos if str(t.carpeta) in ausentes],
+                               errores=errores,
                                automatico=bool(self.estado.get("confirmacion_automatica"))))
+
+    def _recuperar_ausentes(self) -> None:
+        """Reenvia las ausencias comprobadas despues de terminar toda la muestra."""
+        from app.airvault.confirmacion import huella_de_numeros
+        from app.airvault.flujo import Trabajo
+        from app.airvault.uploader import serializar_cargas
+
+        pendientes = []
+        for anterior in self.estado["pendientes_subida"]:
+            actual = Trabajo.cargar(anterior.config, anterior.carpeta)
+            m = actual.manifiesto
+            if (not m.cancelado and m.websearch_resultado == "ausente"
+                    and m.websearch_revision == anterior.manifiesto.websearch_revision
+                    and m.websearch_huella == huella_de_numeros(m)):
+                pendientes.append(actual)
+        if not pendientes:
+            return
+        self.estado["trabajos"] = pendientes
+        self.estado["forzados"] = [str(t.carpeta) for t in pendientes]
+        cliente = self._conectar()
+        self._avisar(f"Chequeo terminado; se recuperan {len(pendientes)} batches no encontrados", 0, 0)
+
+        @serializar_cargas
+        def recuperar(trabajos, sesion, avisar=None):
+            self._enviar_recuperados(trabajos, cliente)
+
+        recuperar(pendientes, self.estado.get("sesion"), avisar=self._avisar)
+
+    def _enviar_recuperados(self, pendientes, cliente):
+        autorizados, fallos = self._revisar_reenvios(pendientes, cliente)
+        actuales = {str(t.carpeta): t for t in autorizados}
+        pendientes = [actuales.get(str(t.carpeta), t) for t in pendientes]
+        self.estado["trabajos"] = pendientes
+        if autorizados:
+            try:
+                self._enviar(autorizados, cliente)
+            finally:
+                for trabajo in autorizados:
+                    trabajo._duplicado_permitido = False
+        if fallos:
+            self.subido.emit(dict(trabajos=pendientes, cliente=cliente,
+                                  sesion=self.estado.get("sesion"), fallos=fallos))
+
+    def _revisar_reenvios(self, trabajos, cliente):
+        """Solo permite repetir un PDF si ninguna de sus bitacoras esta publicada."""
+        from contextlib import ExitStack
+        from app.airvault.confirmacion import huella_de_numeros, verificar_batch
+        from app.airvault.flujo import (Trabajo, autorizar_posible_duplicado,
+                                       marcar_posible_duplicado, ya_esta_en_airvault)
+        from app.airvault.session import ErrorDeSesion, SesionAirVault
+        from app.airvault.websearch_pagina import AccesoWebSearch
+
+        autorizados, fallos = [], []
+        lector = acceso = None
+        with ExitStack() as cierre:
+            for trabajo in trabajos:
+                if self.hay_que_parar():
+                    raise SesionCancelada("Se canceló la recuperación de batches")
+                try:
+                    if ya_esta_en_airvault(trabajo, cliente) is not None:
+                        autorizados.append(trabajo)
+                        continue
+                    if lector is None:
+                        sesion = self.estado.get("sesion")
+                        if isinstance(sesion, SesionAirVault):
+                            lectura = sesion.clonar(renovable=True, cancelacion_independiente=True)
+                            self._lecturas_websearch.append(lectura)
+                            cierre.callback(lectura.http.close)
+                            cierre.callback(self._lecturas_websearch.remove, lectura)
+                            acceso = cierre.enter_context(AccesoWebSearch(
+                                trabajo.config, lectura,
+                                avisar=lambda texto: self._avisar(texto, 0, 0),
+                                cancelado=self.hay_que_parar))
+                            lector = acceso.crear_lector()
+                            cierre.callback(lambda: lector.cerrar())
+                        else:
+                            lector = self.estado.get("buscador")
+                        if lector is None:
+                            raise ErrorDeSesion("Falta acceso a Web Search para confirmar el reenvío.")
+                    presupuesto = max(60.0, len(trabajo.manifiesto.bitacoras()) * 10.0)
+                    try:
+                        resultado = verificar_batch(lector, trabajo, self._avisar,
+                            presupuesto_s=presupuesto, cancelado=self.hay_que_parar, revisar_todas=True)
+                    except ErrorDeSesion:
+                        if acceso is None:
+                            raise
+                        lector.cerrar()
+                        acceso.renovar(lector.generacion)
+                        lector = acceso.crear_lector()
+                        resultado = verificar_batch(lector, trabajo, self._avisar,
+                            presupuesto_s=presupuesto, cancelado=self.hay_que_parar, revisar_todas=True)
+                    if not resultado.consulta_completa:
+                        raise ErrorDeSesion(resultado.detalle)
+                    if len(resultado.muestra) != len({str(r.log_number).strip() for r in trabajo.manifiesto.bitacoras()}):
+                        raise ErrorDeSesion("Faltan números válidos para confirmar el reenvío de todas las bitácoras.")
+                    if resultado.encontradas:
+                        motivo = (f"AirVault tiene {resultado.encontradas} de {resultado.esperadas} "
+                                  "bitácoras publicadas. Se conserva el batch para revisar las faltantes.")
+                        marcar_posible_duplicado(trabajo, motivo)
+                        fallos.append((trabajo.manifiesto.nombre_batch, motivo))
+                        continue
+                    actual = Trabajo.cargar(trabajo.config, trabajo.carpeta)
+                    if (actual.manifiesto.cancelado or actual.manifiesto.websearch_resultado != "ausente"
+                            or actual.manifiesto.websearch_revision != trabajo.manifiesto.websearch_revision
+                            or actual.manifiesto.websearch_huella != huella_de_numeros(actual.manifiesto)):
+                        continue
+                    autorizar_posible_duplicado(actual)
+                    autorizados.append(actual)
+                except (SesionCancelada, TrabajoCancelado):
+                    raise
+                except Exception as exc:
+                    fallos.append((trabajo.manifiesto.nombre_batch,
+                                   mensaje_error(exc, "No se pudo confirmar el reenvío en AirVault.")))
+        return autorizados, fallos
 
     def _detectar_pendientes(self) -> None:
         """Agrega trabajos de otras ejecuciones, con los no subidos primero.
@@ -1758,6 +1899,9 @@ class AirVaultWindow(QDialog):
         self._websearch_revisados: dict = {}
         self._websearch_pendientes: dict = {}
         self._websearch_manual_pendiente = False
+        self._websearch_resubidas: dict = {}
+        self._revision_airvault_pendiente = False
+        self._chequeo_incompleto = False
         self._cuenta_websearch = (0, 0)
         self._websearch_inicio: Optional[set[str]] = None
         self._websearch_inicio_por_revisar: set[str] = set()
@@ -2349,7 +2493,8 @@ class AirVaultWindow(QDialog):
             "Busca el 2 % de las bitácoras, con un mínimo de 7 y un máximo de 15, "
             "repartidas entre el inicio y el final de cada batch. "
             "Consulta números en Web Search de hasta 32 batches a la vez, incluso durante "
-            "la subida o el indexado. Si la muestra ya está publicada, lo marca completado."
+            "la subida o el indexado. Revisa todos, incluidos los completados, con una muestra del 5 %. "
+            "Al terminar el chequeo se reenvían los no encontrados."
         )
         self.boton_buscar_websearch.triggered.connect(self._buscar_websearch)
         batch_menu.addSeparator()
@@ -2489,10 +2634,11 @@ class AirVaultWindow(QDialog):
         self._ajustar_confirmacion()
 
     def _buscar_websearch(self) -> None:
-        trabajos = self._por_confirmar_websearch()
+        trabajos = self._por_confirmar_websearch(incluir_confirmados=True)
         if not trabajos:
             self.resumen.setText("No hay batches pendientes con números válidos para consultar en Web Search.")
             return
+        self._chequeo_incompleto = False
         self._iniciar_confirmacion(trabajos, automatico=False)
 
     def _iniciar_confirmacion(self, trabajos, automatico: bool = False) -> None:
@@ -2509,6 +2655,7 @@ class AirVaultWindow(QDialog):
             return
         estado = dict(config=self._config_actual(), raiz=self._raiz,
                       cookie=self.cookie_edit.text(), buscar_trabajos=trabajos,
+                      revisar_todos=True,
                       confirmacion_automatica=automatico)
         sesion = self._estado.get("sesion") or self._estado_websearch.get("sesion")
         if sesion is not None:
@@ -2547,9 +2694,14 @@ class AirVaultWindow(QDialog):
 
     def _al_fallar_websearch(self, mensaje: str) -> None:
         if (self._fin_confirmado is not None and self._worker_websearch is not None
-                and self._worker_websearch.estado.get("confirmacion_automatica")):
+                and self._worker_websearch.estado.get("confirmacion_automatica")
+                and not self._worker_websearch.estado.get("revisar_todos")):
             return
         mensaje = mensaje_error(mensaje, "No se pudo consultar Web Search.")
+        self._revision_airvault_pendiente = False
+        self._chequeo_incompleto = True
+        self._resultado_fallido = True
+        self._fin_confirmado = None
         self._anotar("Web Search: " + primera_frase(mensaje), ayuda=mensaje)
         if self.hilo() is None:
             self.resumen.setText("Web Search: " + mensaje)
@@ -2568,8 +2720,9 @@ class AirVaultWindow(QDialog):
         if self._pausado or self._cancelacion_solicitada:
             self._websearch_pendientes.clear()
             self._websearch_manual_pendiente = False
+            self._websearch_resubidas.clear()
+            self._revision_airvault_pendiente = False
             return
-        self._anunciar_fin()
         pendientes = list(self._websearch_pendientes.values())
         manual = self._websearch_manual_pendiente
         self._websearch_pendientes.clear()
@@ -2577,17 +2730,38 @@ class AirVaultWindow(QDialog):
         if pendientes and not self._deteniendo:
             self._iniciar_confirmacion(pendientes, automatico=not manual)
         else:
+            ausentes = list(self._websearch_resubidas.values())
+            self._websearch_resubidas.clear()
+            if (ausentes or self._revision_airvault_pendiente) and not self._websearch_proceso_activo:
+                self._websearch_inicio = set(self._websearch_revisados)
+                self._websearch_inicio_por_revisar.clear()
+                self._websearch_proceso_activo = True
+            if ausentes and not self._deteniendo:
+                self._fin_confirmado = None
+                self._encolar("recuperar_ausentes", ausentes,
+                              f"Chequeo terminado: se recuperan {len(ausentes)} batches no encontrados")
+            if self._revision_airvault_pendiente and not self._deteniendo:
+                self._revision_airvault_pendiente = False
+                self._cadena_manual = True
+                revisados = [t for t in self._filtrar_trabajos(self._trabajos)
+                             if t.manifiesto.websearch_resultado in ("encontrado", "ausente", "en_cola")]
+                if revisados:
+                    self._encolar("revisar_pendientes", revisados,
+                                  "Chequeo terminado: se revisa el indexado pendiente")
             self._ajustar_confirmacion()
+            self._anunciar_fin()
 
     def _al_buscar_websearch(self, datos: dict) -> None:
         from app.airvault.flujo import estado_local
         from app.airvault.manifest import copiar_confirmacion
-        auxiliar_terminado = self._fin_confirmado is not None and datos.get("automatico")
+        chequeo_completo = self._worker_websearch is not None and self._worker_websearch.estado.get("revisar_todos")
+        auxiliar_terminado = self._fin_confirmado is not None and datos.get("automatico") and not chequeo_completo
         resultados = datos["resultados"]
         for trabajo, confirmado in resultados:
             for actual in self._trabajos + list(self._estado.get("trabajos") or []):
                 if str(actual.carpeta) == str(trabajo.carpeta):
                     copiar_confirmacion(trabajo.manifiesto, actual.manifiesto)
+            self._websearch_revisados[str(trabajo.carpeta)] = self._firma_consulta_websearch(trabajo)
             if not auxiliar_terminado:
                 self._anotar(
                     f"Batch «{trabajo.manifiesto.nombre_batch}»: "
@@ -2597,11 +2771,17 @@ class AirVaultWindow(QDialog):
         confirmados = datos.get("confirmados", sum(confirmado for _, confirmado in resultados))
         revisados = datos.get("revisados", len(resultados))
         total = datos.get("total", len(resultados))
+        if datos.get("terminado"):
+            self._websearch_resubidas.update({str(t.carpeta): t for t in datos.get("ausentes", [])})
+            if datos.get("errores") and not auxiliar_terminado:
+                self._chequeo_incompleto = True
+                self._resultado_fallido = True
+                self._fin_confirmado = None
         self._cuenta_websearch = (revisados, total)
         if self.hilo() is None and not auxiliar_terminado:
             self.resumen.setText(
                 f"Web Search: {revisados} de {total} batches consultados, {confirmados} confirmados por muestra. "
-                "Los no encontrados siguen pendientes de confirmar la subida."
+                "Los no encontrados se reenvían al terminar el chequeo; los errores quedan pendientes de revisión."
             )
         terminado = self._fin_confirmado is not None
         locales = {str(t.carpeta): t for t in self._trabajos}
@@ -3069,6 +3249,23 @@ class AirVaultWindow(QDialog):
         """Prepara el estado que pide cada modo y arranca el hilo."""
         if modo == "buscar_websearch":
             self._iniciar_confirmacion(trabajos, automatico=False)
+            return bool(trabajos)
+        if modo in ("recuperar_ausentes", "revisar_pendientes"):
+            estado = self._estado
+            from app.airvault.session import SesionAirVault
+            sesion_revisada = self._estado_websearch.get("sesion")
+            if isinstance(sesion_revisada, SesionAirVault) and not sesion_revisada.cancelada:
+                estado["sesion"] = sesion_revisada.clonar(cancelacion_independiente=True)
+                estado.pop("cliente", None)
+                estado.pop("buscador", None)
+            estado.update(config=self._config_actual(), raiz=self._raiz,
+                          cookie=self.cookie_edit.text(), trabajos=list(trabajos),
+                          pendientes_subida=list(trabajos),
+                          indexar_al_encontrar=self._opciones.indexar,
+                          completar=self.completar_check.isChecked())
+            estado.pop("comprobar_trabajos", None)
+            estado["recuperar_pendientes"] = False
+            self._lanzar("comprobar" if modo == "revisar_pendientes" else modo, estado)
             return bool(trabajos)
         trabajos = self._filtrar_trabajos(trabajos)
         if not trabajos:
@@ -4716,6 +4913,11 @@ class AirVaultWindow(QDialog):
             confirmado = parte.trabajo.manifiesto.websearch_confirmado if websearch_confirmacion_valida(parte.trabajo.manifiesto) else ""
             if confirmado and parte.titulo != "Confirmado en Web Search":
                 estado += ", confirmado en Web Search"
+            revision = getattr(parte.trabajo.manifiesto, "websearch_resultado", "")
+            if revision in ("encontrado", "ausente", "en_cola"):
+                estado += ", revisado en AirVault"
+            elif revision == "error":
+                estado += ", chequeo pendiente"
             celdas = (parte.batch_id, nombre, str(esperadas), estado)
             papel = papel_de_estado(
                 parte.estado, indexando, revisar=parte.trabajo.manifiesto.solo_subir,
@@ -4744,6 +4946,8 @@ class AirVaultWindow(QDialog):
                     if confirmado:
                         item.setToolTip(item.toolTip() + "\nConfirmado en Web Search: " + confirmado
                                         + "\n" + parte.trabajo.manifiesto.websearch_detalle)
+                    elif revision:
+                        item.setToolTip(item.toolTip() + "\n" + parte.trabajo.manifiesto.websearch_detalle)
                 if papel:
                     pintar_celda_del_tema(item, papel)
                 tabla.setItem(fila, columna, item)
@@ -5102,14 +5306,16 @@ class AirVaultWindow(QDialog):
         self._vigilante.start()
         self._actualizar_latido()
 
-    def _por_confirmar_websearch(self) -> list:
+    def _por_confirmar_websearch(self, incluir_confirmados: bool = False) -> list:
         from app.airvault.flujo import websearch_confirmacion_valida
         from app.airvault.confirmacion import muestra_de_batch
-        return sorted([
+        trabajos = [
             t for t in self._trabajos if not t.manifiesto.cancelado
-            and not websearch_confirmacion_valida(t.manifiesto)
-            and muestra_de_batch(t.manifiesto)
-        ], key=lambda t: (getattr(t.manifiesto, "websearch_revision", ""), str(t.carpeta)))
+            and (incluir_confirmados or not websearch_confirmacion_valida(t.manifiesto))
+            and (incluir_confirmados or muestra_de_batch(t.manifiesto))
+        ]
+        return trabajos if incluir_confirmados else sorted(
+            trabajos, key=lambda t: (getattr(t.manifiesto, "websearch_revision", ""), str(t.carpeta)))
 
     def _firma_consulta_websearch(self, trabajo):
         from app.airvault.confirmacion import huella_de_numeros
@@ -5122,14 +5328,13 @@ class AirVaultWindow(QDialog):
     def _subidos_por_confirmar_websearch(self) -> list:
         from app.airvault.flujo import _subida_rastreable
         return [
-            t for t in self._por_confirmar_websearch()
-            if not t.manifiesto.etapa_hecha("completar")
-            and _subida_rastreable(t, bool(t.manifiesto.batch_id))
+            t for t in self._por_confirmar_websearch(incluir_confirmados=True)
+            if _subida_rastreable(t, bool(t.manifiesto.batch_id))
         ]
 
     def _pendientes_websearch_automaticos(self) -> list:
         """Conserva el alcance inicial aunque se suban nuevos batches."""
-        if self._firma_de_fin() is not None:
+        if self._firma_de_fin() is not None and not self._websearch_inicio_por_revisar:
             return []
         pendientes = []
         for trabajo in self._subidos_por_confirmar_websearch():
@@ -5404,9 +5609,9 @@ class AirVaultWindow(QDialog):
         marcada la revisión periódica, así que con ella apagada el botón
         miraba la cola y no terminaba nada.
         """
-        self._cadena_manual = True
+        self._revision_airvault_pendiente = True
         self._subidas_del_ciclo.clear()
-        self._comprobar()
+        self._buscar_websearch()
 
     def _indexar(self, automatico: bool = False) -> None:
         self._estado.pop("indexar_acotado", None)
@@ -5551,7 +5756,7 @@ class AirVaultWindow(QDialog):
         if not (modo == "buscar_websearch" and estado.get("confirmacion_automatica")):
             self._fin_pendiente = False
         self._resultado_fallido = False
-        self._worker_filtrado = self.solo_ejecucion_check.isChecked()
+        self._worker_filtrado = self.solo_ejecucion_check.isChecked() and modo != "recuperar_ausentes"
         if self._worker_filtrado:
             estado["recuperar_pendientes"] = False
             for clave in (
@@ -5815,15 +6020,20 @@ class AirVaultWindow(QDialog):
     # ── la línea viva de la bitácora ───────────────────────────────
 
     def _totales_bitacoras(self) -> str:
-        """Cuenta bitácoras reales, sin separadores ni reintentos repetidos."""
+        """Cuenta solo las bitácoras del proceso, sin separadores ni reintentos."""
         from app.airvault.model import EstadoRegistro
 
         conocidos = {str(t.carpeta): t for t in self._trabajos}
         conocidos.update({
             str(t.carpeta): t for t in self._estado.get("trabajos") or []
         })
-        trabajos = self._filtrar_trabajos(conocidos.values())
-        total = 0 if trabajos else getattr(self, "_total_ejecucion", 0)
+        if self._alcance_proceso is None:
+            trabajos = self._filtrar_trabajos(conocidos.values())
+            total = 0 if trabajos else getattr(self, "_total_ejecucion", 0)
+            trabajos = [t for t in trabajos if not t.manifiesto.etapa_hecha("completar")]
+        else:
+            trabajos = [t for clave, t in conocidos.items() if clave in self._alcance_proceso]
+            total = 0
         subidas = indexadas = 0
         for trabajo in trabajos:
             manifiesto = trabajo.manifiesto
@@ -6525,14 +6735,17 @@ class AirVaultWindow(QDialog):
 
     def _anunciar_fin(self) -> bool:
         """Deja el final en la barra y la bitacora cuando ya no falta nada."""
-        if not self._fin_pendiente or self._resultado_fallido or self._pausado or self._cancelacion_solicitada:
+        if (not self._fin_pendiente or self._resultado_fallido or self._chequeo_incompleto
+                or self._pausado or self._cancelacion_solicitada):
             return False
         firma = self._firma_de_fin()
         lector = self.lectura_websearch()
         if (
             firma is None or self.hilo() is not None or self._cola_de_acciones
-            or self._websearch_manual_pendiente
-            or (lector is not None and not lector.estado.get("confirmacion_automatica"))
+            or self._websearch_manual_pendiente or self._websearch_resubidas
+            or self._websearch_inicio_por_revisar or self._revision_airvault_pendiente
+            or (lector is not None and (not lector.estado.get("confirmacion_automatica")
+                                       or lector.estado.get("revisar_todos")))
         ):
             return False
         self._fin_pendiente = False
@@ -6672,7 +6885,8 @@ class AirVaultWindow(QDialog):
         """Una lectura auxiliar cancelada al terminar no mantiene el proceso vivo."""
         lector = self.lectura_websearch()
         if (lector is not None and self._fin_confirmado is not None
-                and lector.estado.get("confirmacion_automatica")):
+                and lector.estado.get("confirmacion_automatica")
+                and not lector.estado.get("revisar_todos")):
             return None
         return lector
 

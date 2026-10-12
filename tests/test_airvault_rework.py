@@ -139,7 +139,7 @@ def test_confirmar_solo_consulta_websearch_y_no_prepara_el_cliente_de_index(app,
         estado["sesion"], config, _ruta=b.ruta, _plantilla=b._plantilla))
     worker._conectar = lambda: pytest.fail("La confirmacion no consulta Web Index")
     worker._buscar_websearch()
-    assert len(consultas) == 15
+    assert len(consultas) == 50
     assert all(ruta.startswith("/zfp/") for ruta in rutas)
     assert t.manifiesto.etapa_hecha("completar")
     assert "cliente" not in estado
@@ -350,7 +350,7 @@ def test_revision_empieza_sin_intervalo_y_consulta_todos_aunque_haya_subida(app,
     monkeypatch.setattr(ventana, "hilo", lambda: object())
     ventana._confirmar_solo()
     trabajos, automatico = lanzamientos[0]
-    assert trabajos == ventana._trabajos[1:] + ventana._trabajos[:1]
+    assert trabajos == ventana._trabajos
     assert automatico
     ventana.auto_check.setChecked(False)
     assert not ventana._confirmador.isActive()

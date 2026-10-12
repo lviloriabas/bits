@@ -75,7 +75,7 @@ class PaginaFalsa:
         self.expresiones.append(expresion)
         if expresion == modulo._ACCESO_PEDIDO:
             return self.login
-        if expresion == modulo._LEER_REJILLA:
+        if expresion == modulo._LEER_MUESTRA:
             return self.filas
 
     def esperar(self, condicion, presupuesto, cada):
@@ -118,7 +118,7 @@ def test_websearch_vacio_no_confirma_la_publicacion(lector, tmp_path):
     resultado = verificar_batch(lector, trabajo(tmp_path, "pendiente"))
     assert not resultado.confirmado
     assert resultado.encontradas == 0
-    assert len(pagina.esperas) == 1
+    assert len(pagina.esperas) == 7
 
 
 def test_login_se_propaga_para_renovarlo_en_vez_de_declarar_websearch_no_disponible(lector):
@@ -126,7 +126,7 @@ def test_login_se_propaga_para_renovarlo_en_vez_de_declarar_websearch_no_disponi
     pagina.login = True
     with pytest.raises(ErrorDeSesion, match="iniciar sesión"):
         lector.consultar_numero("2000001", 12)
-    assert modulo._LEER_REJILLA not in pagina.expresiones
+    assert modulo._LEER_MUESTRA not in pagina.expresiones
 
 
 def test_si_la_pagina_no_carga_no_lee_resultados_anteriores(lector):
@@ -134,7 +134,7 @@ def test_si_la_pagina_no_carga_no_lee_resultados_anteriores(lector):
     pagina.lista = False
     with pytest.raises(TimeoutError):
         lector.consultar_numero("2000001", 12)
-    assert modulo._LEER_REJILLA not in pagina.expresiones
+    assert modulo._LEER_MUESTRA not in pagina.expresiones
 
 
 def test_fallo_al_conectar_cierra_solo_la_pestana_propia(monkeypatch, lector):
@@ -214,3 +214,47 @@ def test_muestra_estado_de_login_mientras_websearch_abre(app, tmp_path):
     ventana = AirVaultWindow(tmp_path)
     ventana._mostrar_paso_websearch("Iniciando sesión en Web Search", 0, 0)
     assert ventana.estado_label.text() == "Iniciando sesión en Web Search"
+
+
+@pytest.mark.parametrize("filas", [None, [{"error": "Sin permisos"}], [{"log": ""}], [{"log": "123"}]])
+def test_resultados_ilegibles_no_se_interpretan_como_busqueda_vacia(lector, filas):
+    lector, pagina = lector
+    pagina.filas = filas
+    with pytest.raises(RuntimeError, match="leer los resultados"):
+        lector.consultar_numero("2000001", 12)
+
+
+def test_renovacion_actualiza_el_endpoint_del_navegador(monkeypatch):
+    sesion = SesionAirVault(AirVaultConfig())
+    entradas = []
+    monkeypatch.setattr(sesion, "renovar_en_navegador", lambda *_: entradas.append("entrar"))
+    monkeypatch.setattr(modulo, "comprobar_o_renovar", lambda *_a, **_k: None)
+    acceso = modulo.AccesoWebSearch(sesion.config, sesion)
+    nueva = {"webSocketDebuggerUrl": "ws://nuevo"}
+    acceso.version = {"webSocketDebuggerUrl": "ws://anterior"}
+    acceso.navegador = SimpleNamespace(abrir=lambda *_a, **_k: nueva)
+    transferidas = []
+    monkeypatch.setattr(acceso, "_usar_cookies", lambda: transferidas.append(acceso.version))
+    acceso.renovar(0)
+    acceso.renovar(0)
+    assert entradas == ["entrar"]
+    assert transferidas == [nueva]
+    assert acceso.generacion == 1
+    sesion.http.close()
+
+
+def test_login_fallido_no_abre_una_ventana_por_cada_batch(monkeypatch):
+    sesion = SesionAirVault(AirVaultConfig())
+    entradas = []
+
+    def fallar(*_):
+        entradas.append("entrar")
+        raise ErrorDeSesion("No se pudo entrar")
+
+    monkeypatch.setattr(sesion, "renovar_en_navegador", fallar)
+    acceso = modulo.AccesoWebSearch(sesion.config, sesion)
+    for _ in range(3):
+        with pytest.raises(ErrorDeSesion, match="No se pudo entrar"):
+            acceso.renovar(0)
+    assert entradas == ["entrar"]
+    sesion.http.close()

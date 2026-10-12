@@ -37,8 +37,9 @@ def caso(tmp_path, cantidad=500, conocido=True):
     return t, b, filas, pedidos
 
 
-@pytest.mark.parametrize("cantidad,esperadas", [(1, 1), (2, 2), (5, 5), (7, 7), (50, 7), (350, 7),
-                                              (351, 8), (500, 10), (750, 15), (1000, 15), (10000, 15)])
+@pytest.mark.parametrize("cantidad,esperadas", [(1, 1), (2, 2), (5, 5), (7, 7), (50, 7), (140, 7),
+                                              (141, 8), (350, 18), (351, 18), (500, 25),
+                                              (750, 38), (1000, 50), (10000, 500)])
 def test_consulta_el_porcentaje_acotado_y_no_todo_el_batch(tmp_path, cantidad, esperadas):
     t, b, _, pedidos = caso(tmp_path, cantidad)
     resultado = verificar_batch(b, t)
@@ -61,8 +62,12 @@ def test_confirma_numeros_ya_publicados_aunque_la_carga_anterior_sea_distinta(tm
 
 def test_la_muestra_incluye_extremos_y_puntos_intermedios(tmp_path):
     t, _, _, _ = caso(tmp_path)
-    assert muestra_de_batch(t.manifiesto) == ["2000000", "2000055", "2000111", "2000166", "2000222",
-                                            "2000277", "2000333", "2000388", "2000444", "2000499"]
+    assert muestra_de_batch(t.manifiesto) == [
+        "2000000", "2000021", "2000042", "2000062", "2000083", "2000104", "2000125",
+        "2000146", "2000166", "2000187", "2000208", "2000229", "2000250", "2000270",
+        "2000291", "2000312", "2000333", "2000353", "2000374", "2000395", "2000416",
+        "2000437", "2000457", "2000478", "2000499",
+    ]
 
 
 @pytest.mark.parametrize("plantilla", ["encodedValues", "encodedKeywordFilter", "fieldId", "searchText"])
@@ -70,15 +75,15 @@ def test_consulta_numeros_con_cualquiera_de_las_formas_guardadas(tmp_path, plant
     t, b, _, pedidos = caso(tmp_path)
     b._plantilla = plantilla
     assert verificar_batch(b, t).confirmado
-    assert len(pedidos) == 10
+    assert len(pedidos) == 25
 
 
 def test_una_bitacora_fuera_de_la_muestra_no_exige_auditar_todo(tmp_path):
     t, b, filas, _ = caso(tmp_path)
-    filas.pop(270)
+    filas.pop(271)
     resultado = verificar_batch(b, t)
     assert resultado.confirmado
-    assert resultado.encontradas == 10
+    assert resultado.encontradas == 25
 
 
 def test_resultados_repetidos_no_reemplazan_una_bitacora_ausente(tmp_path):
@@ -86,7 +91,7 @@ def test_resultados_repetidos_no_reemplazan_una_bitacora_ausente(tmp_path):
     filas[-1] = dict(filas[0])
     resultado = verificar_batch(b, t)
     assert not resultado.confirmado
-    assert resultado.encontradas == 9
+    assert resultado.encontradas == 24
 
 
 def test_la_publicacion_anterior_puede_estar_repartida_en_distintos_batches(tmp_path):
@@ -130,7 +135,7 @@ def test_una_respuesta_sin_filtrar_no_obliga_a_recorrer_todo(tmp_path):
 
     b.sesion.get = get
     assert not verificar_batch(b, t).confirmado
-    assert len(pedidos) == 2
+    assert len(pedidos) == 25
 
 
 def test_una_fila_con_campos_por_identificador_se_entiende(tmp_path):
@@ -258,7 +263,7 @@ def test_la_muestra_persiste_el_cierre_local_sin_completar_en_el_servidor(tmp_pa
     assert final.manifiesto.etapa_hecha("completar")
     assert estado_local(final).estado == COMPLETADO
     assert not estado_local(final).se_puede_subir
-    assert len(pedidos) == 10
+    assert len(pedidos) == 25
 
 
 def test_otro_worker_no_borra_el_cierre_por_muestra_y_editar_invalida_la_prueba(tmp_path):
