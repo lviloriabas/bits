@@ -5,8 +5,10 @@ import json
 import hashlib
 import re
 import time
+from loguru import logger
 
 from app.airvault.config import CAMPO_LOG_NUMBER
+from app.airvault.errores_websearch import mensaje_error_websearch
 from app.airvault.session import ErrorDeSesion, SesionCancelada
 from app.airvault.websearch import PLANTILLAS, _aparece
 
@@ -149,7 +151,7 @@ def verificar_batch(buscador, trabajo, avisar=None, presupuesto_s=60.0, cancelad
                                  identidad, numeros, consulta_completa)
 
     if not muestra:
-        return resultado(False, "Faltan números válidos para buscar una muestra de bitácoras.")
+        return resultado(False, "Faltan números de bitácora válidos para buscar una muestra.")
     inicio = time.monotonic()
     directa = getattr(buscador, "consultar_numero", None)
     original = buscador
@@ -168,8 +170,9 @@ def verificar_batch(buscador, trabajo, avisar=None, presupuesto_s=60.0, cancelad
             return resultado(False, buscador.motivo or "Web Search no está disponible.")
     except (ErrorDeSesion, SesionCancelada):
         raise
-    except Exception:
-        return resultado(False, "No se pudo consultar Web Search. Se verificará de nuevo.")
+    except Exception as exc:
+        logger.warning("Web Search no preparo la consulta del batch {}: {}", manifiesto.nombre_batch, exc)
+        return resultado(False, mensaje_error_websearch(exc))
     if is_dataclass(original):
         for campo in ("_ruta", "_plantilla", "_probado", "_sin_control", "_motivo", "_candidatas", "_tanteos"):
             setattr(original, campo, getattr(buscador, campo))
@@ -178,13 +181,13 @@ def verificar_batch(buscador, trabajo, avisar=None, presupuesto_s=60.0, cancelad
         return resultado(False, "Web Search no tiene una consulta válida para verificar esta carga.")
     forma = None if callable(directa) else PLANTILLAS[buscador._plantilla]
     consultas = {}
-    for numero in muestra:
+    for revisadas, numero in enumerate(muestra):
         if cancelado():
             raise SesionCancelada("Se canceló la verificación en Web Search")
         if time.monotonic() - inicio >= presupuesto_s:
             return resultado(False, "La consulta tardó demasiado. Se conserva el avance y se verificará de nuevo.")
         if avisar:
-            avisar(f"Buscando una muestra de «{manifiesto.nombre_batch}» en Web Search", encontradas, esperadas)
+            avisar(f"Revisando números de bitácora del batch «{manifiesto.nombre_batch}» en Web Search", revisadas, esperadas)
         try:
             if numero not in consultas:
                 datos = (directa(numero, max(0.0, presupuesto_s - (time.monotonic() - inicio)))
@@ -195,8 +198,9 @@ def verificar_batch(buscador, trabajo, avisar=None, presupuesto_s=60.0, cancelad
                 consultas[numero] = _filas(datos)
         except (ErrorDeSesion, SesionCancelada):
             raise
-        except Exception:
-            return resultado(False, "Web Search no respondió. Se conserva el estado y se comprobará de nuevo.")
+        except Exception as exc:
+            logger.warning("Web Search no pudo leer la bitacora {} del batch {}: {}", numero, manifiesto.nombre_batch, exc)
+            return resultado(False, mensaje_error_websearch(exc))
         if cancelado():
             raise SesionCancelada("Se canceló la verificación en Web Search")
         if time.monotonic() - inicio >= presupuesto_s:
@@ -209,6 +213,8 @@ def verificar_batch(buscador, trabajo, avisar=None, presupuesto_s=60.0, cancelad
             aparece = True
             break
         encontradas += bool(aparece)
+    if avisar:
+        avisar(f"Revisión de números de bitácora del batch «{manifiesto.nombre_batch}» en Web Search terminada", esperadas, esperadas)
     if encontradas != esperadas:
         return resultado(False, f"{encontradas} de {esperadas} números de bitácora de la muestra encontrados en Web Search. Falta confirmar la subida.", True)
     if avisar:

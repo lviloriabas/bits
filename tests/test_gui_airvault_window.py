@@ -2612,8 +2612,8 @@ def test_la_bitacora_lista_cada_batch_en_su_propia_linea(ventana):
     assert not lineas[1].startswith(" ")
 
 
-def test_un_mensaje_de_varios_parrafos_se_apunta_por_su_primera_frase(ventana):
-    """El registro conserva el motivo completo como ayuda al pasar por la entrada."""
+def test_un_mensaje_de_error_se_muestra_sin_ayuda_al_pasar_el_cursor(ventana):
+    """El registro conserva el motivo seguro en el texto visible."""
     ventana._al_fallar(
         "No se pudo abrir la sesion. Revise el usuario y la contrasenya en "
         "la configuracion de AirVault y vuelva a intentarlo."
@@ -2623,7 +2623,8 @@ def test_un_mensaje_de_varios_parrafos_se_apunta_por_su_primera_frase(ventana):
     assert "Se detuvo: Inicie sesión" in ultima
     assert "Total:" in ultima
     assert "configuracion" not in ultima
-    assert ventana.bitacora.item(ventana.bitacora.count() - 1).toolTip() == ventana.resumen.text()
+    assert ventana.resumen.text() in ultima
+    assert ventana.bitacora.item(ventana.bitacora.count() - 1).toolTip() == ""
 
 
 def test_una_carga_que_no_salio_no_se_cuenta_como_subida(ventana):

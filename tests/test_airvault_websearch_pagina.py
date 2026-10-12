@@ -10,6 +10,7 @@ import pytest
 from app.airvault import websearch_pagina as modulo
 from app.airvault.config import AirVaultConfig
 from app.airvault.confirmacion import verificar_batch
+from app.airvault.errores_websearch import ErrorDeWebSearch
 from app.airvault.session import ErrorDeSesion, SesionAirVault, SesionCancelada, abrir_sesion, comprobar_o_renovar
 from app.gui.airvault_window import AirVaultWindow, TrabajoAirVaultWorker
 from tests.test_airvault_rework import trabajo
@@ -106,7 +107,7 @@ def test_busca_numero_exacto_en_consulta_real_y_no_reutiliza_la_rejilla_vieja(le
     pagina.filas = [{"log": "2000002"}]
     assert lector.consultar_numero("2000002", 9) == {"rows": [{"LogNo": "2000002"}]}
     assert len(lector.acceso.navegador.urls) == 1
-    assert "__bits_busqueda_anterior" in pagina.expresiones[-3]
+    assert any("__bits_busqueda_anterior" in expresion for expresion in pagina.expresiones)
     assert "typeof window.__bits_busqueda_anterior === 'undefined'" in pagina.esperas[-1][0]
     lector.cerrar()
     assert pagina.cerrada
@@ -132,7 +133,7 @@ def test_login_se_propaga_para_renovarlo_en_vez_de_declarar_websearch_no_disponi
 def test_si_la_pagina_no_carga_no_lee_resultados_anteriores(lector):
     lector, pagina = lector
     pagina.lista = False
-    with pytest.raises(TimeoutError):
+    with pytest.raises(ErrorDeWebSearch, match="no terminó de cargar"):
         lector.consultar_numero("2000001", 12)
     assert modulo._LEER_MUESTRA not in pagina.expresiones
 
@@ -220,7 +221,7 @@ def test_muestra_estado_de_login_mientras_websearch_abre(app, tmp_path):
 def test_resultados_ilegibles_no_se_interpretan_como_busqueda_vacia(lector, filas):
     lector, pagina = lector
     pagina.filas = filas
-    with pytest.raises(RuntimeError, match="leer los resultados"):
+    with pytest.raises(ErrorDeWebSearch, match="leer sus bitácoras"):
         lector.consultar_numero("2000001", 12)
 
 

@@ -759,10 +759,11 @@ class TrabajoAirVaultWorker(QThread):
             logger.opt(exception=exc).error(
                 "El trabajo de AirVault ({}) se detuvo: {}", self.modo, exc
             )
-            fallback = ("No se pudieron consultar las bitácoras en Web Search. Vuelva a intentarlo."
-                        if self.modo == "buscar_websearch" else
-                        "No se pudo continuar el indexado. Vuelva a revisar en AirVault.")
-            self.fallo.emit(mensaje_error(exc, fallback))
+            if self.modo == "buscar_websearch":
+                from app.airvault.errores_websearch import mensaje_error_websearch
+                self.fallo.emit(mensaje_error_websearch(exc))
+            else:
+                self.fallo.emit(mensaje_error(exc, "No se pudo continuar el indexado. Vuelva a revisar en AirVault."))
 
     def _avisar(self, texto: str, hechas: int, total: int) -> None:
         """Cuenta en qué va y, de paso, mira si hay que parar."""
@@ -869,6 +870,7 @@ class TrabajoAirVaultWorker(QThread):
         from app.airvault.flujo import Trabajo, websearch_confirmacion_valida
         from app.airvault.manifest import copiar_confirmacion, guardar_confirmacion
         from app.airvault.session import ErrorDeSesion, SesionAirVault
+        from app.airvault.errores_websearch import mensaje_error_websearch
         from app.airvault.websearch import Buscador
 
         buscador = self.estado.get("buscador")
@@ -969,10 +971,11 @@ class TrabajoAirVaultWorker(QThread):
                     except SesionCancelada:
                         raise
                     except Exception as exc:
+                        logger.warning("Web Search no consulto el batch {}: {}", trabajo.manifiesto.nombre_batch, exc)
                         copia = Trabajo(trabajo.config, trabajo.carpeta, trabajo.manifiesto.model_copy(deep=True))
                         muestra = tuple(muestra_de_batch(copia.manifiesto))
                         resultado = ConfirmacionBatch(False, 0, len(muestra),
-                            mensaje_error(exc, "No se pudieron consultar sus bitácoras en Web Search."),
+                            mensaje_error_websearch(exc),
                             str(copia.manifiesto.batch_id or ""), muestra)
                         local = None
                     with candado:
@@ -1114,7 +1117,7 @@ class TrabajoAirVaultWorker(QThread):
                     if not resultado.consulta_completa:
                         raise ErrorDeSesion(resultado.detalle)
                     if len(resultado.muestra) != len({str(r.log_number).strip() for r in trabajo.manifiesto.bitacoras()}):
-                        raise ErrorDeSesion("Faltan números válidos para confirmar el reenvío de todas las bitácoras.")
+                        raise ErrorDeSesion("Faltan números de bitácora válidos para confirmar el reenvío.")
                     if resultado.encontradas:
                         motivo = (f"AirVault tiene {resultado.encontradas} de {resultado.esperadas} "
                                   "bitácoras publicadas. Se conserva el batch para revisar las faltantes.")
@@ -1903,6 +1906,7 @@ class AirVaultWindow(QDialog):
         self._revision_airvault_pendiente = False
         self._chequeo_incompleto = False
         self._cuenta_websearch = (0, 0)
+        self._paso_websearch = "Revisando números de bitácora en Web Search"
         self._websearch_inicio: Optional[set[str]] = None
         self._websearch_inicio_por_revisar: set[str] = set()
         self._websearch_proceso_activo = False
@@ -2490,10 +2494,10 @@ class AirVaultWindow(QDialog):
         batch_menu.setToolTipsVisible(True)
         self.boton_buscar_websearch = batch_menu.addAction("Verificar subidas en Web Search")
         self.boton_buscar_websearch.setToolTip(
-            "Busca el 2 % de las bitácoras, con un mínimo de 7 y un máximo de 15, "
+            "Busca el 5 % de las bitácoras, con un mínimo de 7 si el batch tiene suficientes, "
             "repartidas entre el inicio y el final de cada batch. "
-            "Consulta números en Web Search de hasta 32 batches a la vez, incluso durante "
-            "la subida o el indexado. Revisa todos, incluidos los completados, con una muestra del 5 %. "
+            "Consulta números de bitácora en Web Search de hasta 32 batches a la vez, incluso durante "
+            "la subida o el indexado. Revisa todos, incluidos los completados. "
             "Al terminar el chequeo se reenvían los no encontrados."
         )
         self.boton_buscar_websearch.triggered.connect(self._buscar_websearch)
@@ -2636,7 +2640,7 @@ class AirVaultWindow(QDialog):
     def _buscar_websearch(self) -> None:
         trabajos = self._por_confirmar_websearch(incluir_confirmados=True)
         if not trabajos:
-            self.resumen.setText("No hay batches pendientes con números válidos para consultar en Web Search.")
+            self.resumen.setText("No hay batches pendientes con números de bitácora válidos para consultar en Web Search.")
             return
         self._chequeo_incompleto = False
         self._iniciar_confirmacion(trabajos, automatico=False)
@@ -2688,21 +2692,27 @@ class AirVaultWindow(QDialog):
     def _mostrar_paso_websearch(self, texto: str, hechas: int, total: int) -> None:
         if self._fin_confirmado is not None and self._lectura_websearch_pendiente() is None:
             return
+        self._paso_websearch = texto
+        if total > 0:
+            self._paso_websearch += f": {hechas} de {total} bitácoras revisadas"
         if self.hilo() is None:
-            self.estado_label.setText(texto if total == 0 else "Buscando números de bitácora en Web Search")
-            self.estado_label.setToolTip(texto)
+            self.estado_label.setText(self._paso_websearch)
+            self.estado_label.setToolTip("")
+        self._pintar_linea_viva()
 
     def _al_fallar_websearch(self, mensaje: str) -> None:
         if (self._fin_confirmado is not None and self._worker_websearch is not None
                 and self._worker_websearch.estado.get("confirmacion_automatica")
                 and not self._worker_websearch.estado.get("revisar_todos")):
             return
-        mensaje = mensaje_error(mensaje, "No se pudo consultar Web Search.")
+        from app.airvault.errores_websearch import mensaje_error_websearch
+        mensaje = mensaje_error_websearch(mensaje)
         self._revision_airvault_pendiente = False
         self._chequeo_incompleto = True
         self._resultado_fallido = True
         self._fin_confirmado = None
-        self._anotar("Web Search: " + primera_frase(mensaje), ayuda=mensaje)
+        self._anotar("Web Search: " + mensaje)
+        self.estado_label.setToolTip("")
         if self.hilo() is None:
             self.resumen.setText("Web Search: " + mensaje)
 
@@ -3859,7 +3869,6 @@ class AirVaultWindow(QDialog):
         """
         lista = CopyableListWidget()
         lista.setObjectName("airvaultBitacora")
-        lista.setToolTip("Lo que el indexado va haciendo, con la hora de cada paso")
         lista.setMinimumHeight(self._densidad.airvault_log_min_height)
         lista.setWordWrap(True)
         lista.setTextElideMode(Qt.TextElideMode.ElideNone)
@@ -4932,21 +4941,19 @@ class AirVaultWindow(QDialog):
                         | Qt.AlignmentFlag.AlignVCenter
                     )
                 if columna == 3:
-                    from app.airvault.flujo import DESCUADRADO, INCOMPLETO, POSIBLE_DUPLICADO, SIN_SUBIR, TOMADO
+                    from app.airvault.flujo import DESCUADRADO, INCOMPLETO, NO_ENCONTRADO, POSIBLE_DUPLICADO, SIN_SUBIR, TOMADO
                     detalle = parte.detalle.strip()
                     if detalle.casefold() == parte.titulo.casefold():
                         detalle = ""
                     elif detalle.casefold().startswith(parte.titulo.casefold() + ";"):
                         detalle = detalle[len(parte.titulo) + 1:].strip()
-                    item.setToolTip(
-                        mensaje_error(detalle, parte.titulo)
-                        if parte.estado in (DESCUADRADO, INCOMPLETO, POSIBLE_DUPLICADO, SIN_SUBIR, TOMADO)
-                        else f"{parte.titulo}: {detalle}" if detalle else parte.titulo
-                    )
-                    if confirmado:
+                    error = parte.estado in (DESCUADRADO, INCOMPLETO, NO_ENCONTRADO, POSIBLE_DUPLICADO, SIN_SUBIR, TOMADO) or revision == "error"
+                    if not error:
+                        item.setToolTip(f"{parte.titulo}: {detalle}" if detalle else parte.titulo)
+                    if confirmado and not error:
                         item.setToolTip(item.toolTip() + "\nConfirmado en Web Search: " + confirmado
                                         + "\n" + parte.trabajo.manifiesto.websearch_detalle)
-                    elif revision:
+                    elif revision and not error:
                         item.setToolTip(item.toolTip() + "\n" + parte.trabajo.manifiesto.websearch_detalle)
                 if papel:
                     pintar_celda_del_tema(item, papel)
@@ -6128,7 +6135,7 @@ class AirVaultWindow(QDialog):
             parando = getattr(worker, "hay_que_parar", lambda: False)()
             esperando = total <= 0 and any(p in self._ultimo_paso.casefold()
                                            for p in ("esperando", "airvault está", "airvault arma", "entrando"))
-            texto = ("Pausando" if parando and self._pausado else "Cancelando" if parando else "Buscando números en Web Search" if lector
+            texto = ("Pausando" if parando and self._pausado else "Cancelando" if parando else self._paso_websearch if lector
                      else "Esperando respuesta de AirVault" if esperando
                      else "BITS trabajando") + f" ({_minutos(time.monotonic() - self._inicio_paso)})"
             if total > 0:
@@ -6138,7 +6145,7 @@ class AirVaultWindow(QDialog):
             if not lector and lector_paralelo is not None:
                 revisados, batches = self._cuenta_websearch
                 if batches > 0:
-                    texto += f" - Web Search: {min(revisados, batches)} de {batches} batches"
+                    texto += f" - {self._paso_websearch} - Web Search: {min(revisados, batches)} de {batches} batches"
             color = color_indexando()
         else:
             restante = max(0, self._vigilante.remainingTime()) / 1000
@@ -6212,8 +6219,9 @@ class AirVaultWindow(QDialog):
         lineas += [str(detalle).strip() for detalle in detalles]
         lineas.append(self._totales_bitacoras())
         entrada = QListWidgetItem("\n".join(lineas))
-        if ayuda:
-            entrada.setToolTip(ayuda)
+        if ayuda and ayuda not in lineas:
+            lineas.insert(-1, ayuda)
+            entrada.setText("\n".join(lineas))
         # Por encima de la línea viva, que es siempre la última: como el
         # cursor de una terminal, lo que pasa se escribe antes que él.
         if self._linea_viva is not None:
@@ -6606,9 +6614,10 @@ class AirVaultWindow(QDialog):
     def _al_fallar(self, mensaje: str, *, preparacion: bool = False) -> None:
         worker = self.hilo()
         if worker is not None and getattr(worker, "modo", "") == "buscar_websearch":
-            mensaje = mensaje_error(mensaje, "No se pudo verificar la publicación en Web Search.")
+            from app.airvault.errores_websearch import mensaje_error_websearch
+            mensaje = mensaje_error_websearch(mensaje)
             self.resumen.setText("Web Search pendiente: " + mensaje)
-            self._anotar("AirVault no permitió verificar la publicación: " + primera_frase(mensaje), ayuda=mensaje)
+            self._anotar("AirVault no permitió verificar la publicación: " + mensaje)
             self._ajustar_confirmacion()
             self._pintar_avance()
             return
@@ -6648,8 +6657,8 @@ class AirVaultWindow(QDialog):
             mensaje += f" Se reintenta en {self._minutos_de_vigilancia()} min."
         self.resumen.setText(mensaje)
         self.estado_label.setText("No se pudo preparar la entrega" if preparacion else "El indexado no pudo continuar")
-        # El detalle completo se puede consultar al pasar por la entrada del registro.
-        self._anotar(f"Se detuvo: {primera_frase(mensaje)}", ayuda=mensaje)
+        self.estado_label.setToolTip("")
+        self._anotar(f"Se detuvo: {mensaje}")
         self._limpiar_progreso()
 
     def _al_cancelar(self) -> None:
