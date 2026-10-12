@@ -10,7 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.airvault import websearch_pagina
+from app.airvault import confirmacion, websearch_pagina
+from app.airvault.confirmacion import plazo_de_batch, verificar_batch
 from app.airvault.errores_websearch import MOTIVOS, ErrorDeWebSearch
 from app.airvault.flujo import NO_ENCONTRADO, estado_local
 from app.airvault.session import ErrorDeConexion, ErrorDeSesion, SesionAirVault
@@ -72,6 +73,87 @@ def test_solo_queda_sin_verificar_el_que_falla_en_todas_las_vueltas(app, tmp_pat
     assert [bool(a.get("por_repetir")) for a in avisos if a["resultados"]] == [True, True, False]
     assert avisos[-1]["errores"] == 1 and not avisos[-1]["ausentes"]
     assert avisos[-1]["revisados"] == 1
+
+
+def test_lo_ya_leido_no_se_vuelve_a_preguntar(tmp_path):
+    t, buscador, _, consultas = caso(tmp_path, 50)
+    leidas: dict = {}
+    assert verificar_batch(buscador, t, consultas=leidas).confirmado
+    assert len(consultas) == len(leidas) == 7
+    assert verificar_batch(buscador, t, consultas=leidas).confirmado
+    assert len(consultas) == 7
+
+
+def test_la_vuelta_que_repite_un_batch_solo_pide_lo_que_faltaba(app, tmp_path):
+    """Llevaba encontradas 22 de 25 y el batch volvia a empezar de cero."""
+    t, buscador, _, _ = caso(tmp_path, 50)
+    original = buscador.sesion.get
+    llamadas = []
+
+    def get(*args):
+        llamadas.append(1)
+        if len(llamadas) == 5:
+            raise TimeoutError("Sin respuesta")
+        return original(*args)
+
+    buscador.sesion.get = get
+    _, avisos = chequear([t], buscador)
+    assert t.manifiesto.websearch_resultado == "encontrado"
+    # Cuatro leidas y una que no contesto; despues, solo las tres que faltaban.
+    assert len(llamadas) == 8
+    assert avisos[-1]["confirmados"] == 1 and avisos[-1]["errores"] == 0
+
+
+def test_el_plazo_de_un_batch_da_tiempo_a_cada_bitacora():
+    """Con diez segundos por bitacora ningun batch terminaba con AirVault cargado."""
+    assert plazo_de_batch(25) == 25 * confirmacion.SEGUNDOS_POR_BITACORA == 1500
+    assert plazo_de_batch(1) == confirmacion.PLAZO_MINIMO_DE_BATCH_S == 120
+
+
+def test_el_hilo_cuenta_el_avance_de_cada_batch_por_separado(app, tmp_path):
+    uno, buscador, _, _ = caso(tmp_path / "a", 50)
+    otro, _, _, _ = caso(tmp_path / "b", 50)
+    worker = TrabajoAirVaultWorker("buscar_websearch", {
+        "buscar_trabajos": [uno, otro], "buscador": buscador, "revisar_todos": True,
+    })
+    avances, pasos = [], []
+    worker.avance_websearch.connect(avances.append)
+    worker.paso.connect(lambda texto, _hechas, _total: pasos.append(texto))
+    worker._buscar_websearch()
+    # Cada lectura corre en su hilo y su avance llega a la ventana por la cola.
+    app.processEvents()
+    for t in (uno, otro):
+        propios = [a for a in avances if a["carpeta"] == str(t.carpeta)]
+        assert [a["hechas"] for a in propios][:7] == [0, 1, 2, 3, 4, 5, 6]
+        assert propios[-1]["hechas"] == 7
+        assert all(a["total"] == 7 and a["nombre"] == "DP | ENTREGA" for a in propios)
+    # El aviso comun ya no salta de un batch a otro.
+    assert pasos == ["Revisando batches en Web Search"]
+
+
+def test_no_se_leen_mas_de_diez_batches_a_la_vez(app, tmp_path, monkeypatch):
+    """Mas pestanas no aceleran el chequeo: solo frenan a cada batch."""
+    import threading
+    import time as reloj
+
+    assert confirmacion.MAX_BATCHES_PARALELOS == 10
+    trabajos = [caso(tmp_path / str(n), 1)[0] for n in range(24)]
+    candado, activos, maximo = threading.Lock(), [0], [0]
+
+    def consultar_numero(numero, _presupuesto):
+        with candado:
+            activos[0] += 1
+            maximo[0] = max(maximo[0], activos[0])
+        reloj.sleep(0.03)
+        with candado:
+            activos[0] -= 1
+        return {"rows": [{"LogNo": numero}]}
+
+    buscador = SimpleNamespace(sesion=SimpleNamespace(), config=trabajos[0].config,
+                              consultar_numero=consultar_numero)
+    _, avisos = chequear(trabajos, buscador)
+    assert avisos[-1]["confirmados"] == 24
+    assert 1 < maximo[0] <= 10
 
 
 def test_una_ausencia_comprobada_no_se_vuelve_a_consultar(app, tmp_path):
@@ -352,6 +434,7 @@ def test_lo_ausente_se_recupera_ya_y_lo_que_no_se_leyo_se_repite(ventana, tmp_pa
     monkeypatch.setattr(ventana, "_encolar", lambda modo, lista, texto: encoladas.append((modo, lista, texto)))
     ventana._buscar_websearch()
     ausente.manifiesto.websearch_resultado = "ausente"
+    ausente.manifiesto.websearch_muestra = list("1234567")
     sin_leer.manifiesto.websearch_resultado = "error"
     sin_leer.manifiesto.websearch_detalle = MOTIVOS["carga"]
     ventana._al_buscar_websearch({"resultados": [(sin_leer, False)], "por_repetir": True,
@@ -366,8 +449,9 @@ def test_lo_ausente_se_recupera_ya_y_lo_que_no_se_leyo_se_repite(ventana, tmp_pa
     assert list(ventana._chequeo_por_repetir.values()) == [sin_leer]
     assert ventana._reintentando_chequeo()
     texto = _bitacora(ventana)
-    assert "Web Search - Batch «DP | ENTREGA»: no se pudo leer; se consulta de nuevo al final" in texto
-    assert "Web Search 1 de 2 - Batch «DP | ENTREGA»: no está publicado; queda pendiente de subir" in texto
+    assert "Batch «DP | ENTREGA»: sin terminar; se retoma al final" in texto
+    assert ("Batch «DP | ENTREGA»: no está publicado, 0 de 7 bitácoras encontradas; "
+            "queda pendiente de subir") in texto
     assert "Web Search: chequeo terminado, 2 de 2 batches revisados" in texto
     assert "0 confirmados, 1 sin publicar y 1 sin verificar" in texto
 
@@ -379,13 +463,138 @@ def test_un_chequeo_limpio_no_deja_nada_esperando(ventana, tmp_path, monkeypatch
     ventana._buscar_websearch()
     for t in ventana._trabajos:
         t.manifiesto.websearch_resultado = "encontrado"
+        t.manifiesto.websearch_muestra = list("1234567")
+        t.manifiesto.websearch_cotejadas = 7
     ventana._al_buscar_websearch({"resultados": [(confirmado, True)], "revisados": 1, "total": 2})
     ventana._al_buscar_websearch({"resultados": [], "terminado": True, "ausentes": [], "errores": 0,
                                   "revisados": 2, "confirmados": 2, "total": 2})
     _terminar(ventana)
     assert not ventana._reintentando_chequeo()
     assert ventana._intentos_de_chequeo == 0
-    assert "Web Search 1 de 2 - Batch «DP | ENTREGA»: confirmado" in _bitacora(ventana)
+    assert "Batch «DP | ENTREGA»: confirmado, 7 de 7 bitácoras encontradas" in _bitacora(ventana)
+
+
+def _lista(ventana, tmp_path):
+    uno, dos = _en_la_ventana(ventana, tmp_path)
+    uno.manifiesto.nombre_batch, dos.manifiesto.nombre_batch = "Entrega -1", "Entrega -2"
+    ventana._buscar_websearch()
+
+    def avance(trabajo, hechas, total=7):
+        ventana._al_avanzar_websearch(dict(carpeta=str(trabajo.carpeta), hechas=hechas, total=total,
+                                           nombre=trabajo.manifiesto.nombre_batch))
+
+    return uno, dos, avance
+
+
+def _lineas(ventana):
+    return [ventana.bitacora.item(i).text() for i in range(ventana.bitacora.count())]
+
+
+def test_cada_batch_tiene_su_linea_y_avanza_en_su_sitio(ventana, tmp_path):
+    """Una sola frase que saltaba entre treinta batches no dejaba seguir ninguno."""
+    uno, dos, avance = _lista(ventana, tmp_path)
+    antes = ventana.bitacora.count()
+    avance(uno, 0)
+    avance(dos, 0)
+    assert ventana.bitacora.count() == antes + 2
+    for hechas in (1, 2, 3):
+        avance(uno, hechas)
+    avance(dos, 5)
+    # Ninguna linea nueva: cada batch mueve la suya.
+    assert ventana.bitacora.count() == antes + 2
+    lineas = _lineas(ventana)
+    assert lineas[-3].endswith("Batch «Entrega -1»: revisando, 3 de 7 bitácoras")
+    assert lineas[-2].endswith("Batch «Entrega -2»: revisando, 5 de 7 bitácoras")
+    # Debajo queda el resumen, que no cambia de batch.
+    assert "0 de 2 batches" in lineas[-1]
+    assert "Entrega" not in lineas[-1]
+    # Lo que se esta leyendo gira, como todo lo que esta en marcha.
+    assert not ventana._filas_websearch[str(uno.carpeta)].icon().isNull()
+
+
+def test_al_terminar_un_batch_su_linea_se_queda_con_el_resultado(ventana, tmp_path):
+    uno, dos, avance = _lista(ventana, tmp_path)
+    avance(uno, 6)
+    avance(dos, 2)
+    cuantas = ventana.bitacora.count()
+    uno.manifiesto.websearch_resultado = "encontrado"
+    uno.manifiesto.websearch_muestra = list("1234567")
+    uno.manifiesto.websearch_cotejadas = 7
+    ventana._al_buscar_websearch({"resultados": [(uno, True)], "revisados": 1, "total": 2})
+    fila = ventana._filas_websearch[str(uno.carpeta)]
+    assert ventana.bitacora.count() == cuantas
+    assert fila.text().endswith("Batch «Entrega -1»: confirmado, 7 de 7 bitácoras encontradas")
+    assert fila.icon().isNull()
+    assert str(uno.carpeta) not in ventana._filas_websearch_activas
+    # El otro sigue leyendose en su linea.
+    assert str(dos.carpeta) in ventana._filas_websearch_activas
+    ventana._pintar_linea_viva()
+    assert "1 de 2 batches" in _lineas(ventana)[-1]
+
+
+def test_el_batch_que_se_queda_corto_dice_cuanto_llevaba_y_se_retoma_en_su_linea(ventana, tmp_path):
+    uno, dos, avance = _lista(ventana, tmp_path)
+    avance(dos, 22, 25)
+    dos.manifiesto.websearch_resultado = "error"
+    dos.manifiesto.websearch_detalle = MOTIVOS["carga"]
+    ventana._al_buscar_websearch({"resultados": [(dos, False)], "por_repetir": True,
+                                  "revisados": 0, "total": 2})
+    fila = ventana._filas_websearch[str(dos.carpeta)]
+    assert fila.text().endswith(
+        "Batch «Entrega -2»: sin terminar, 22 de 25 bitácoras leídas; se retoma al final")
+    assert fila.icon().isNull()
+    cuantas = ventana.bitacora.count()
+    avance(dos, 23, 25)
+    assert ventana.bitacora.count() == cuantas
+    assert fila.text().endswith("Batch «Entrega -2»: revisando, 23 de 25 bitácoras")
+    dos.manifiesto.websearch_detalle = MOTIVOS["carga"]
+    ventana._al_buscar_websearch({"resultados": [(dos, False)], "revisados": 1, "total": 2})
+    assert fila.text().endswith("Batch «Entrega -2»: sin verificar. " + MOTIVOS["carga"])
+
+
+def test_un_batch_publicado_a_medias_no_se_anuncia_como_ausente(ventana, tmp_path):
+    """Con 6 de 7 encontradas hay bitacoras suyas arriba: no es «no esta»."""
+    uno, _, avance = _lista(ventana, tmp_path)
+    avance(uno, 7)
+    uno.manifiesto.websearch_resultado = "ausente"
+    uno.manifiesto.websearch_muestra = list("1234567")
+    uno.manifiesto.websearch_cotejadas = 6
+    ventana._al_buscar_websearch({"resultados": [(uno, False)], "revisados": 1, "total": 2})
+    fila = ventana._filas_websearch[str(uno.carpeta)]
+    assert fila.text().endswith(
+        "Batch «Entrega -1»: incompleto en Web Search, 6 de 7 bitácoras encontradas; "
+        "se revisa entero antes de volver a subir")
+
+
+def test_al_cortarse_el_chequeo_ninguna_linea_se_queda_girando(ventana, tmp_path):
+    uno, dos, avance = _lista(ventana, tmp_path)
+    avance(uno, 3)
+    ventana._cancelar()
+    _terminar(ventana)
+    fila = ventana._filas_websearch[str(uno.carpeta)]
+    assert fila.text().endswith("Batch «Entrega -1»: lectura sin terminar, 3 de 7 bitácoras leídas")
+    assert fila.icon().isNull()
+    assert not ventana._filas_websearch_activas
+
+
+def test_cada_chequeo_empieza_su_lista_y_conserva_la_anterior(ventana, tmp_path):
+    uno, dos, avance = _lista(ventana, tmp_path)
+    avance(uno, 7)
+    uno.manifiesto.websearch_resultado = "encontrado"
+    uno.manifiesto.websearch_muestra = list("1234567")
+    uno.manifiesto.websearch_cotejadas = 7
+    ventana._al_buscar_websearch({"resultados": [(uno, True)], "revisados": 1, "total": 2})
+    ventana._al_buscar_websearch({"resultados": [], "terminado": True, "ausentes": [], "errores": 0,
+                                  "revisados": 2, "confirmados": 2, "total": 2})
+    _terminar(ventana)
+    anterior = ventana._filas_websearch[str(uno.carpeta)]
+    ventana._buscar_websearch()
+    assert ventana._filas_websearch == {}
+    avance(uno, 1)
+    nueva = ventana._filas_websearch[str(uno.carpeta)]
+    assert nueva is not anterior
+    assert anterior.text().endswith("confirmado, 7 de 7 bitácoras encontradas")
+    assert nueva.text().endswith("Batch «Entrega -1»: revisando, 1 de 7 bitácoras")
 
 
 @pytest.mark.parametrize("accion", ["pausar", "cancelar", "cerrar"])

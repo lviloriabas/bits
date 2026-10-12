@@ -23,7 +23,7 @@ class WorkerFalso(QObject):
         for nombre in (
             "paso", "subidas_actualizadas", "entrega_preparada", "preparacion_fallida",
             "batch_encontrado", "batch_indexado",
-            "batch_indexando", "subido", "comprobado", "buscado", "indexado",
+            "batch_indexando", "subido", "comprobado", "buscado", "avance_websearch", "indexado",
             "fallo", "cancelado", "finished",
         ):
             setattr(self, nombre, SimpleNamespace(connect=lambda _callback: None))

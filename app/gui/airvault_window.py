@@ -694,6 +694,10 @@ class TrabajoAirVaultWorker(QThread):
     subido = Signal(object)
     comprobado = Signal(object)
     buscado = Signal(object)
+    # Por donde va la lectura de cada batch en Web Search. Van varios a la
+    # vez, y contarlos todos por el mismo aviso dejaba una sola frase que
+    # saltaba de un batch a otro sin que se pudiera seguir ninguno.
+    avance_websearch = Signal(object)
     indexado = Signal(object)
     fallo = Signal(str)
     cancelado = Signal()
@@ -934,7 +938,7 @@ class TrabajoAirVaultWorker(QThread):
         from datetime import datetime
         from threading import Lock
         from app.airvault import confirmacion
-        from app.airvault.confirmacion import ConfirmacionBatch, MAX_BATCHES_PARALELOS, METODO_MUESTRA, huella_de_numeros, muestra_de_batch, verificar_batch
+        from app.airvault.confirmacion import ConfirmacionBatch, MAX_BATCHES_PARALELOS, METODO_MUESTRA, huella_de_numeros, muestra_de_batch, numeros_de_batch, plazo_de_batch, verificar_batch
         from app.airvault.flujo import Trabajo, websearch_confirmacion_valida
         from app.airvault.manifest import copiar_confirmacion, guardar_confirmacion
         from app.airvault.session import ErrorDeSesion, SesionAirVault
@@ -942,6 +946,15 @@ class TrabajoAirVaultWorker(QThread):
         from app.airvault.websearch import Buscador
 
         automatico = bool(self.estado.get("confirmacion_automatica"))
+        # Batches de los que alguien pidió revisar todas las bitácoras y no
+        # solo la muestra. ``True`` es todos los de este chequeo.
+        enteros = self.estado.get("todas_las_bitacoras") or ()
+
+        def por_buscar(manifiesto, carpeta) -> list:
+            """Lo que se consulta de ese batch: todas sus bitácoras o la muestra."""
+            entero = enteros is True or str(carpeta) in enteros
+            return numeros_de_batch(manifiesto) if entero else muestra_de_batch(manifiesto)
+
         buscador = self.estado.get("buscador")
         if buscador is None:
             sesion = self.estado.get("sesion_base") or self.estado.get("sesion")
@@ -989,6 +1002,9 @@ class TrabajoAirVaultWorker(QThread):
         revisados = confirmados = 0
         ausentes = {}
         errores = 0
+        # Lo que Web Search ya contestó de cada batch. La vuelta que repite
+        # un batch pide solo las bitácoras que le faltaron.
+        leidas: dict = {}
 
         def cerrar(sesion):
             http = getattr(sesion, "http", None)
@@ -1004,7 +1020,9 @@ class TrabajoAirVaultWorker(QThread):
             if self.hay_que_parar():
                 raise SesionCancelada("Se canceló la búsqueda en Web Search")
             copia = Trabajo(trabajo.config, trabajo.carpeta, trabajo.manifiesto.model_copy(deep=True))
+            clave = str(trabajo.carpeta)
             with candado:
+                ya_leidas = leidas.setdefault(clave, {})
                 if acceso is not None:
                     local = acceso.crear_lector()
                 elif callable(getattr(buscador.sesion, "clonar", None)):
@@ -1013,19 +1031,32 @@ class TrabajoAirVaultWorker(QThread):
                     self._lecturas_websearch.append(sesion)
                 else:
                     local = con_sesion(buscador, buscador.sesion)
+
+            def avance(_texto, hechas, total):
+                """Cada batch cuenta lo suyo, con su nombre, y no por el aviso común."""
+                if self.hay_que_parar():
+                    raise TrabajoCancelado()
+                self.avance_websearch.emit(dict(
+                    carpeta=clave, nombre=copia.manifiesto.nombre_batch,
+                    hechas=int(hechas), total=int(total),
+                ))
+
+            entero = enteros is True or clave in enteros
             try:
-                presupuesto = max(60.0, len(muestra_de_batch(copia.manifiesto)) * 10.0)
+                presupuesto = plazo_de_batch(len(por_buscar(copia.manifiesto, clave)))
                 try:
-                    resultado = verificar_batch(local, copia, self._avisar,
-                                                presupuesto_s=presupuesto, cancelado=self.hay_que_parar)
+                    resultado = verificar_batch(local, copia, avance, presupuesto_s=presupuesto,
+                                                cancelado=self.hay_que_parar, consultas=ya_leidas,
+                                                revisar_todas=entero)
                 except ErrorDeSesion:
                     if acceso is None:
                         raise
                     local.cerrar()
                     acceso.renovar(local.generacion)
                     local = acceso.crear_lector()
-                    resultado = verificar_batch(local, copia, self._avisar,
-                                                presupuesto_s=presupuesto, cancelado=self.hay_que_parar)
+                    resultado = verificar_batch(local, copia, avance, presupuesto_s=presupuesto,
+                                                cancelado=self.hay_que_parar, consultas=ya_leidas,
+                                                revisar_todas=entero)
                 return copia, resultado, local
             finally:
                 if acceso is not None:
@@ -1045,7 +1076,7 @@ class TrabajoAirVaultWorker(QThread):
             except Exception as exc:
                 logger.warning("Web Search no consulto el batch {}: {}", trabajo.manifiesto.nombre_batch, exc)
                 copia = Trabajo(trabajo.config, trabajo.carpeta, trabajo.manifiesto.model_copy(deep=True))
-                muestra = tuple(muestra_de_batch(copia.manifiesto))
+                muestra = tuple(por_buscar(copia.manifiesto, trabajo.carpeta))
                 resultado = ConfirmacionBatch(False, 0, len(muestra),
                     mensaje_error_websearch(exc),
                     str(copia.manifiesto.batch_id or ""), muestra)
@@ -1112,6 +1143,7 @@ class TrabajoAirVaultWorker(QThread):
             esperas = tuple(confirmacion.ESPERAS_ENTRE_VUELTAS_S)
             pendientes = list(trabajos)
             for numero, espera in enumerate((*esperas, None)):
+                self._avisar("Revisando batches en Web Search", 0, 0)
                 pendientes = vuelta(
                     pendientes,
                     MAX_BATCHES_PARALELOS if numero == 0
@@ -1184,7 +1216,7 @@ class TrabajoAirVaultWorker(QThread):
     def _revisar_reenvios(self, trabajos, cliente):
         """Solo permite repetir un PDF si ninguna de sus bitacoras esta publicada."""
         from contextlib import ExitStack
-        from app.airvault.confirmacion import huella_de_numeros, verificar_batch
+        from app.airvault.confirmacion import huella_de_numeros, plazo_de_batch, verificar_batch
         from app.airvault.flujo import (Trabajo, autorizar_posible_duplicado,
                                        marcar_posible_duplicado, ya_esta_en_airvault)
         from app.airvault.session import ErrorDeSesion, SesionAirVault
@@ -1220,7 +1252,7 @@ class TrabajoAirVaultWorker(QThread):
                             lector = self.estado.get("buscador")
                         if lector is None:
                             raise ErrorDeSesion("Falta acceso a Web Search para confirmar el reenvío.")
-                    presupuesto = max(60.0, len(trabajo.manifiesto.bitacoras()) * 10.0)
+                    presupuesto = plazo_de_batch(len(trabajo.manifiesto.bitacoras()))
                     try:
                         resultado = verificar_batch(lector, trabajo, self._avisar,
                             presupuesto_s=presupuesto, cancelado=self.hay_que_parar, revisar_todas=True)
@@ -2023,6 +2055,10 @@ class AirVaultWindow(QDialog):
         # Si entre lo que espera turno hay algo que alguien acaba de pedir.
         # Lo que encoló un reloj corre sin ventana de acceso.
         self._websearch_atendido_pendiente = False
+        # Batches de los que alguien pidió revisar todas las bitácoras. Se
+        # recuerdan hasta que esa revisión contesta, para que un nuevo
+        # intento o un turno en espera no vuelvan a la muestra.
+        self._websearch_todas: set[str] = set()
         self._websearch_resubidas: dict = {}
         self._revision_airvault_pendiente = False
         self._chequeo_incompleto = False
@@ -2036,6 +2072,13 @@ class AirVaultWindow(QDialog):
         self._intentos_de_chequeo = 0
         self._cuenta_websearch = (0, 0)
         self._paso_websearch = "Revisando números de bitácora en Web Search"
+        # La lista del chequeo en curso: una línea por batch, que se
+        # actualiza en su sitio mientras se lee y se queda con el resultado.
+        self._filas_websearch: dict[str, QListWidgetItem] = {}
+        self._filas_websearch_activas: set[str] = set()
+        self._avance_websearch: dict[str, tuple[int, int]] = {}
+        self._nombres_websearch: dict[str, str] = {}
+        self._inicio_websearch = time.monotonic()
         self._websearch_inicio: Optional[set[str]] = None
         self._websearch_inicio_por_revisar: set[str] = set()
         self._websearch_proceso_activo = False
@@ -2218,8 +2261,14 @@ class AirVaultWindow(QDialog):
         self.ocultar_indexados_check.setToolTip("Oculta los batches con el indexado terminado y el batch aún abierto.")
         self.ocultar_completados_check = QCheckBox("Ocultar batches completados")
         self.ocultar_completados_check.setToolTip("Oculta los batches completados, también los confirmados en Web Search.")
+        self.ocultar_confirmados_check = QCheckBox("Ocultar batches confirmados")
+        self.ocultar_confirmados_check.setToolTip(
+            "Oculta los batches cuya subida ya se confirmó en Web Search. "
+            "Quedan a la vista los que falta verificar o volver a subir."
+        )
         for clave, control in (("ocultar_indexados", self.ocultar_indexados_check),
-                               ("ocultar_completados", self.ocultar_completados_check)):
+                               ("ocultar_completados", self.ocultar_completados_check),
+                               ("ocultar_confirmados", self.ocultar_confirmados_check)):
             recordar(AIRVAULT, clave, control)
             control.toggled.connect(self._al_filtrar_vista)
             filtros.addWidget(control)
@@ -2625,12 +2674,19 @@ class AirVaultWindow(QDialog):
         self.boton_buscar_websearch.setToolTip(
             "Busca el 5 % de las bitácoras, con un mínimo de 7 si el batch tiene suficientes, "
             "repartidas entre el inicio y el final de cada batch. "
-            "Consulta números de bitácora en Web Search de hasta 32 batches a la vez, incluso durante "
+            "Consulta números de bitácora en Web Search de hasta 10 batches a la vez, incluso durante "
             "la subida o el indexado. Revisa todos, incluidos los completados. "
             "Los que no se pudieron leer se consultan de nuevo. "
             "Al terminar el chequeo se reenvían los no encontrados."
         )
         self.boton_buscar_websearch.triggered.connect(self._buscar_websearch)
+        self.boton_buscar_todas = batch_menu.addAction("Verificar todas las bitácoras en Web Search")
+        self.boton_buscar_todas.setToolTip(
+            "Busca en Web Search todas las bitácoras de cada batch y no solo la muestra. "
+            "Tarda bastante más: es para cuando hace falta la certeza completa. "
+            "Para revisar solo algunos batches, selecciónelos y use esta misma opción con clic derecho."
+        )
+        self.boton_buscar_todas.triggered.connect(self._buscar_todas_en_websearch)
         batch_menu.addSeparator()
         self.boton_previa = batch_menu.addAction("Vista previa…")
         self.boton_previa.setEnabled(False)
@@ -2710,7 +2766,7 @@ class AirVaultWindow(QDialog):
 
     def _controles_filtro_batches(self) -> tuple:
         return (self.solo_ejecucion_check, self.ocultar_indexados_check,
-                self.ocultar_completados_check)
+                self.ocultar_completados_check, self.ocultar_confirmados_check)
 
     def _previstos_de_la_cola(self, previstos=()) -> list:
         from app.airvault.flujo import (AUTOCOMPLETADO, COMPLETADO, PUBLICADO,
@@ -2763,11 +2819,19 @@ class AirVaultWindow(QDialog):
         self._estados.extend(estado_local(t) for t in nuevos)
         self._pintar_lotes()
         self.boton_buscar_websearch.setEnabled(bool(self._trabajos))
+        self.boton_buscar_todas.setEnabled(bool(self._trabajos))
         self._fin_pendiente = self._firma_de_fin() is not None
         self._anunciar_fin()
         self._ajustar_confirmacion()
 
     def _buscar_websearch(self) -> None:
+        self._verificar_en_websearch(todas=False)
+
+    def _buscar_todas_en_websearch(self) -> None:
+        """La revisión completa: todas las bitácoras de cada batch."""
+        self._verificar_en_websearch(todas=True)
+
+    def _verificar_en_websearch(self, todas: bool) -> None:
         trabajos = self._por_confirmar_websearch(incluir_confirmados=True)
         if not trabajos:
             self.resumen.setText("No hay batches pendientes con números de bitácora válidos para consultar en Web Search.")
@@ -2777,24 +2841,37 @@ class AirVaultWindow(QDialog):
         # entra en esta pasada y la cuenta de intentos empieza de cero.
         self._parar_reintento_del_chequeo()
         self._intentos_de_chequeo = 0
+        if todas:
+            self._iniciar_confirmacion(trabajos, automatico=False, todas=True)
+            return
+        # La orden más reciente manda: pedir la muestra deja sin efecto la
+        # revisión completa que hubiera quedado pendiente.
+        self._websearch_todas.clear()
         self._iniciar_confirmacion(trabajos, automatico=False)
 
     def _iniciar_confirmacion(self, trabajos, automatico: bool = False,
-                              desatendido: bool = False) -> None:
+                              desatendido: bool = False, todas: bool = False) -> None:
         """La lectura tiene su hilo y su estado, independientes de subida e indexado.
 
         ``desatendido`` es para lo que arranca un reloj con una orden que
         alguien dio hace rato: sigue siendo su chequeo, pero ya no hay nadie
         delante y no puede abrir la ventana de acceso.
+
+        ``todas`` pide revisar todas las bitácoras de esos batches en lugar
+        de la muestra.
         """
         trabajos = list(trabajos)
         if not trabajos or self._deteniendo or (automatico and (self._pausado or self._cancelacion_solicitada)):
             return
+        if todas:
+            self._websearch_todas.update(str(t.carpeta) for t in trabajos)
         lector = self.lectura_websearch()
         if self._worker_websearch is not None:
             en_curso = {str(t.carpeta) for t in lector.estado["buscar_trabajos"]} if lector else set()
+            # El que ya se está leyendo por muestra también espera turno si
+            # ahora se pide entero: son dos revisiones distintas.
             self._websearch_pendientes.update({str(t.carpeta): t for t in trabajos
-                                              if str(t.carpeta) not in en_curso})
+                                              if todas or str(t.carpeta) not in en_curso})
             self._websearch_manual_pendiente |= not automatico
             self._websearch_atendido_pendiente |= not automatico and not desatendido
             return
@@ -2802,7 +2879,9 @@ class AirVaultWindow(QDialog):
                       cookie=self.cookie_edit.text(), buscar_trabajos=trabajos,
                       revisar_todos=True,
                       confirmacion_automatica=automatico,
-                      sin_ventana=desatendido)
+                      sin_ventana=desatendido,
+                      todas_las_bitacoras=sorted(
+                          self._websearch_todas & {str(t.carpeta) for t in trabajos}))
         sesion = self._estado.get("sesion") or self._estado_websearch.get("sesion")
         if sesion is not None:
             estado["sesion_base"] = sesion
@@ -2816,9 +2895,18 @@ class AirVaultWindow(QDialog):
             self._websearch_revisados[str(trabajo.carpeta)] = self._firma_consulta_websearch(trabajo)
             self._websearch_inicio_por_revisar.discard(str(trabajo.carpeta))
         self._cuenta_websearch = (0, len(trabajos))
+        # Cada chequeo empieza su lista: las líneas del anterior se quedan
+        # arriba como quedaron.
+        self._cerrar_filas_websearch()
+        self._filas_websearch = {}
+        self._avance_websearch = {}
+        self._nombres_websearch = {}
+        self._inicio_websearch = time.monotonic()
+        self._paso_websearch = "Abriendo Web Search"
         worker = TrabajoAirVaultWorker("buscar_websearch", estado, self)
         worker.paso.connect(self._mostrar_paso_websearch)
         worker.buscado.connect(self._al_buscar_websearch)
+        worker.avance_websearch.connect(self._al_avanzar_websearch)
         worker.fallo.connect(self._al_fallar_websearch)
         worker.cancelado.connect(lambda: self._anotar("Búsqueda en Web Search pausada" if self._pausado
                                                      else "Búsqueda en Web Search cancelada")
@@ -2826,9 +2914,12 @@ class AirVaultWindow(QDialog):
         worker.finished.connect(self._al_terminar_websearch)
         self._worker_websearch = worker
         self.boton_cancelar.setEnabled(True)
+        enteros = len(estado["todas_las_bitacoras"])
+        alcance = ("" if not enteros else " con todas sus bitácoras" if enteros == len(trabajos)
+                   else f", {enteros} con todas sus bitácoras")
         self._anotar(
-            "Web Search: se revisa 1 batch" if len(trabajos) == 1
-            else f"Web Search: se revisan {len(trabajos)} batches, varios a la vez"
+            f"Web Search: se revisa 1 batch{alcance}" if len(trabajos) == 1
+            else f"Web Search: se revisan {len(trabajos)} batches{alcance}, varios a la vez"
         )
         worker.start()
         self._actualizar_latido()
@@ -2944,6 +3035,7 @@ class AirVaultWindow(QDialog):
             worker.deleteLater()
         fallido = self._chequeo_fallido
         self._chequeo_fallido = False
+        self._cerrar_filas_websearch()
         self.boton_cancelar.setEnabled(self.hilo() is not None)
         self._actualizar_latido()
         self._publicar_avance()
@@ -3017,25 +3109,106 @@ class AirVaultWindow(QDialog):
             self._ajustar_confirmacion()
             self._anunciar_fin()
 
+    # ── la lista del chequeo ───────────────────────────────────────
+
+    def _fila_websearch(self, carpeta: str, texto: str, activa: bool) -> None:
+        """Pone o actualiza la línea de ese batch en la lista del chequeo.
+
+        Cada batch tiene una sola línea durante todo el chequeo. Mientras se
+        lee lleva el giro de lo que está en marcha y cuenta sus bitácoras;
+        al terminar se queda en el mismo sitio con su resultado. Así se ve
+        de un vistazo cuáles van, cuáles faltan y en qué quedó cada uno, sin
+        tener que cazar una frase que cambia.
+        """
+        fila = self._filas_websearch.get(carpeta)
+        if fila is None:
+            fila = QListWidgetItem()
+            self._filas_websearch[carpeta] = fila
+            # Por encima de la línea viva, igual que el resto de la bitácora.
+            if self._linea_viva is not None:
+                self.bitacora.insertItem(self.bitacora.row(self._linea_viva), fila)
+            else:
+                self.bitacora.addItem(fila)
+            while self.bitacora.count() > LIMITE_BITACORA:
+                self.bitacora.takeItem(0)
+            self.bitacora.scrollToBottom()
+        fila.setText(f"{time.strftime('%H:%M:%S')}  {texto}")
+        if activa:
+            self._filas_websearch_activas.add(carpeta)
+            self._pintar_filas_websearch()
+        else:
+            self._filas_websearch_activas.discard(carpeta)
+            # Sin color propio: lo ya ocurrido se pinta como toda la bitácora.
+            fila.setIcon(QIcon())
+            fila.setData(Qt.ItemDataRole.ForegroundRole, None)
+
+    def _pintar_filas_websearch(self) -> None:
+        """El giro y el color de las líneas que se están leyendo, con el tema de ahora."""
+        if not self._filas_websearch_activas:
+            return
+        color = color_indexando()
+        icono = self._icono_de_latido(color, girando=True)
+        for carpeta in self._filas_websearch_activas:
+            fila = self._filas_websearch.get(carpeta)
+            if fila is not None:
+                fila.setForeground(QColor(color))
+                fila.setIcon(icono)
+
+    def _cerrar_filas_websearch(self) -> None:
+        """Deja quietas las líneas de lo que no llegó a terminar de leerse."""
+        for carpeta in list(self._filas_websearch_activas):
+            fila = self._filas_websearch.get(carpeta)
+            if fila is None:
+                continue
+            nombre = self._nombres_websearch.get(carpeta, "")
+            self._fila_websearch(
+                carpeta, f"Batch «{nombre}»: lectura sin terminar{self._leidas(carpeta)}", False
+            )
+        self._filas_websearch_activas.clear()
+
+    def _leidas(self, carpeta: str) -> str:
+        """«, 19 de 25 bitácoras leídas», o nada si aún no se sabe la cuenta."""
+        hechas, total = self._avance_websearch.get(carpeta, (0, 0))
+        return f", {min(hechas, total)} de {total} bitácoras leídas" if total else ""
+
+    def _al_avanzar_websearch(self, datos: dict) -> None:
+        """Mueve la cuenta de un batch que se está leyendo."""
+        carpeta = str(datos.get("carpeta", ""))
+        if not carpeta or self._worker_websearch is None:
+            return
+        hechas, total = int(datos.get("hechas", 0)), int(datos.get("total", 0))
+        self._avance_websearch[carpeta] = (hechas, total)
+        self._nombres_websearch[carpeta] = str(datos.get("nombre", ""))
+        cuenta = f", {min(hechas, total)} de {total} bitácoras" if total else ""
+        self._fila_websearch(
+            carpeta, f"Batch «{datos.get('nombre', '')}»: revisando{cuenta}", True
+        )
+
     def _anotar_resultado_websearch(self, trabajo, confirmado: bool, datos: dict) -> None:
-        """Deja en la bitácora en qué quedó un batch, con su nombre y su turno."""
+        """Deja en la línea del batch en qué quedó, con sus bitácoras."""
         manifiesto = trabajo.manifiesto
-        detalle = [manifiesto.websearch_detalle] if manifiesto.websearch_detalle else []
+        carpeta = str(trabajo.carpeta)
+        nombre = f"Batch «{manifiesto.nombre_batch}»"
+        muestra = len(manifiesto.websearch_muestra or [])
         if datos.get("por_repetir"):
-            self._anotar(
-                f"Web Search - Batch «{manifiesto.nombre_batch}»: no se pudo "
-                "leer; se consulta de nuevo al final", detalle,
+            self._fila_websearch(
+                carpeta,
+                f"{nombre}: sin terminar{self._leidas(carpeta)}; se retoma al final",
+                False,
             )
             return
-        total = datos.get("total", 0)
-        turno = f"Web Search {datos.get('revisados', 0)} de {total}" if total else "Web Search"
+        encontradas = f"{manifiesto.websearch_cotejadas} de {muestra} bitácoras encontradas"
         if confirmado:
-            quedo = "confirmado"
+            quedo = f"confirmado, {encontradas}"
+        elif manifiesto.websearch_resultado == "ausente" and manifiesto.websearch_cotejadas:
+            # Hay bitácoras suyas publicadas: no se reenvía sin mirarlo
+            # entero, que es lo que hace la recuperación antes de subir.
+            quedo = f"incompleto en Web Search, {encontradas}; se revisa entero antes de volver a subir"
         elif manifiesto.websearch_resultado == "ausente":
-            quedo = "no está publicado; queda pendiente de subir"
+            quedo = f"no está publicado, {encontradas}; queda pendiente de subir"
         else:
-            quedo = "sin verificar"
-        self._anotar(f"{turno} - Batch «{manifiesto.nombre_batch}»: {quedo}", detalle)
+            quedo = "sin verificar. " + (manifiesto.websearch_detalle or "No se pudo leer en Web Search.")
+        self._fila_websearch(carpeta, f"{nombre}: {quedo}", False)
 
     def _al_buscar_websearch(self, datos: dict) -> None:
         from app.airvault.flujo import estado_local
@@ -3054,6 +3227,9 @@ class AirVaultWindow(QDialog):
                 if str(actual.carpeta) == str(trabajo.carpeta):
                     copiar_confirmacion(trabajo.manifiesto, actual.manifiesto)
             self._websearch_revisados[str(trabajo.carpeta)] = self._firma_consulta_websearch(trabajo)
+            if (not datos.get("por_repetir") and self._worker_websearch is not None
+                    and str(trabajo.carpeta) in (self._worker_websearch.estado.get("todas_las_bitacoras") or ())):
+                self._websearch_todas.discard(str(trabajo.carpeta))
             if not auxiliar_terminado:
                 self._anotar_resultado_websearch(trabajo, confirmado, datos)
         confirmados = datos.get("confirmados", sum(confirmado for _, confirmado in resultados))
@@ -3340,6 +3516,10 @@ class AirVaultWindow(QDialog):
         self._accion(
             menu, "Verificar subidas en Web Search", partes,
             lambda: self._iniciar_confirmacion([p.trabajo for p in partes], automatico=False),
+        )
+        self._accion(
+            menu, "Verificar todas las bitácoras en Web Search", partes,
+            lambda: self._iniciar_confirmacion([p.trabajo for p in partes], automatico=False, todas=True),
         )
         self._accion(
             menu, "Indexar ahora", indexables,
@@ -5166,12 +5346,17 @@ class AirVaultWindow(QDialog):
         }
 
     def _partes_en_cola(self) -> list:
-        from app.airvault.flujo import (AUTOCOMPLETADO, COMPLETADO, INDEXADO, PUBLICADO)
+        from app.airvault.flujo import (AUTOCOMPLETADO, COMPLETADO, INDEXADO, PUBLICADO,
+                                        websearch_confirmacion_valida)
         partes = self._partes_del_alcance()
         if self.ocultar_indexados_check.isChecked():
             partes = [p for p in partes if p.estado != INDEXADO]
         if self.ocultar_completados_check.isChecked():
             partes = [p for p in partes if p.estado not in (COMPLETADO, AUTOCOMPLETADO, PUBLICADO)]
+        if self.ocultar_confirmados_check.isChecked():
+            # Por la prueba y no por el estado: un batch marcado como
+            # completado sin estar en Web Search es justo el que hay que ver.
+            partes = [p for p in partes if not websearch_confirmacion_valida(p.trabajo.manifiesto)]
         return partes
 
     def _partes_del_alcance(self) -> list:
@@ -6434,9 +6619,10 @@ class AirVaultWindow(QDialog):
             parando = getattr(worker, "hay_que_parar", lambda: False)()
             esperando = total <= 0 and any(p in self._ultimo_paso.casefold()
                                            for p in ("esperando", "airvault está", "airvault arma", "entrando"))
+            inicio = self._inicio_websearch if lector else self._inicio_paso
             texto = ("Pausando" if parando and self._pausado else "Cancelando" if parando else self._paso_websearch if lector
                      else "Esperando respuesta de AirVault" if esperando
-                     else "BITS trabajando") + f" ({_minutos(time.monotonic() - self._inicio_paso)})"
+                     else "BITS trabajando") + f" ({_minutos(time.monotonic() - inicio)})"
             if total > 0:
                 texto += f" - {min(hechas, total)} de {total}"
                 if lector:
@@ -6459,6 +6645,7 @@ class AirVaultWindow(QDialog):
         linea.setText(f"{texto} - {self._totales_bitacoras()}")
         linea.setForeground(QColor(color))
         linea.setIcon(self._icono_de_latido(color, girando=worker is not None))
+        self._pintar_filas_websearch()
 
     def _icono_de_latido(self, color: str, girando: bool) -> QIcon:
         """Un arco que da una vuelta por segundo, o un círculo quieto.
@@ -7245,6 +7432,7 @@ class AirVaultWindow(QDialog):
         self._proceso_iniciado = False
         self._preparacion_pendiente = False
         self._continuacion_lector = None
+        self._websearch_todas.clear()
         self._detener_cadena()
         self._cola_de_acciones.clear()
         worker = self.hilo()

@@ -410,9 +410,12 @@ def test_confirmar_un_batch_indexado_mantiene_el_progreso_final(app, tmp_path, m
 def test_busca_muchos_batches_simultaneamente_y_no_solo_dos(app, tmp_path):
     import base64
     from threading import Barrier
+    from app.airvault.confirmacion import MAX_BATCHES_PARALELOS
     from tests.test_airvault_confirmacion import caso
-    trabajos = [caso(tmp_path / str(i), 1, conocido=False)[0] for i in range(16)]
-    barrera = Barrier(16)
+    # Todos los que caben en el limite entran juntos: la barrera solo se
+    # abre si las consultas coinciden de verdad.
+    trabajos = [caso(tmp_path / str(i), 1, conocido=False)[0] for i in range(MAX_BATCHES_PARALELOS)]
+    barrera = Barrier(MAX_BATCHES_PARALELOS)
     consultas = []
 
     def get(ruta, parametros):
@@ -426,7 +429,7 @@ def test_busca_muchos_batches_simultaneamente_y_no_solo_dos(app, tmp_path):
                                config=AirVaultConfig(), sesion=SimpleNamespace(get=get))
     worker = TrabajoAirVaultWorker("buscar_websearch", {"buscar_trabajos": trabajos, "buscador": buscador})
     worker._buscar_websearch()
-    assert len(consultas) == 16
+    assert len(consultas) == MAX_BATCHES_PARALELOS
     assert all(t.manifiesto.etapa_hecha("completar") for t in trabajos)
     assert all(t.manifiesto.batch_id is None for t in trabajos)
 

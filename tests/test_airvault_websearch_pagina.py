@@ -138,6 +138,18 @@ def test_si_la_pagina_no_carga_no_lee_resultados_anteriores(lector):
     assert modulo._LEER_MUESTRA not in pagina.expresiones
 
 
+def test_una_sola_bitacora_no_se_lleva_el_plazo_del_batch(lector):
+    """El batch trae minutos de plazo; una pagina colgada no los gasta todos."""
+    lector, pagina = lector
+    lector.consultar_numero("2000001", 1500)
+    assert pagina.esperas[-1][1] == modulo.PRIMERA_CARGA_S
+    pagina.lista = False
+    with pytest.raises(ErrorDeWebSearch, match="no terminó de cargar"):
+        lector.consultar_numero("2000002", 1500)
+    # La pestana que se reabre tiene lo que quede del tope de esa bitacora.
+    assert modulo.PRIMERA_CARGA_S < pagina.esperas[-1][1] <= modulo.ESPERA_POR_BITACORA_S
+
+
 def test_fallo_al_conectar_cierra_solo_la_pestana_propia(monkeypatch, lector):
     lector, _ = lector
 

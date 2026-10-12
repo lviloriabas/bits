@@ -19,6 +19,12 @@ from app.airvault.session import ORIGEN_EDGE, ErrorDeSesion, SesionCancelada, co
 from app.airvault.web_reports import ConsultaCancelada, ErrorDePaginaAirVault, _Pagina, url_busqueda_log
 
 
+# Lo mas que se espera por una sola bitacora, entre la primera carga y la
+# pestana que se reabre. Sin tope propio, una pagina colgada se llevaba el
+# plazo del batch entero y dejaba sin leer a todas las que venian detras.
+ESPERA_POR_BITACORA_S = 90.0
+PRIMERA_CARGA_S = 40.0
+
 _ACCESO_PEDIDO = (
     "location.pathname.toLowerCase().includes('/signin2/') || "
     "location.hostname.toLowerCase() === 'login.microsoftonline.com' || "
@@ -195,7 +201,7 @@ class LectorWebSearch:
         self.pagina = None
 
     def consultar_numero(self, numero, presupuesto_s):
-        limite = time.monotonic() + max(0.0, presupuesto_s)
+        limite = time.monotonic() + max(0.0, min(presupuesto_s, ESPERA_POR_BITACORA_S))
         for intento in range(2):
             if self.acceso.cancelado():
                 raise SesionCancelada("Se canceló la consulta de bitácoras en Web Search")
@@ -203,7 +209,7 @@ class LectorWebSearch:
             if restante <= 0:
                 raise ErrorDeWebSearch("carga")
             try:
-                return self._consultar_numero(numero, min(restante, 30.0) if intento == 0 else restante)
+                return self._consultar_numero(numero, min(restante, PRIMERA_CARGA_S) if intento == 0 else restante)
             except (TimeoutError, ConnectionError, ErrorDePaginaAirVault, ErrorDeWebSearch) as exc:
                 self.cerrar()
                 if isinstance(exc, ErrorDeWebSearch) and exc.motivo in ("permisos", "rechazo"):

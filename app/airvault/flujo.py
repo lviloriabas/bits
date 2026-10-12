@@ -4208,15 +4208,18 @@ def estado_local(trabajo: "Trabajo") -> EstadoParte:
 
 
 def websearch_confirmacion_valida(manifiesto) -> bool:
-    from app.airvault.confirmacion import METODO_MUESTRA, METODOS_MUESTRA, huella_de_batch, huella_de_numeros, muestra_de_batch
+    from app.airvault.confirmacion import METODO_MUESTRA, METODOS_MUESTRA, huella_de_batch, huella_de_numeros, muestra_de_batch, numeros_de_batch
 
     if not getattr(manifiesto, "websearch_confirmado", ""):
         return False
     if manifiesto.websearch_metodo == METODO_MUESTRA:
         muestra = muestra_de_batch(manifiesto)
+        revisadas = list(manifiesto.websearch_muestra)
+        # Quien pidio revisar todas las bitacoras probo lo mismo que la
+        # muestra y mas: tambien cuenta, con todas encontradas.
         return bool(muestra and manifiesto.websearch_huella == huella_de_numeros(manifiesto)
-                    and manifiesto.websearch_muestra == muestra
-                    and manifiesto.websearch_cotejadas == len(muestra))
+                    and revisadas in (muestra, numeros_de_batch(manifiesto))
+                    and manifiesto.websearch_cotejadas == len(revisadas))
     if (getattr(manifiesto, "websearch_huella", "") != huella_de_batch(manifiesto)
             or getattr(manifiesto, "websearch_batch_id", "").casefold()
             != str(manifiesto.batch_id or "").casefold()):

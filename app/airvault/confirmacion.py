@@ -15,7 +15,13 @@ from app.airvault.websearch import PLANTILLAS, _aparece
 
 METODO_MUESTRA = "muestra_por_numero"
 METODOS_MUESTRA = (METODO_MUESTRA, "muestra_distribuida")
-MAX_BATCHES_PARALELOS = 32
+# Cuantos batches se leen a la vez. Todas las pestanas comparten la sesion
+# de AirVault, que atiende sus busquedas de una en una: abrir mas no hace
+# el chequeo mas rapido, solo reparte la misma cola entre mas batches. Con
+# 32 cada bitacora tardaba unos doce segundos y cada batch avanzaba tan
+# despacio que ninguno terminaba dentro de su plazo. Con diez, cada batch
+# recibe su respuesta en pocos segundos y la lista se va cerrando.
+MAX_BATCHES_PARALELOS = 10
 PORCENTAJE_MUESTRA = 5
 MINIMO_MUESTRA = 7
 
@@ -29,6 +35,21 @@ ESPERAS_ENTRE_VUELTAS_S = (20.0, 60.0)
 # En las vueltas extra van pocos a la vez: si la primera pasada fallo con
 # AirVault cargado, repetirla igual de ancha es pedir el mismo fallo.
 BATCHES_PARALELOS_AL_REINTENTAR = 4
+# El plazo de un batch sale de lo que puede tardar cada bitacora de su
+# muestra. Con treinta pestanas consultando a la vez, Web Search contesta
+# cada busqueda en diez o quince segundos, y con diez por bitacora los
+# batches se quedaban sin tiempo a dos o tres numeros del final: llevaban
+# encontradas 22 de 25 y salian como «no termino de cargar». Ningun batch
+# llegaba a contarse y el chequeo se quedaba en cero.
+SEGUNDOS_POR_BITACORA = 60.0
+PLAZO_MINIMO_DE_BATCH_S = 120.0
+
+
+def plazo_de_batch(bitacoras: int) -> float:
+    """Segundos que se le dan a un batch para leer esa cantidad de bitacoras."""
+    return max(PLAZO_MINIMO_DE_BATCH_S, bitacoras * SEGUNDOS_POR_BITACORA)
+
+
 # Esperas antes de volver a pedir el acceso a Web Search cuando AirVault no
 # lo da (su servidor contesta con error, o la sesion no llega a renovarse).
 # Antes un solo tropiezo ahi abortaba el chequeo sin mirar un solo batch.
@@ -72,6 +93,15 @@ def _muestra(manifiesto):
 
 def muestra_de_batch(manifiesto) -> list[str]:
     return _muestra(manifiesto)
+
+
+def numeros_de_batch(manifiesto) -> list[str]:
+    """Todas las bitacoras del batch que se pueden buscar, sin repetir.
+
+    Es lo que consulta la revision completa, la que alguien pide cuando la
+    muestra no le basta.
+    """
+    return _numeros_validos(manifiesto)
 
 
 def _filas(datos):
@@ -152,8 +182,13 @@ class _LecturaAcotada:
 
 
 def verificar_batch(buscador, trabajo, avisar=None, presupuesto_s=60.0, cancelado=lambda: False,
-                    revisar_todas=False) -> ConfirmacionBatch:
-    """Busca solo la muestra y confirma cuando aparece toda en Web Search."""
+                    revisar_todas=False, consultas=None) -> ConfirmacionBatch:
+    """Busca solo la muestra y confirma cuando aparece toda en Web Search.
+
+    ``consultas`` guarda lo leido de cada numero. Quien repite la consulta
+    de un batch pasa el mismo diccionario y solo se piden las bitacoras que
+    faltaban: lo que ya contesto Web Search no se vuelve a preguntar.
+    """
     manifiesto = trabajo.manifiesto
     muestra = _numeros_validos(manifiesto) if revisar_todas else _muestra(manifiesto)
     numeros = tuple(muestra)
@@ -195,7 +230,7 @@ def verificar_batch(buscador, trabajo, avisar=None, presupuesto_s=60.0, cancelad
                                  or not buscador.ruta.lower().startswith("/zfp/")):
         return resultado(False, "Web Search no tiene una consulta válida para verificar esta carga.")
     forma = None if callable(directa) else PLANTILLAS[buscador._plantilla]
-    consultas = {}
+    consultas = {} if consultas is None else consultas
     for revisadas, numero in enumerate(muestra):
         if cancelado():
             raise SesionCancelada("Se canceló la verificación en Web Search")
@@ -230,8 +265,11 @@ def verificar_batch(buscador, trabajo, avisar=None, presupuesto_s=60.0, cancelad
         encontradas += bool(aparece)
     if avisar:
         avisar(f"Revisión de números de bitácora del batch «{manifiesto.nombre_batch}» en Web Search terminada", esperadas, esperadas)
+    de_donde = "del batch" if revisar_todas else "de la muestra"
     if encontradas != esperadas:
-        return resultado(False, f"{encontradas} de {esperadas} números de bitácora de la muestra encontrados en Web Search. Falta confirmar la subida.", True)
+        return resultado(False, f"{encontradas} de {esperadas} números de bitácora {de_donde} encontrados en Web Search. Falta confirmar la subida.", True)
     if avisar:
         avisar(f"Muestra de «{manifiesto.nombre_batch}» encontrada en Web Search", encontradas, esperadas)
+    if revisar_todas:
+        return resultado(True, f"Las {esperadas} bitácoras del batch están en Web Search. Batch marcado como completado.", True)
     return resultado(True, f"Muestra de {esperadas} bitácoras encontrada en Web Search, de {len(manifiesto.bitacoras())} en el batch. Batch marcado como completado.", True)
