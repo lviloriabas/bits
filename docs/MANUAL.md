@@ -124,17 +124,19 @@ Compruebe matrícula, número de bitácora y fecha. El número tiene siete dígi
 
 Las fechas de años anteriores pasan a revisión, salvo durante enero, cuando también se admite el año anterior. Una fecha manuscrita futura necesita corrección; una fecha representada a fin de mes se comprueba por mes. La marca **VOID** confirmada elimina el reclamo de firmas de una página anulada, pero no resuelve datos de identidad o fecha faltantes.
 
-### 6. Depurar
+### 6. Revisar páginas repetidas y en blanco
 
 Depurar retira páginas de los resultados, como duplicados o blancos, después de que usted las revise.
 
-1. Pulse **Más acciones -> Depurar**.
+1. Pulse **Más acciones -> Revisar páginas**. El visor de CSV ofrece el mismo botón.
 2. Elija **Duplicados**, **Páginas en blanco** o ambas opciones.
-3. Seleccione una aparición para ver su miniatura y otra copia al lado. Las páginas en blanco también muestran su imagen. Marque o desmarque cada página con su casilla o con Enter. Las marcas se pueden cambiar; todavía no eliminan nada.
-4. Pulse **Eliminar** para aplicar las marcas elegidas.
+3. Cada grupo muestra **Número de bitácora** y sus siete dígitos. Seleccione una página para comparar sus imágenes; seleccionar una fila no la excluye. Puede acercar, alejar o ajustar cada imagen con los controles de zoom, o usar Ctrl y la rueda del ratón. Si hay más de dos apariciones, use **Comparar con** para elegir otra página del grupo.
+4. Marque o desmarque cada página con su casilla o con Enter. **Se conservará** y **Se excluirá** muestran el resultado de las marcas. Pulse **Excluir N páginas** para aplicarlas. Se actualizan los datos procesados; los archivos originales se conservan.
 5. Exporte de nuevo para que la entrega refleje la depuración.
 
 Se conserva al menos una aparición de cada bitácora repetida y no se permite vaciar toda la ejecución. Depurar es una acción manual y no forma parte del proceso automático.
+
+Para corregir una decisión, vuelva a **Revisar páginas** y pulse **Restaurar última exclusión**. Recupera exactamente los datos anteriores, sin repetir el reconocimiento de texto, incluso después de cerrar y volver a abrir la ejecución. Después exporte para actualizar la entrega. Solo se conserva el respaldo de la última exclusión; si los datos cambiaron después, la restauración se bloquea para conservar esos cambios. Un fallo al guardar repone los datos anteriores y mantiene el respaldo previo.
 
 ### 7. Exportar
 

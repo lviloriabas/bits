@@ -1909,7 +1909,7 @@ class CsvViewerWindow(QMainWindow):
             self.status_label, lambda: f"color: {paleta().TEXT_SECONDARY};"
         )
         status_row.addWidget(self.status_label, 1)
-        self.btn_depurar = QPushButton("Depurar")
+        self.btn_depurar = QPushButton("Revisar páginas")
         self.btn_depurar.setEnabled(False)
         self.btn_depurar.setToolTip(DEPURAR_TOOLTIP)
         self.btn_depurar.clicked.connect(self._depurar_paginas)
@@ -2334,7 +2334,13 @@ class CsvViewerWindow(QMainWindow):
         # Depurar reescribe la misma ejecución que exportar, así que depende de
         # lo mismo: sin el JSON al lado no hay páginas que quitar.
         self.btn_depurar.setToolTip(reason or DEPURAR_TOOLTIP)
-        self.btn_depurar.setEnabled(not reason and libre)
+        from app.reports.exclusiones import motivo_restauracion
+
+        run_dir = run_dir_for_csv(csv_path) if csv_path is not None else None
+        recuperable = run_dir is not None and not motivo_restauracion(run_dir)
+        self.btn_depurar.setEnabled((not reason or recuperable) and libre)
+        if recuperable:
+            self.btn_depurar.setToolTip(DEPURAR_TOOLTIP)
 
     def _important_columns_for_export(self, template) -> list[str]:
         """Columnas del CSV mínimo, independientes del dataset completo."""
@@ -2482,13 +2488,35 @@ class CsvViewerWindow(QMainWindow):
             self._export_note = "hay una escritura en curso; espere a que termine"
             self._refresh_status()
             return
+        from app.reports.exclusiones import motivo_restauracion
+        from types import SimpleNamespace
+
+        csv_actual = self._current_csv_path()
+        carpeta = run_dir_for_csv(csv_actual) if csv_actual is not None else None
+        # Restaurar solo copia el respaldo. No necesita una plantilla ni
+        # que el JSON actual haya terminado de escribirse antes de un cierre.
+        if (carpeta is not None and not motivo_restauracion(carpeta)
+                and (not _companion_payload(csv_actual).get("reportes")
+                     or template_for_csv(csv_actual) is None)):
+            dialog = DepurarPaginasDialog([], self, run_dir=carpeta)
+            dialog.contexto.setText("Los datos actuales no están disponibles para comparar. Puede restaurar la última exclusión.")
+            if dialog.exec() == QDialog.DialogCode.Accepted and dialog.restaurar:
+                self._start_outputs([], SimpleNamespace(run_dir=carpeta),
+                                    note="restaurando la última exclusión…", context="restaurar")
+            return
         corrida = self._corrida_para_eliminar()
         if corrida is None:
             return
         csv_path, run_dir, template, reports = corrida
 
-        dialog = DepurarPaginasDialog(reports, self)
+        dialog = DepurarPaginasDialog(reports, self, run_dir=run_dir)
         if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        if dialog.restaurar:
+            self._start_outputs(
+                reports, SimpleNamespace(run_dir=run_dir),
+                note="restaurando la última exclusión…", context="restaurar",
+            )
             return
         # Se borra lo que quedó marcado página por página, no el criterio
         # entero: el cuadro deja conservar una aparición distinta de la
@@ -2677,7 +2705,12 @@ class CsvViewerWindow(QMainWindow):
         """
         from app.gui.worker import OutputsWorker
 
-        worker = OutputsWorker(reports, options, parent=self)
+        if context in ("eliminar", "restaurar"):
+            from app.gui.exclusion_worker import ExclusionWorker
+
+            worker = ExclusionWorker(reports, options, parent=self, restaurar=context == "restaurar")
+        else:
+            worker = OutputsWorker(reports, options, parent=self)
         self._outputs_worker = worker
         self._outputs_context = context
         worker.succeeded.connect(self._on_outputs_written)
@@ -2686,6 +2719,7 @@ class CsvViewerWindow(QMainWindow):
         worker.finished.connect(self._on_outputs_finished)
         worker.finished.connect(worker.deleteLater)
         self.btn_export.setEnabled(False)
+        self.btn_depurar.setEnabled(False)
         self._export_note = note
         self._refresh_status()
         worker.start()
@@ -2738,9 +2772,11 @@ class CsvViewerWindow(QMainWindow):
         if csv_path is not None and csv_path.is_file():
             self._load_csv(csv_path)
         self._export_note = (
-            "páginas eliminadas de la ejecución; vuelva a exportar para "
-            "rehacer los PDF sin ellas"
+            "páginas excluidas; puede restaurar la última exclusión desde Revisar páginas. "
+            "Exporte para actualizar los PDF"
             if eliminando
+            else "última exclusión restaurada; exporte para actualizar los PDF"
+            if self._outputs_context == "restaurar"
             else f"exportación terminada: {Path(output_dir).name}"
         )
         self._refresh_status()
@@ -2748,13 +2784,14 @@ class CsvViewerWindow(QMainWindow):
     def _on_outputs_failed(self, message: str) -> None:
         eliminando = self._outputs_context == "eliminar"
         logger.error(f"Error generando outputs: {message}")
-        self._export_note = (
-            "error al eliminar las páginas" if eliminando else "error al exportar"
-        )
+        titulo = ("Error al excluir las páginas" if eliminando else
+                  "Error al restaurar la exclusión" if self._outputs_context == "restaurar" else
+                  "Error al exportar")
+        self._export_note = titulo.lower()
         self._refresh_status()
         QMessageBox.critical(
             self,
-            "Error al eliminar las páginas" if eliminando else "Error al exportar",
+            titulo,
             mensaje_error(message, "No se pudieron guardar los cambios. Cierre los archivos y vuelva a intentarlo."),
         )
 
@@ -3118,13 +3155,13 @@ class CsvViewerWindow(QMainWindow):
             else len(self._columns)
         )
         self._summary = (
-            f"{len(self._rows)} fila(s) · {visible} de {len(self._columns)} "
-            "columnas visibles · solo lectura"
+            f"{len(self._rows)} fila(s), {visible} de {len(self._columns)} "
+            "columnas visibles, solo lectura"
         )
         self._refresh_status()
         self._apply_pdf_overlay()
 
     def _refresh_status(self) -> None:
         """Resumen de la tabla, con el estado de la exportación al final."""
-        note = f" · {self._export_note}" if self._export_note else ""
+        note = f" - {self._export_note}" if self._export_note else ""
         self.status_label.setText(f"{self._summary}{note}")

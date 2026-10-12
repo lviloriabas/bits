@@ -637,6 +637,7 @@ class MainWindow(QMainWindow):
         self._preprocess_worker: PreprocessWorker | None = None
         self._outputs_worker: OutputsWorker | None = None
         self._outputs_context: str | None = None
+        self._exclusion_previous_reports = None
         self._corrida_dir: Path | None = None
         self._pending_export = False
         # Los pasos que encadena «Automático». Se leen del JSON portable al
@@ -1760,7 +1761,7 @@ class MainWindow(QMainWindow):
         )
         self.btn_export.triggered.connect(self._exportar)
 
-        self.btn_depurar = actions_menu.addAction("Depurar")
+        self.btn_depurar = actions_menu.addAction("Revisar páginas")
         self.btn_depurar.setEnabled(False)
         self.btn_depurar.setToolTip(DEPURAR_TOOLTIP)
         self.btn_depurar.triggered.connect(self._depurar_paginas)
@@ -1769,7 +1770,7 @@ class MainWindow(QMainWindow):
         self.more_actions_button.setText("Más acciones")
         configure_menu_button(self.more_actions_button, actions_menu)
         self.more_actions_button.setToolTip(
-            "Preprocesar, exportar o depurar."
+            "Preprocesar, exportar o revisar páginas."
         )
 
         # El de siempre, pero sin volver a pulsar nada entre paso y paso.
@@ -4101,16 +4102,26 @@ class MainWindow(QMainWindow):
 
         self._outputs_context = context
         try:
-            options = self._export_options(
-                reuse_dir=context in ("export", "depurar"),
-                skip_pdfs=skip_pdfs,
-            )
+            if context == "restaurar":
+                from types import SimpleNamespace
+
+                options = SimpleNamespace(run_dir=self._corrida_dir)
+            else:
+                options = self._export_options(
+                    reuse_dir=context in ("export", "depurar"),
+                    skip_pdfs=skip_pdfs,
+                )
         except Exception as exc:  # noqa: BLE001 - se muestra en la GUI
             self._on_outputs_failed(str(exc))
             self._on_outputs_thread_finished()
             return
 
-        worker = OutputsWorker(reports, options, parent=self)
+        if context in ("depurar", "restaurar"):
+            from app.gui.exclusion_worker import ExclusionWorker
+
+            worker = ExclusionWorker(reports, options, parent=self, restaurar=context == "restaurar")
+        else:
+            worker = OutputsWorker(reports, options, parent=self)
         self._outputs_worker = worker
         worker.succeeded.connect(self._on_outputs_written)
         worker.failed.connect(self._on_outputs_failed)
@@ -4139,6 +4150,10 @@ class MainWindow(QMainWindow):
 
     def _on_outputs_written(self, output_dir: Path) -> None:
         """Actualiza la interfaz cuando termina una exportación."""
+        if self._outputs_context == "restaurar":
+            self._reports = self._outputs_worker.reports
+            self._refresh_after_depuracion()
+        self._exclusion_previous_reports = None
         self._corrida_dir = Path(output_dir)
         # El indexado trabaja sobre el CSV mínimo de la ejecución recién
         # escrita, que es el que lleva las columnas que van a AirVault.
@@ -4158,10 +4173,12 @@ class MainWindow(QMainWindow):
             logger.info(f"Exportación completada en: {output_dir}")
         elif self._outputs_context == "depurar":
             self.status_label.setText(
-                "Páginas eliminadas de la ejecución. Exporte para rehacer los "
-                "PDF sin ellas."
+                "Páginas excluidas. Puede restaurar la última exclusión desde Revisar páginas. "
+                "Exporte para actualizar los PDF de la entrega."
             )
             logger.info(f"Ejecución depurada en: {output_dir}")
+        elif self._outputs_context == "restaurar":
+            self.status_label.setText("Última exclusión restaurada. Exporte para actualizar los PDF de la entrega.")
         elif self._last_run_cancelled:
             self.status_label.setText(
                 "Procesamiento cancelado: resultados parciales guardados "
@@ -4280,12 +4297,17 @@ class MainWindow(QMainWindow):
     def _on_outputs_failed(self, message: str) -> None:
         """Registra un error de salidas sin interrumpir la interfaz."""
         context = self._outputs_context
+        if self._exclusion_previous_reports is not None:
+            self._reports = self._exclusion_previous_reports
+            self._exclusion_previous_reports = None
+            self._refresh_after_depuracion()
         self._cortar_automatico("falló la generación de salidas")
         logger.error(f"Error generando outputs: {message}")
-        if context in ("export", "depurar"):
+        if context in ("export", "depurar", "restaurar"):
             depurando = context == "depurar"
             titulo = (
-                "Error al eliminar las páginas" if depurando
+                "Error al excluir las páginas" if depurando
+                else "Error al restaurar la exclusión" if context == "restaurar"
                 else "Error al exportar"
             )
             self.status_label.setText(f"{titulo}.")
@@ -4391,13 +4413,20 @@ class MainWindow(QMainWindow):
         if self._outputs_worker is not None and self._outputs_worker.isRunning():
             return
 
-        dialog = DepurarPaginasDialog(self._reports, self)
+        dialog = DepurarPaginasDialog(self._reports, self, run_dir=self._corrida_dir)
         if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        if dialog.restaurar:
+            self._timer.start()
+            self._start_outputs(self._reports, context="restaurar", skip_pdfs=True)
             return
         # Se borra lo que quedó marcado página por página, no el criterio
         # entero: el cuadro deja conservar una aparición distinta de la
         # primera, y esa elección se perdería al recontar por criterio.
-        remaining, quitadas = depurar_claves(self._reports, dialog.claves())
+        previous = self._reports
+        remaining, quitadas = depurar_claves(
+            [r.model_copy(deep=True) for r in previous], dialog.claves()
+        )
         if not quitadas:
             return
         if not remaining:
@@ -4409,6 +4438,7 @@ class MainWindow(QMainWindow):
             )
             return
 
+        self._exclusion_previous_reports = previous
         self._reports = remaining
         # La tabla, el contador de duplicados y el visor cuelgan de la lista
         # de reportes: si no se rehacen aquí, la pantalla seguiría enseñando
@@ -4419,7 +4449,7 @@ class MainWindow(QMainWindow):
             f"{Path(self._corrida_dir).name}"
         )
         self.status_label.setText(
-            f"Eliminando {quitadas} página(s) de la ejecución…"
+            f"Excluyendo {quitadas} página(s) de la entrega…"
         )
         self._timer.start()
         self._start_outputs(remaining, context="depurar", skip_pdfs=True)

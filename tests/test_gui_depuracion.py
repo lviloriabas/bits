@@ -92,7 +92,7 @@ def test_no_se_elimina_sin_marcar_ningun_criterio(app):
     dialog = DepurarPaginasDialog(corrida())
     try:
         assert not dialog.boton_eliminar.isEnabled()
-        assert "Marque al menos un criterio" in dialog.total_label.text()
+        assert "Todas las páginas se conservarán" in dialog.total_label.text()
 
         dialog.check_duplicados.setChecked(True)
 
@@ -146,7 +146,7 @@ def test_el_boton_cancelar_esta_en_español(app):
             QDialogButtonBox.StandardButton.Cancel
         )
         assert cancelar.text() == "Cancelar"
-        assert dialog.boton_eliminar.text() == "Eliminar"
+        assert dialog.boton_eliminar.text() == "Excluir páginas"
     finally:
         dialog.deleteLater()
 
@@ -244,8 +244,10 @@ def test_el_cuadro_lista_las_apariciones_de_cada_bitacora_repetida(app):
         grupo = dialog.arbol_duplicados.topLevelItem(0)
         assert "2147300" in grupo.text(0)
         assert grupo.childCount() == 2
-        assert "primero.pdf, página 1 (primera)" == grupo.child(0).text(0)
-        assert "segundo.pdf, página 7" == grupo.child(1).text(0)
+        assert "Número de bitácora: 2147300" in grupo.text(0)
+        assert "Página 1 (primera aparición), archivo: primero.pdf" in grupo.child(0).text(0)
+        assert "Página 7, archivo: segundo.pdf" in grupo.child(1).text(0)
+        assert "Se conservará" in grupo.child(1).text(0)
     finally:
         dialog.deleteLater()
 
@@ -393,10 +395,12 @@ def test_cada_aparicion_repetida_ensena_lo_que_trae_escrito(app):
         grupo = dialog.arbol_duplicados.topLevelItem(0)
 
         assert grupo.child(0).text(0) == (
-            "primero.pdf, página 1 (primera) - HP-1717CMP, 2026-08-30, CM103"
+            "Página 1 (primera aparición), archivo: primero.pdf\n"
+            "Matrícula: HP-1717CMP, fecha: 2026-08-30, vuelo: CM103\nSe conservará"
         )
         assert grupo.child(1).text(0) == (
-            "segundo.pdf, página 7 - HP-1712CMP, 2026-08-31, CM240"
+            "Página 7, archivo: segundo.pdf\n"
+            "Matrícula: HP-1712CMP, fecha: 2026-08-31, vuelo: CM240\nSe conservará"
         )
     finally:
         dialog.deleteLater()
@@ -408,6 +412,7 @@ def test_una_pagina_sin_nada_legible_conserva_su_nombre(app):
     try:
         grupo = dialog.arbol_duplicados.topLevelItem(0)
 
-        assert grupo.child(1).text(0) == "segundo.pdf, página 7"
+        assert "Página 7, archivo: segundo.pdf" in grupo.child(1).text(0)
+        assert "Matrícula: No disponible" in grupo.child(1).text(0)
     finally:
         dialog.deleteLater()
