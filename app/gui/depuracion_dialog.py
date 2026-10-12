@@ -58,6 +58,8 @@ from app.validation.depuracion import (
     paginas_depurables,
 )
 
+REVISAR_PAGINAS_TEXTO = "Duplicadas y en blanco"
+
 DEPURAR_TOOLTIP = (
     "Compare las páginas repetidas o en blanco, elija cuáles excluir y "
     "restaure la última exclusión si necesita corregirla. Los originales se conservan."

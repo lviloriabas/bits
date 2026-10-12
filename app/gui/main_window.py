@@ -118,7 +118,7 @@ from app.gui.automatizacion import (
     OpcionesAutomatizacion,
 )
 from app.gui.csv_model import STATUS_COLORS as CSV_STATUS_COLORS
-from app.gui.depuracion_dialog import DEPURAR_TOOLTIP, DepurarPaginasDialog
+from app.gui.depuracion_dialog import DEPURAR_TOOLTIP, REVISAR_PAGINAS_TEXTO, DepurarPaginasDialog
 from app.gui.theme import aplicar_tema, gestor_tema
 from app.gui.tokens import (
     CONTROL_HEIGHT,
@@ -1761,7 +1761,7 @@ class MainWindow(QMainWindow):
         )
         self.btn_export.triggered.connect(self._exportar)
 
-        self.btn_depurar = actions_menu.addAction("Revisar páginas")
+        self.btn_depurar = actions_menu.addAction(REVISAR_PAGINAS_TEXTO)
         self.btn_depurar.setEnabled(False)
         self.btn_depurar.setToolTip(DEPURAR_TOOLTIP)
         self.btn_depurar.triggered.connect(self._depurar_paginas)
@@ -1770,7 +1770,7 @@ class MainWindow(QMainWindow):
         self.more_actions_button.setText("Más acciones")
         configure_menu_button(self.more_actions_button, actions_menu)
         self.more_actions_button.setToolTip(
-            "Preprocesar, exportar o revisar páginas."
+            "Preprocesar, exportar o revisar páginas duplicadas y en blanco."
         )
 
         # El de siempre, pero sin volver a pulsar nada entre paso y paso.
@@ -4173,7 +4173,7 @@ class MainWindow(QMainWindow):
             logger.info(f"Exportación completada en: {output_dir}")
         elif self._outputs_context == "depurar":
             self.status_label.setText(
-                "Páginas excluidas. Puede restaurar la última exclusión desde Revisar páginas. "
+                f"Páginas excluidas. Puede restaurar la última exclusión desde {REVISAR_PAGINAS_TEXTO}. "
                 "Exporte para actualizar los PDF de la entrega."
             )
             logger.info(f"Ejecución depurada en: {output_dir}")
@@ -4432,7 +4432,7 @@ class MainWindow(QMainWindow):
         if not remaining:
             QMessageBox.information(
                 self,
-                "Depurar páginas",
+                REVISAR_PAGINAS_TEXTO,
                 "Quedaría una ejecución sin ninguna página. Para deshacerse de "
                 "la ejecución entera, elimine su carpeta desde output/.",
             )

@@ -16,7 +16,7 @@ flowchart TD
         C --> D["4. Procesar<br/>leer y validar"]
         B --> D
         D --> E["5. Revisar resultados"]
-        E --> F["6. Depurar<br/>opcional y manual"]
+        E --> F["6. Duplicadas y en blanco<br/>opcional y manual"]
         E --> G["7. Exportar<br/>PDF, CSV y JSON"]
         F --> G
     end
@@ -128,7 +128,7 @@ Las fechas de años anteriores pasan a revisión, salvo durante enero, cuando ta
 
 Depurar retira páginas de los resultados, como duplicados o blancos, después de que usted las revise.
 
-1. Pulse **Más acciones -> Revisar páginas**. El visor de CSV ofrece el mismo botón.
+1. Pulse **Más acciones -> Duplicadas y en blanco**. El visor de CSV ofrece el mismo botón.
 2. Elija **Duplicados**, **Páginas en blanco** o ambas opciones.
 3. Cada grupo muestra **Número de bitácora** y sus siete dígitos. Seleccione una página para comparar sus imágenes; seleccionar una fila no la excluye. Puede acercar, alejar o ajustar cada imagen con los controles de zoom, o usar Ctrl y la rueda del ratón. Si hay más de dos apariciones, use **Comparar con** para elegir otra página del grupo.
 4. Marque o desmarque cada página con su casilla o con Enter. **Se conservará** y **Se excluirá** muestran el resultado de las marcas. Pulse **Excluir N páginas** para aplicarlas. Se actualizan los datos procesados; los archivos originales se conservan.
@@ -136,7 +136,7 @@ Depurar retira páginas de los resultados, como duplicados o blancos, después d
 
 Se conserva al menos una aparición de cada bitácora repetida y no se permite vaciar toda la ejecución. Depurar es una acción manual y no forma parte del proceso automático.
 
-Para corregir una decisión, vuelva a **Revisar páginas** y pulse **Restaurar última exclusión**. Recupera exactamente los datos anteriores, sin repetir el reconocimiento de texto, incluso después de cerrar y volver a abrir la ejecución. Después exporte para actualizar la entrega. Solo se conserva el respaldo de la última exclusión; si los datos cambiaron después, la restauración se bloquea para conservar esos cambios. Un fallo al guardar repone los datos anteriores y mantiene el respaldo previo.
+Para corregir una decisión, vuelva a **Duplicadas y en blanco** y pulse **Restaurar última exclusión**. Recupera exactamente los datos anteriores, sin repetir el reconocimiento de texto, incluso después de cerrar y volver a abrir la ejecución. Después exporte para actualizar la entrega. Solo se conserva el respaldo de la última exclusión; si los datos cambiaron después, la restauración se bloquea para conservar esos cambios. Un fallo al guardar repone los datos anteriores y mantiene el respaldo previo.
 
 ### 7. Exportar
 
@@ -290,7 +290,7 @@ Abra **Herramientas -> Visor de CSV…** para consultar una ejecución guardada 
 | Acercar, alejar y ajustar                    | Inspeccionar la imagen o verla completa.                                                                                       |
 | **Ubicar PDF…**                              | Localizar los originales si se movieron.                                                                                       |
 | Casillas y **Supr**                          | Marcar páginas y quitarlas de la ejecución tras confirmar. La barra espaciadora alterna las marcas de las filas seleccionadas. |
-| **Depurar**                                  | Revisar y retirar duplicados o blancos.                                                                                        |
+| **Duplicadas y en blanco**                   | Revisar y retirar páginas duplicadas o en blanco.                                                                             |
 | **Salida** y **Exportar**                    | Cambiar la organización y volver a generar la entrega sin OCR.                                                                 |
 
 La tabla permite consultar datos; sus celdas no se editan directamente. Depurar, quitar páginas y exportar requieren los archivos asociados de la ejecución. Después de retirar páginas, vuelva a exportar.

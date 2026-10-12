@@ -82,7 +82,7 @@ from app.gui.csv_search import (
     file_stamp,
     logbook_query,
 )
-from app.gui.depuracion_dialog import DEPURAR_TOOLTIP, DepurarPaginasDialog
+from app.gui.depuracion_dialog import DEPURAR_TOOLTIP, REVISAR_PAGINAS_TEXTO, DepurarPaginasDialog
 from app.gui.export_options import ExportOptionsGroup
 from app.gui.field_selector import ImportantFieldsDialog
 from app.gui.memoria import VISOR, recordar
@@ -1909,7 +1909,7 @@ class CsvViewerWindow(QMainWindow):
             self.status_label, lambda: f"color: {paleta().TEXT_SECONDARY};"
         )
         status_row.addWidget(self.status_label, 1)
-        self.btn_depurar = QPushButton("Revisar páginas")
+        self.btn_depurar = QPushButton(REVISAR_PAGINAS_TEXTO)
         self.btn_depurar.setEnabled(False)
         self.btn_depurar.setToolTip(DEPURAR_TOOLTIP)
         self.btn_depurar.clicked.connect(self._depurar_paginas)
@@ -2533,7 +2533,7 @@ class CsvViewerWindow(QMainWindow):
         if not remaining:
             QMessageBox.information(
                 self,
-                "Depurar páginas",
+                REVISAR_PAGINAS_TEXTO,
                 "Quedaría una ejecución sin ninguna página. Para deshacerse de "
                 "la ejecución entera, elimine su carpeta desde output/.",
             )
@@ -2772,7 +2772,7 @@ class CsvViewerWindow(QMainWindow):
         if csv_path is not None and csv_path.is_file():
             self._load_csv(csv_path)
         self._export_note = (
-            "páginas excluidas; puede restaurar la última exclusión desde Revisar páginas. "
+            f"páginas excluidas; puede restaurar la última exclusión desde {REVISAR_PAGINAS_TEXTO}. "
             "Exporte para actualizar los PDF"
             if eliminando
             else "última exclusión restaurada; exporte para actualizar los PDF"
