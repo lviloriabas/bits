@@ -150,19 +150,80 @@ def test_fallo_al_conectar_cierra_solo_la_pestana_propia(monkeypatch, lector):
     assert lector.acceso.navegador.cerradas == ["propia"]
 
 
+class _EdgeFalso:
+    """Lo justo del protocolo de Edge para ver que cookies se le escriben."""
+
+    def __init__(self, presentes=()):
+        self.presentes = list(presentes)
+        self.pedidos = []
+
+    def __call__(self, *_a, **_k):
+        return self
+
+    def pedir(self, accion, **datos):
+        self.pedidos.append((accion, datos))
+        return {"cookies": self.presentes} if accion == "Storage.getCookies" else {}
+
+    def cerrar(self):
+        return None
+
+    @property
+    def escritas(self):
+        return [c for accion, datos in self.pedidos if accion == "Storage.setCookies"
+                for c in datos["cookies"]]
+
+
+def _acceso_con(monkeypatch, sesion, presentes=()):
+    edge = _EdgeFalso(presentes)
+    monkeypatch.setattr(modulo, "_WebSocket", edge)
+    acceso = modulo.AccesoWebSearch(sesion.config, sesion)
+    acceso.version = {"webSocketDebuggerUrl": "ws://local"}
+    return acceso, edge
+
+
 def test_al_transferir_el_acceso_no_copia_cookies_de_otros_sitios(monkeypatch):
     sesion = SesionAirVault(AirVaultConfig())
     host = urlparse(sesion.config.base_url).hostname
     sesion.http.cookies.set("FedAuth", "prueba", domain=host, path="/")
     sesion.http.cookies.set("ajena", "prueba", domain="otro.test", path="/")
-    pedidos = []
-    monkeypatch.setattr(modulo, "_WebSocket", lambda *_: SimpleNamespace(
-        pedir=lambda accion, **datos: pedidos.append((accion, datos)), cerrar=lambda: None))
-    acceso = modulo.AccesoWebSearch(sesion.config, sesion)
-    acceso.version = {"webSocketDebuggerUrl": "ws://local"}
+    acceso, edge = _acceso_con(monkeypatch, sesion)
     acceso._usar_cookies()
-    assert pedidos[0][0] == "Storage.setCookies"
-    assert [c["name"] for c in pedidos[0][1]["cookies"]] == ["FedAuth"]
+    assert [c["name"] for c in edge.escritas] == ["FedAuth"]
+    # La que se crea es del sitio y segura, no una copia a medias.
+    assert edge.escritas[0]["secure"] and edge.escritas[0]["httpOnly"]
+    sesion.http.close()
+
+
+def test_la_sesion_tomada_de_edge_no_se_le_vuelve_a_escribir_a_edge(monkeypatch):
+    """Era lo que rompia el acceso: copias viejas tapando a las del sitio.
+
+    De la conexion solo se sabe el nombre y el valor de cada cookie.
+    Escritas asi en el navegador quedaban sin dominio ni marca de segura
+    junto a las que puso AirVault; al renovarse estas, viajaban las dos y
+    el servidor pedia acceso sin parar.
+    """
+    sesion = SesionAirVault(AirVaultConfig())
+    sesion.usar_cookies({"Critical": "sesion", "ProdSSO": "sso"}, "navegador")
+    acceso, edge = _acceso_con(monkeypatch, sesion)
+    acceso._usar_cookies()
+    assert edge.pedidos == []
+    sesion.http.close()
+
+
+def test_una_cookie_pegada_va_sobre_la_del_sitio_sin_duplicarla(monkeypatch):
+    sesion = SesionAirVault(AirVaultConfig())
+    sesion.usar_cookie("ProdSSO=pegada; Critical=pegada")
+    del_sitio = {"name": "ProdSSO", "value": "vieja", "domain": ".criticaltech.com",
+                 "path": "/", "secure": True, "httpOnly": True, "session": True}
+    ajena = {"name": "ProdSSO", "value": "otra", "domain": ".otro.test", "path": "/"}
+    acceso, edge = _acceso_con(monkeypatch, sesion, [del_sitio, ajena])
+    acceso._usar_cookies()
+    escritas = {c["name"]: c for c in edge.escritas}
+    assert len(edge.escritas) == 2
+    # Conserva el dominio y las marcas de la que ya estaba.
+    assert escritas["ProdSSO"] == {"name": "ProdSSO", "value": "pegada", "domain": ".criticaltech.com",
+                                   "path": "/", "secure": True, "httpOnly": True}
+    assert escritas["Critical"]["domain"] == urlparse(sesion.config.base_url).hostname
     sesion.http.close()
 
 
@@ -174,7 +235,7 @@ def test_batched_parallel_access_expiry_logs_in_once_and_retries(app, tmp_path, 
     consultas, entradas, cerrados = [], [], []
     barrera = Barrier(2)
     monkeypatch.setattr(modulo, "comprobar_o_renovar", lambda *_a, **_k: entradas.append("comprobar"))
-    monkeypatch.setattr(SesionAirVault, "renovar_en_navegador", lambda *_a: entradas.append("renovar"))
+    monkeypatch.setattr(SesionAirVault, "renovar_sin_ventana", lambda *_a, **_k: entradas.append("renovar"))
     monkeypatch.setattr(modulo.AccesoWebSearch, "_usar_cookies", lambda _: None)
     monkeypatch.setattr(modulo.AccesoWebSearch, "__enter__", lambda acceso: acceso)
     monkeypatch.setattr(modulo.AccesoWebSearch, "__exit__", lambda *_: None)
@@ -228,7 +289,7 @@ def test_resultados_ilegibles_no_se_interpretan_como_busqueda_vacia(lector, fila
 def test_renovacion_actualiza_el_endpoint_del_navegador(monkeypatch):
     sesion = SesionAirVault(AirVaultConfig())
     entradas = []
-    monkeypatch.setattr(sesion, "renovar_en_navegador", lambda *_: entradas.append("entrar"))
+    monkeypatch.setattr(sesion, "renovar_sin_ventana", lambda *_a, **_k: entradas.append("entrar"))
     monkeypatch.setattr(modulo, "comprobar_o_renovar", lambda *_a, **_k: None)
     acceso = modulo.AccesoWebSearch(sesion.config, sesion)
     nueva = {"webSocketDebuggerUrl": "ws://nuevo"}
@@ -244,18 +305,40 @@ def test_renovacion_actualiza_el_endpoint_del_navegador(monkeypatch):
     sesion.http.close()
 
 
-def test_login_fallido_no_abre_una_ventana_por_cada_batch(monkeypatch):
+def test_login_fallido_no_se_repite_por_cada_batch(monkeypatch):
     sesion = SesionAirVault(AirVaultConfig())
     entradas = []
 
-    def fallar(*_):
+    def fallar(*_a, **_k):
         entradas.append("entrar")
         raise ErrorDeSesion("No se pudo entrar")
 
-    monkeypatch.setattr(sesion, "renovar_en_navegador", fallar)
+    monkeypatch.setattr(sesion, "renovar_sin_ventana", fallar)
     acceso = modulo.AccesoWebSearch(sesion.config, sesion)
     for _ in range(3):
         with pytest.raises(ErrorDeSesion, match="No se pudo entrar"):
             acceso.renovar(0)
     assert entradas == ["entrar"]
+    # La vuelta siguiente del chequeo si puede intentarlo otra vez.
+    acceso.reintentar_acceso()
+    with pytest.raises(ErrorDeSesion, match="No se pudo entrar"):
+        acceso.renovar(0)
+    assert entradas == ["entrar", "entrar"]
+    sesion.http.close()
+
+
+def test_renovar_con_pestanas_leyendo_no_pide_ninguna_ventana(monkeypatch):
+    """Edge esta ocupado: cambiarle la visibilidad era justo lo que fallaba."""
+    sesion = SesionAirVault(AirVaultConfig())
+    pedidos = []
+    monkeypatch.setattr(sesion, "renovar_sin_ventana",
+                        lambda _avisar, forzar=True: pedidos.append(("renovar", forzar)))
+    monkeypatch.setattr(sesion, "renovar_en_navegador",
+                        lambda *_a, **_k: pytest.fail("Abriria la ventana de acceso"))
+    monkeypatch.setattr(modulo, "comprobar_o_renovar",
+                        lambda *_a, **k: pedidos.append(("comprobar", k.get("permitir_ventana"))))
+    acceso = modulo.AccesoWebSearch(sesion.config, sesion)
+    acceso.renovar(0)
+    # Primero se deja que el perfil la renueve solo; nunca con ventana.
+    assert pedidos == [("renovar", False), ("comprobar", False)]
     sesion.http.close()

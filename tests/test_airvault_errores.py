@@ -61,6 +61,11 @@ class _Tarro:
     def __init__(self):
         self.vaciado = 0
 
+    def __iter__(self):
+        # Al adoptar una cookie se quitan las del mismo nombre; aqui no
+        # se guarda ninguna.
+        return iter(())
+
     def set(self, *_a, **_k):
         return None
 
@@ -552,7 +557,7 @@ def test_una_sesion_caducada_se_renueva_sin_ventana_y_sigue(monkeypatch):
 
 
 def test_no_se_reentra_una_y_otra_vez_en_la_misma_peticion(monkeypatch):
-    """Se prueba el perfil y una ventana, no Edge en cada intento."""
+    """Se relee el perfil y se entra de nuevo una vez, no en cada intento."""
     from app.airvault import navegador
     from app.airvault.session import ORIGEN_EDGE
 
@@ -570,8 +575,8 @@ def test_no_se_reentra_una_y_otra_vez_en_la_misma_peticion(monkeypatch):
     assert pedidos == [False, True]
 
 
-def test_cuando_ni_renovando_vale_se_vuelve_a_entrar_con_ventana(monkeypatch):
-    """Ultimo recurso: pedir el acceso en la ventana del navegador."""
+def test_cuando_ni_renovando_vale_se_descarta_la_sesion_y_se_entra_de_nuevo(monkeypatch):
+    """Segundo paso: no fiarse de lo que guarda el perfil y entrar otra vez."""
     from app.airvault import navegador
     from app.airvault.session import ORIGEN_EDGE, comprobar_o_renovar
 
@@ -589,8 +594,8 @@ def test_cuando_ni_renovando_vale_se_vuelve_a_entrar_con_ventana(monkeypatch):
 
     monkeypatch.setattr(navegador, "obtener_cookies", entrar)
     assert comprobar_o_renovar(s) == 3
-    # Primero en silencio; como el servidor siguio diciendo que no, con
-    # ventana y sin mirar lo que guarda el perfil.
+    # Primero releyendo el perfil; como el servidor siguio diciendo que no,
+    # sin mirar lo que guarda.
     assert pedidos == [False, True]
     # Y la vieja sale del tarro: requests mandaria las dos y AirVault se
     # quedaria con la que acaba de rechazar.
@@ -598,7 +603,7 @@ def test_cuando_ni_renovando_vale_se_vuelve_a_entrar_con_ventana(monkeypatch):
 
 
 def test_reentrar_repite_la_peticion_y_continua_el_trabajo(monkeypatch):
-    """La ventana de acceso no deja el paso actual detenido.
+    """Volver a entrar no deja el paso actual detenido.
 
     La renovacion de sesion no es un reintento de red. Incluso si la
     configuracion permite una sola peticion, al terminar de entrar en Edge
@@ -705,3 +710,190 @@ def test_la_sesion_caducada_del_navegador_no_manda_a_copiar_cookies(monkeypatch)
     motivo = str(fallo.value)
     assert "perfil de Edge" in motivo
     assert "F12" not in motivo
+
+
+# ── el acceso se renueva solo y con Edge en segundo plano ──────────
+
+def test_renovar_a_mitad_del_trabajo_no_pide_ventana(monkeypatch):
+    """Edge esta ocupado con el trabajo y no hay nadie delante.
+
+    Antes el segundo intento abria la ventana de acceso, que con pestanas
+    leyendo ni siquiera podia abrirse: el trabajo moria con «Edge tiene un
+    trabajo activo; no se puede reiniciar para cambiar la visibilidad».
+    """
+    from app.airvault import navegador
+    from app.airvault.session import ORIGEN_EDGE
+
+    s = sesion([
+        RespuestaFalsa(status_code=401),
+        RespuestaFalsa(status_code=401),
+        RespuestaFalsa(json_data={"records": 8}),
+    ])
+    s._origen = ORIGEN_EDGE
+    pedidos: list = []
+
+    def entrar(*_a, forzar_login=False, permitir_ventana=True, **_k):
+        pedidos.append((forzar_login, permitir_ventana))
+        return {"FedAuth": "nueva"}
+
+    monkeypatch.setattr(navegador, "obtener_cookies", entrar)
+    assert s.get("/index/Batch/GetBatches") == {"records": 8}
+    # Primero se relee el perfil; despues se entra de nuevo. Nunca a la vista.
+    assert pedidos == [(False, False), (True, False)]
+
+
+def test_si_no_se_puede_entrar_sin_ventana_sale_el_motivo_de_la_sesion(monkeypatch):
+    """La peticion no revienta con un error del navegador: se reintenta luego."""
+    from app.airvault import navegador
+    from app.airvault.session import ORIGEN_EDGE
+
+    def sin_persona(*_a, **_k):
+        raise navegador.ErrorDeNavegador(
+            "AirVault volvio a pedir acceso y Edge no pudo renovarlo en "
+            "segundo plano"
+        )
+
+    monkeypatch.setattr(navegador, "obtener_cookies", sin_persona)
+    s = sesion([RespuestaFalsa(status_code=401)])
+    s._origen = ORIGEN_EDGE
+    with pytest.raises(ErrorDeSesion, match="perfil de Edge"):
+        s.get("/x")
+    # Lo que no se pudo renovar no se tira: la sesion conserva lo que tenia.
+    assert s.http.cookies.vaciado == 0
+    with pytest.raises(ErrorDeSesion, match="segundo plano"):
+        s.renovar_sin_ventana()
+
+
+def test_un_error_de_airvault_al_comprobar_hace_entrar_de_nuevo(monkeypatch):
+    """AirVault contesta 500 a una sesion que dio por terminada.
+
+    No devuelve la pagina de acceso, asi que parecia un servidor caido: el
+    chequeo de Web Search se quedaba diciendo «AirVault no responde» hasta
+    que la cookie caducaba del todo, minutos despues.
+    """
+    from app.airvault import navegador
+    from app.airvault.session import ORIGEN_EDGE, comprobar_o_renovar
+
+    s = sesion([RespuestaFalsa(status_code=500, text="error")] * 3
+               + [RespuestaFalsa(json_data={"records": 3})])
+    s._origen = ORIGEN_EDGE
+    pedidos: list = []
+
+    def entrar(*_a, forzar_login=False, permitir_ventana=True, **_k):
+        pedidos.append((forzar_login, permitir_ventana))
+        return {"FedAuth": "nueva"}
+
+    monkeypatch.setattr(navegador, "obtener_cookies", entrar)
+    assert comprobar_o_renovar(s) == 3
+    # Se descarta la sesion guardada y se entra otra vez, sin ventana.
+    assert pedidos == [(True, False)]
+    assert s.http.cookies.vaciado == 1
+
+
+def test_si_ni_entrando_de_nuevo_contesta_se_dice_que_airvault_no_responde(monkeypatch):
+    """Con el servidor caido de verdad sale el motivo de siempre."""
+    from app.airvault import navegador
+    from app.airvault.session import ORIGEN_EDGE, comprobar_o_renovar
+
+    def sin_respuesta(*_a, **_k):
+        raise navegador.ServidorSinRespuesta("AirVault no respondio")
+
+    monkeypatch.setattr(navegador, "obtener_cookies", sin_respuesta)
+    s = sesion([RespuestaFalsa(status_code=500, text="error")] * 3)
+    s._origen = ORIGEN_EDGE
+    with pytest.raises(ErrorDeConexion, match="No se pudo completar /index/Batch/GetBatches"):
+        comprobar_o_renovar(s)
+    assert len(s.http.pedidas) == 3
+
+
+def test_una_cookie_pegada_no_se_renueva_por_un_error_del_servidor(monkeypatch):
+    """No hay perfil del que volver a tomarla."""
+    from app.airvault import navegador
+    from app.airvault.session import comprobar_o_renovar
+
+    monkeypatch.setattr(navegador, "obtener_cookies",
+                        lambda *_a, **_k: pytest.fail("No hay navegador que abrir"))
+    s = sesion([RespuestaFalsa(status_code=500, text="error")] * 3)
+    with pytest.raises(ErrorDeConexion):
+        comprobar_o_renovar(s)
+
+
+def test_comprobar_sin_permiso_de_ventana_renueva_en_segundo_plano(monkeypatch):
+    from app.airvault import navegador
+    from app.airvault.session import ORIGEN_EDGE, comprobar_o_renovar
+
+    s = sesion([RespuestaFalsa(status_code=401),
+                RespuestaFalsa(json_data={"records": 2})])
+    s._origen = ORIGEN_EDGE
+    # Un carril de lectura: no renueva dentro de la peticion.
+    s._renovable = False
+    pedidos: list = []
+
+    def entrar(*_a, forzar_login=False, permitir_ventana=True, **_k):
+        pedidos.append((forzar_login, permitir_ventana))
+        return {"FedAuth": "nueva"}
+
+    monkeypatch.setattr(navegador, "obtener_cookies", entrar)
+    avisos: list = []
+    assert comprobar_o_renovar(s, avisos.append, permitir_ventana=False) == 2
+    assert pedidos == [(True, False)]
+    # Nadie tiene que entrar a mano, asi que tampoco se le pide.
+    assert avisos == []
+    # El aviso queda para las renovaciones del trabajo que sigue.
+    assert s._avisar_sesion == avisos.append
+
+
+class _Sonda:
+    """La conexion aparte con la que se prueban las cookies del perfil."""
+
+    def __init__(self, respuesta):
+        self._respuesta = respuesta
+        self.headers: dict = {}
+        self.cookies = _Tarro()
+
+    def get(self, *_a, **_k):
+        if isinstance(self._respuesta, Exception):
+            raise self._respuesta
+        return self._respuesta
+
+    def close(self):
+        return None
+
+
+@pytest.mark.parametrize("respuesta,estado", [
+    (RespuestaFalsa(json_data={"records": 1}), "sirven"),
+    (RespuestaFalsa(status_code=401), "caducadas"),
+    (RespuestaFalsa(status_code=440), "caducadas"),
+    (RespuestaFalsa(status_code=403), "caducadas"),
+    (RespuestaFalsa(status_code=500, text="Server Error"), "sin_respuesta"),
+    (RespuestaFalsa(status_code=503), "sin_respuesta"),
+    (requests.ConnectionError("sin red"), "sin_respuesta"),
+])
+def test_un_error_del_servidor_no_es_una_sesion_caducada(monkeypatch, respuesta, estado):
+    """Tomar un 500 por «no valen» abria la ventana de acceso para nada."""
+    from app.airvault import navegador
+    from app.airvault import session as modulo
+
+    monkeypatch.setattr(modulo.requests, "Session", lambda: _Sonda(respuesta))
+    s = sesion([])
+    cookies = {"Critical": "x"}
+    assert s._probar_cookies(cookies) == estado
+    assert s.sirven_cookies(cookies) is (estado == "sirven")
+    if estado == "sin_respuesta":
+        with pytest.raises(navegador.SondaIndeterminada):
+            s._confirmar_cookies(cookies)
+    else:
+        assert s._confirmar_cookies(cookies) is (estado == "sirven")
+
+
+def test_la_cookie_adoptada_reemplaza_a_la_que_el_servidor_puso_con_su_dominio():
+    """Las dos viajaban juntas y AirVault se quedaba con la vieja."""
+    s = SesionAirVault(AirVaultConfig())
+    s.http.cookies.set("ProdSSO", "vieja", domain=".criticaltech.com", path="/")
+    s.http.cookies.set("ProdSSO", "de-otro-sitio", domain=".otro.test", path="/")
+    s.usar_cookies({"ProdSSO": "nueva", "Critical": "x"}, "navegador")
+    del_sitio = sorted((c.name, c.value) for c in s.http.cookies
+                       if "criticaltech" in c.domain)
+    assert del_sitio == [("Critical", "x"), ("ProdSSO", "nueva")]
+    assert [c.value for c in s.http.cookies if c.domain == ".otro.test"] == ["de-otro-sitio"]
+    s.http.close()

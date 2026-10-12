@@ -46,6 +46,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 from loguru import logger
 
@@ -189,6 +190,39 @@ def cerrar_navegadores_al_salir() -> None:
 
 class ErrorDeNavegador(RuntimeError):
     """No se pudo obtener la sesion a traves del navegador."""
+
+
+class EdgeOcupado(ErrorDeNavegador):
+    """El Edge del perfil trabaja sin ventana y no se le puede interrumpir.
+
+    Mostrar una ventana obliga a reiniciarlo, y eso cortaria las pestanas
+    con las que otro trabajo esta leyendo o escribiendo.
+    """
+
+
+class ServidorSinRespuesta(ErrorDeNavegador):
+    """El navegador entro, pero AirVault fallo al probar la sesion.
+
+    No es lo mismo que no tener sesion: abrir la ventana de acceso no
+    arregla un servidor que contesta con error, y la persona se quedaria
+    cinco minutos delante de un AirVault ya abierto sin que nada avanzara.
+    """
+
+
+class SondaIndeterminada(RuntimeError):
+    """Quien prueba las cookies no pudo saber si sirven o no.
+
+    La levanta ``confirmar`` cuando el servidor contesta con un error suyo
+    (un 500) o ni contesta. Que no se pueda saber no es que hayan caducado.
+    """
+
+
+# Las renovaciones del acceso van de una en una. Dos hilos (la subida y la
+# lectura de Web Search) descubren la caducidad casi a la vez, y cada uno
+# mandaba al navegador a la pagina de entrada por su cuenta: el segundo se
+# encontraba el acceso a medio rehacer del primero. Con turno, el segundo
+# entra cuando el primero ya dejo la sesion lista y la toma en un segundo.
+_TURNO_DE_ACCESO = threading.Lock()
 
 
 # ── protocolo de depuracion ────────────────────────────────────────
@@ -608,7 +642,7 @@ class SesionDeNavegador:
             return None
         if self.visible == _sin_ventana(version):
             if _hay_trabajo(version):
-                raise ErrorDeNavegador(
+                raise EdgeOcupado(
                     "Edge tiene un trabajo activo; no se puede reiniciar "
                     "para cambiar la visibilidad."
                 )
@@ -840,6 +874,54 @@ class SesionDeNavegador:
                 self._pestanas.clear()
                 self._pestana_entrada = ""
         return version
+
+    def visitar(self, url: str, version: Optional[dict] = None) -> bool:
+        """Manda otra vez al navegador a la pagina de entrada.
+
+        La pagina anterior de esta sesion se cierra al abrir la nueva, asi
+        que volver a entrar no va dejando pestanas detras.
+        """
+        return self._abrir_pagina(version or self._version or {}, url)
+
+    def borrar_cookies(self, version: dict, cookies) -> int:
+        """Quita del navegador exactamente esas cookies; dice cuantas.
+
+        Cada una se caduca con su mismo nombre, dominio y ruta, que es lo
+        que la identifica: asi se va la copia que sobra y se queda la que
+        lleva el mismo nombre en otro dominio. Comprobado contra Edge: una
+        cookie que llega ya caducada borra a su equivalente y no se guarda.
+
+        Va una por peticion. El navegador rechaza la tanda entera si una
+        sola no le gusta, y aqui importa que se vayan las demas.
+        """
+        quitadas = 0
+        ws = _WebSocket(version["webSocketDebuggerUrl"])
+        try:
+            for cookie in cookies:
+                caducada = {
+                    "name": str(cookie.get("name", "")),
+                    "value": "",
+                    "domain": str(cookie.get("domain", "")),
+                    "path": str(cookie.get("path") or "/"),
+                    "secure": bool(cookie.get("secure")),
+                    "httpOnly": bool(cookie.get("httpOnly")),
+                    "expires": 1,
+                }
+                if not caducada["name"] or not caducada["domain"]:
+                    continue
+                if cookie.get("partitionKey"):
+                    caducada["partitionKey"] = cookie["partitionKey"]
+                try:
+                    ws.pedir("Storage.setCookies", cookies=[caducada])
+                    quitadas += 1
+                except (ErrorDeNavegador, OSError, ValueError) as exc:
+                    logger.debug(
+                        "No se pudo quitar la cookie {} de {}: {}",
+                        caducada["name"], caducada["domain"], exc,
+                    )
+        finally:
+            ws.cerrar()
+        return quitadas
 
     def _abrir_pagina(self, version: dict, url: str,
                       timeout: float = 5.0, insistir: bool = False) -> bool:
@@ -1178,15 +1260,76 @@ class SesionDeNavegador:
         self.cerrar()
 
 
+def _viaja_a(dominio: str, host: str) -> bool:
+    """Si el navegador mandaria al sitio de AirVault una cookie de ahi."""
+    propio = str(dominio or "").lower().lstrip(".")
+    objetivo = str(host or "").lower().lstrip(".")
+    return bool(propio) and (
+        propio == objetivo or objetivo.endswith("." + propio)
+    )
+
+
+def cookies_del_sitio(por_dominio: Dict[str, List[dict]], host: str
+                      ) -> List[dict]:
+    """Las cookies de AirVault tal como las tiene el navegador, enteras.
+
+    Cada una sale con su dominio escrito, que es junto al nombre y la ruta
+    lo que hace falta para borrarla sin tocar a las demas.
+    """
+    return [
+        {**cookie, "domain": cookie.get("domain") or dominio}
+        for dominio, lista in por_dominio.items()
+        if _viaja_a(dominio, host)
+        for cookie in lista
+    ]
+
+
+def cookies_intrusas(por_dominio: Dict[str, List[dict]], base_url: str
+                     ) -> List[dict]:
+    """Copias de las cookies de AirVault que no puso AirVault.
+
+    El sitio solo se visita por ``https`` y marca las suyas como seguras.
+    Una cookie suya sin esa marca y anotada como venida de ``http`` no pudo
+    ponerla el servidor: la escribio el propio programa, que durante un
+    tiempo paso la sesion de la conexion al navegador con solo el nombre y
+    el valor. Chromium guarda esa copia aparte de la del sitio (otro
+    dominio, misma ruta) y manda las dos.
+
+    Mientras valen lo mismo no pasa nada. En cuanto AirVault renueva la
+    suya, la copia queda vieja, viaja junto a la nueva y el servidor se
+    queda con la que no vale: pide acceso sin parar o contesta con su
+    pagina de error, y ni volver a entrar lo arregla, porque el servidor no
+    puede borrar una cookie de un dominio que el no puso. Solo sale si se
+    quita aqui.
+    """
+    if urlsplit(str(base_url or "")).scheme.lower() != "https":
+        return []
+    return [
+        cookie
+        for cookie in cookies_del_sitio(por_dominio, galletas.dominio(base_url))
+        if not cookie.get("secure")
+        and str(cookie.get("sourceScheme", "")) == "NonSecure"
+    ]
+
+
 def _del_dominio(por_dominio: Dict[str, List[dict]], host: str
                  ) -> Dict[str, str]:
-    """Cookies que viajan a ``host``, en el formato del resto del modulo."""
-    mapa = {
-        dominio: {str(c.get("name")): str(c.get("value", ""))
-                  for c in lista}
-        for dominio, lista in por_dominio.items()
-    }
-    return galletas.del_dominio(mapa, host)
+    """Cookies que viajan a ``host``, en el formato del resto del modulo.
+
+    Si un nombre viene dos veces, gana la que el sitio marco como segura:
+    es la suya. La otra es una copia que no deberia estar, y tomarla dejaba
+    la conexion probando una sesion vieja con la buena al lado.
+    """
+    elegidas: Dict[str, str] = {}
+    seguras: set[str] = set()
+    for cookie in cookies_del_sitio(por_dominio, host):
+        nombre = str(cookie.get("name"))
+        if nombre in seguras and not cookie.get("secure"):
+            continue
+        elegidas[nombre] = str(cookie.get("value", ""))
+        if cookie.get("secure"):
+            seguras.add(nombre)
+    return elegidas
 
 
 def cookies_de(version: dict) -> Dict[str, List[dict]]:
@@ -1220,23 +1363,60 @@ def obtener_cookies(
     forzar_login: bool = False,
     confirmar: Optional[Callable[[Dict[str, str]], bool]] = None,
     espera_perfil_s: float = 25.0,
+    permitir_ventana: bool = True,
+    espera_reingreso_s: Optional[float] = None,
 ) -> Dict[str, str]:
     """Devuelve las cookies de AirVault, abriendo el navegador si hace falta.
 
-    Primero lo intenta **sin ventana**: si el perfil conserva la sesion de la
-    vez anterior, nadie tiene que hacer nada. Solo cuando no hay sesion se
-    abre una ventana para que la persona entre; en cuanto AirVault suelta sus
-    cookies, la ventana se cierra sola.
+    Todo lo que se puede se hace **sin ventana**, en tres pasos:
 
-    Con ``forzar_login`` se salta el intento sin ventana. Lo usa quien ya
-    probo las cookies del perfil contra el servidor y se encontro con que
-    ya no valen: en ese caso volver a leerlas devolveria las mismas.
+    1. Se quitan las copias de las cookies de AirVault que no puso el sitio
+       (ver :func:`cookies_intrusas`), que es lo que impedia renovar.
+    2. Se espera a que el perfil rehaga el acceso federado solo. Es el caso
+       normal: la sesion dura unos minutos y el navegador la renueva sin
+       que nadie teclee nada.
+    3. Si ni asi sirve, se borran las cookies de AirVault (solo las suyas,
+       no las de Microsoft) y se entra de nuevo. Es lo que saca al perfil de
+       una sesion vieja que el servidor ya no acepta ni deja reemplazar.
+
+    Solo cuando la pagina de Microsoft esta esperando a una persona se abre
+    una ventana para que entre; en cuanto AirVault suelta sus cookies, la
+    ventana se cierra sola. Con ``permitir_ventana=False`` ni eso: quien
+    renueva a mitad de un trabajo, con Edge ocupado y sin nadie delante, se
+    queda con el motivo y lo reintenta despues.
+
+    Con ``forzar_login`` se salta el paso 2. Lo usa quien ya probo las
+    cookies del perfil contra el servidor y se encontro con que ya no
+    valen: en ese caso volver a leerlas devolveria las mismas.
+
+    Si el servidor falla al probar la sesion (un 500, la red) no se abre
+    ninguna ventana: se levanta :class:`ServidorSinRespuesta`.
     """
     perfil = Path(perfil or PERFIL_POR_DEFECTO)
     host = galletas.dominio(base_url)
     # Se entra por el enlace federado, no por la raiz: es el que dispara la
     # redireccion a Microsoft y, con ella, la cookie que autentica.
     entrada = url_sso or base_url
+    if espera_reingreso_s is None:
+        # Un acceso completo tarda mas que releer una sesion viva.
+        espera_reingreso_s = 2 * espera_perfil_s
+    # Lo ultimo que dijo la prueba: que no valen, o que no se pudo saber.
+    sin_respuesta = False
+    del_sitio: List[dict] = []
+    limpiado = False
+
+    def decir(texto: str) -> None:
+        """El aviso es cortesia: que falle no puede tumbar el acceso.
+
+        La sesion se comparte entre trabajos, y el aviso que guarda puede
+        ser el de uno que ya termino.
+        """
+        if avisar is None:
+            return
+        try:
+            avisar(texto)
+        except Exception as exc:  # noqa: BLE001 - la cancelacion no entra aqui
+            logger.debug("No se pudo avisar del acceso: {}", exc)
 
     def sirven(cookies: Dict[str, str]) -> bool:
         """Si estas cookies dan una sesion con la que se pueda trabajar.
@@ -1246,54 +1426,154 @@ def obtener_cookies(
         mucho despues de que hayan caducado, y darlas por buenas dejaba el
         trabajo muriendo en la primera peticion.
         """
-        return bool(cookies) and galletas.sostienen_sesion(cookies) and (
-            confirmar is None or confirmar(cookies)
-        )
+        nonlocal sin_respuesta
+        sin_respuesta = False
+        if not cookies or not galletas.sostienen_sesion(cookies):
+            return False
+        if confirmar is None:
+            return True
+        try:
+            return bool(confirmar(cookies))
+        except SondaIndeterminada as exc:
+            sin_respuesta = True
+            logger.debug("No se pudo probar la sesion del perfil: {}", exc)
+            return False
 
-    if not forzar_login:
+    def leer(navegador, version) -> Dict[str, str]:
+        """Las cookies de AirVault, sin las copias que no puso el sitio."""
+        nonlocal del_sitio, limpiado
+        crudas = navegador.cookies(version)
+        # Una sola limpieza por acceso: si alguna no se deja quitar, volver
+        # a visitar la entrada en cada lectura no dejaria terminar de entrar.
+        intrusas = [] if limpiado else cookies_intrusas(crudas, base_url)
+        if intrusas:
+            limpiado = True
+            logger.warning(
+                "El perfil {} tenia {} copia(s) de cookies de AirVault que no "
+                "puso el sitio ({}); se quitan porque tapan a las buenas",
+                perfil, len(intrusas),
+                ", ".join(sorted({str(c.get("name")) for c in intrusas})),
+            )
+            navegador.borrar_cookies(version, intrusas)
+            # El acceso que estaba en marcha ya viajo con ellas.
+            navegador.visitar(entrada, version)
+            crudas = navegador.cookies(version)
+        del_sitio = cookies_del_sitio(crudas, host)
+        return _del_dominio(crudas, host)
+
+    def esperar(navegador, version, segundos: float, pausa: float
+                ) -> Tuple[Dict[str, str], bool]:
+        """Lee hasta que la sesion sirva o se acabe el plazo."""
+        limite = reloj() + segundos
+        while True:
+            cookies = leer(navegador, version)
+            if sirven(cookies):
+                return cookies, True
+            if reloj() >= limite:
+                return cookies, False
+            dormir(pausa)
+
+    while not _TURNO_DE_ACCESO.acquire(timeout=0.25):
+        # Otro hilo esta renovando. ``dormir`` es por donde se cancela.
+        dormir(0.25)
+    try:
         encontradas: Dict[str, str] = {}
         listas = False
         with SesionDeNavegador(perfil, edge, visible=False) as navegador:
             version = navegador.abrir(entrada)
-            # Las cookies no se leen de golpe: recien abierto, el navegador
-            # todavía esta yendo y volviendo de Microsoft, y lo que hay en
-            # ese instante es lo de la vez anterior (caducado, si paso el
-            # rato). Esperar a que la sesion sirva es ademas lo que la
-            # renueva sola: el navegador rehace el acceso federado sin que
-            # nadie teclee nada.
-            limite = reloj() + espera_perfil_s
-            while True:
-                encontradas = _del_dominio(navegador.cookies(version), host)
-                listas = sirven(encontradas)
-                if listas or reloj() >= limite:
-                    break
-                dormir(1.0)
-        if listas:
-            logger.info("La sesion del perfil de Edge seguia abierta")
-            return encontradas
+            if not forzar_login:
+                # Las cookies no se leen de golpe: recien abierto, el
+                # navegador todavía esta yendo y volviendo de Microsoft, y
+                # lo que hay en ese instante es lo de la vez anterior
+                # (caducado, si paso el rato). Esperar a que la sesion sirva
+                # es ademas lo que la renueva sola: el navegador rehace el
+                # acceso federado sin que nadie teclee nada.
+                encontradas, listas = esperar(
+                    navegador, version, espera_perfil_s, 1.0
+                )
+                if listas:
+                    logger.info("La sesion del perfil de Edge seguia abierta")
+                    return encontradas
+            else:
+                encontradas = leer(navegador, version)
+            if (
+                forzar_login or sin_respuesta
+                or galletas.sostienen_sesion(encontradas)
+                or (del_sitio and not permitir_ventana)
+            ):
+                # Hay sesion guardada y el servidor no la quiere. Releerla
+                # da siempre la misma: se quita y se entra otra vez. Las de
+                # Microsoft no se tocan, asi que el acceso sigue siendo
+                # automatico. Sin cookie que autentique y con ventana
+                # permitida no se llega aqui: la pagina de Microsoft espera
+                # a una persona y repetir la visita solo retrasaria la
+                # ventana. Sin ventana no hay nada que retrasar, asi que se
+                # prueba a entrar en limpio antes de rendirse.
+                logger.info(
+                    "El perfil {} guarda una sesion de AirVault que no "
+                    "sirve; se borra y se entra de nuevo sin ventana", perfil,
+                )
+                decir("Renovando el acceso a AirVault en segundo plano")
+                navegador.borrar_cookies(version, del_sitio)
+                navegador.visitar(entrada, version)
+                encontradas, listas = esperar(
+                    navegador, version, espera_reingreso_s, 1.0
+                )
+                if listas:
+                    logger.info(
+                        "Sesion de AirVault renovada sin ventana: {}",
+                        galletas.resumir(encontradas),
+                    )
+                    return encontradas
+        if sin_respuesta:
+            raise ServidorSinRespuesta(
+                "AirVault no respondio al comprobar la sesion del perfil de "
+                "Edge, ni despues de entrar de nuevo. No se abre la ventana "
+                "de acceso porque entrar no es lo que falla."
+            )
+        if not permitir_ventana:
+            raise ErrorDeNavegador(
+                "AirVault volvio a pedir acceso y Edge no pudo renovarlo en "
+                "segundo plano: la pagina de Microsoft espera a una persona."
+            )
         logger.info(
             "El perfil {} no tiene sesion de AirVault; se abre la ventana "
             "para entrar", perfil,
         )
-
-    if avisar is not None:
-        avisar(
+        decir(
             "Se abrió una ventana de Edge: entre a AirVault con su usuario "
             "de Microsoft. La ventana se cierra sola al terminar."
         )
-    with SesionDeNavegador(perfil, edge, visible=True) as navegador:
-        version = navegador.abrir(entrada)
-        limite = reloj() + espera_login_s
-        while reloj() < limite:
-            encontradas = _del_dominio(navegador.cookies(version), host)
-            if sirven(encontradas):
-                logger.info(
-                    "Sesion de AirVault abierta en el navegador: {}",
-                    galletas.resumir(encontradas),
-                )
-                return encontradas
-            dormir(2.0)
-        acompanantes = galletas.resumir(encontradas) if encontradas else ""
+        with SesionDeNavegador(perfil, edge, visible=True) as navegador:
+            try:
+                version = navegador.abrir(entrada)
+            except EdgeOcupado as exc:
+                # Hay pestanas trabajando en el Edge oculto. Sale el motivo
+                # de verdad, que es el acceso, y no el del navegador: quien
+                # lo recibe lo reintenta cuando el otro trabajo termine.
+                raise ErrorDeNavegador(
+                    "AirVault volvio a pedir acceso y Edge no pudo renovarlo "
+                    "en segundo plano. No se abre la ventana de acceso "
+                    "porque Edge esta ocupado con otro trabajo."
+                ) from exc
+            limite = reloj() + espera_login_s
+            while reloj() < limite:
+                encontradas = leer(navegador, version)
+                if sirven(encontradas):
+                    logger.info(
+                        "Sesion de AirVault abierta en el navegador: {}",
+                        galletas.resumir(encontradas),
+                    )
+                    return encontradas
+                dormir(2.0)
+            acompanantes = galletas.resumir(encontradas) if encontradas else ""
+    finally:
+        _TURNO_DE_ACCESO.release()
+    if sin_respuesta:
+        raise ServidorSinRespuesta(
+            "AirVault no respondio al comprobar la sesion abierta en la "
+            "ventana de Edge."
+        )
     detalle = (
         f" Del sitio si llegaron {acompanantes}, que son las que pone "
         f"AirVault antes de saber quien entra: eso pasa cuando la ventana "

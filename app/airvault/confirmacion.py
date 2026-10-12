@@ -19,6 +19,21 @@ MAX_BATCHES_PARALELOS = 32
 PORCENTAJE_MUESTRA = 5
 MINIMO_MUESTRA = 7
 
+# Un batch que no se pudo leer (un corte, una pagina que no cargo, la sesion
+# que caduco a mitad) se vuelve a consultar al final del chequeo. Son las
+# esperas antes de cada vuelta extra: dos vueltas, la segunda mas espaciada.
+# Sin ellas el batch quedaba «pendiente de revision» hasta que alguien
+# volviera a lanzar el chequeo entero, y mientras tanto nadie sabia si
+# estaba subido.
+ESPERAS_ENTRE_VUELTAS_S = (20.0, 60.0)
+# En las vueltas extra van pocos a la vez: si la primera pasada fallo con
+# AirVault cargado, repetirla igual de ancha es pedir el mismo fallo.
+BATCHES_PARALELOS_AL_REINTENTAR = 4
+# Esperas antes de volver a pedir el acceso a Web Search cuando AirVault no
+# lo da (su servidor contesta con error, o la sesion no llega a renovarse).
+# Antes un solo tropiezo ahi abortaba el chequeo sin mirar un solo batch.
+ESPERAS_DE_ACCESO_S = (15.0, 30.0, 60.0, 120.0)
+
 
 @dataclass(frozen=True)
 class ConfirmacionBatch:

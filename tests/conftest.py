@@ -37,6 +37,26 @@ def _navegadores_sin_heredar(monkeypatch):
     monkeypatch.setattr(navegador, "_CIERRE_DIFERIDO", False)
 
 
+@pytest.fixture(autouse=True)
+def _sin_edge_de_verdad(monkeypatch):
+    """Ninguna prueba arranca el Edge de la maquina por un descuido.
+
+    Renovar el acceso lanza Edge sobre el perfil de trabajo, el mismo que
+    guarda la sesion de quien ejecuta la suite, y ahora ademas le quita las
+    cookies de AirVault que no sirven. Una prueba que olvide sustituir el
+    navegador se queda sin Edge que lanzar en vez de tocar ese perfil. Las
+    que lo ejercen pasan su propio ``edge`` o sustituyen esta funcion.
+    """
+    from app.airvault import navegador
+
+    def sin_edge(*_candidatas):
+        raise navegador.ErrorDeNavegador(
+            "Las pruebas no lanzan Microsoft Edge"
+        )
+
+    monkeypatch.setattr(navegador, "ruta_de_edge", sin_edge)
+
+
 def _aplicacion():
     """La ``QApplication`` viva, o nada si la prueba no toco la interfaz.
 
@@ -120,6 +140,22 @@ def _reintentos_de_pagina_sin_espera(monkeypatch):
     """
     monkeypatch.setattr(
         "app.airvault.indexer.ESPERAS_REINTENTO_PAGINA", (0.0, 0.0)
+    )
+
+
+@pytest.fixture(autouse=True)
+def _chequeo_de_websearch_sin_espera(monkeypatch):
+    """El chequeo repite al final los batches que no pudo leer.
+
+    Entre una vuelta y la siguiente espera a que AirVault se reponga, y
+    tambien antes de volver a pedir el acceso. Las pruebas simulan fallos
+    que no cambian con el tiempo.
+    """
+    monkeypatch.setattr(
+        "app.airvault.confirmacion.ESPERAS_ENTRE_VUELTAS_S", (0.0, 0.0)
+    )
+    monkeypatch.setattr(
+        "app.airvault.confirmacion.ESPERAS_DE_ACCESO_S", (0.0, 0.0)
     )
 
 

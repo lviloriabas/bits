@@ -122,6 +122,11 @@ CONSULTA_DE_PRUEBA = {
 
 ESTADOS_TRANSITORIOS = frozenset({408, 429, 500, 502, 503, 504})
 
+# Lo que puede salir de probar unas cookies contra el servidor.
+SIRVEN = "sirven"
+CADUCADAS = "caducadas"
+SIN_RESPUESTA = "sin_respuesta"
+
 # Lo que contesta AirVault cuando la sesion ya no vale. El 440 es el de IIS
 # («Login Timeout»), y llega con la pagina de error generica del servidor,
 # asi que sin nombrarlo se leia como un rechazo del sitio y el trabajo moria
@@ -425,6 +430,11 @@ class SesionAirVault:
             raise ErrorDeSesion(f"No hay ninguna cookie que usar. {_AYUDA_COOKIE}")
         host = galletas.dominio(self.config.base_url)
         for nombre, valor in cookies.items():
+            # El servidor renueva las suyas con su propio dominio, y el
+            # tarro las guarda aparte de las adoptadas: sin quitarlas, la
+            # vieja viajaba junto a la nueva y AirVault se quedaba con la
+            # primera.
+            self._quitar_del_tarro(nombre, host)
             self.http.cookies.set(nombre, valor, domain=host, path="/")
         if not galletas.sostienen_sesion(cookies):
             logger.warning(
@@ -443,6 +453,15 @@ class SesionAirVault:
         )
         return self
 
+    def _quitar_del_tarro(self, nombre: str, host: str) -> None:
+        """Saca del tarro las cookies de ese nombre que viajan a AirVault."""
+        for cookie in list(self.http.cookies):
+            propio = str(cookie.domain or "").lower().lstrip(".")
+            if cookie.name == nombre and (
+                propio == host or host.endswith("." + propio)
+            ):
+                self.http.cookies.clear(cookie.domain, cookie.path, cookie.name)
+
     def usar_cookie(self, cookie: str) -> "SesionAirVault":
         """Adopta la cabecera ``Cookie`` tal como se copia del navegador."""
         if not str(cookie or "").strip():
@@ -459,30 +478,57 @@ class SesionAirVault:
         self, perfil: Optional[Path] = None,
         avisar: Optional[Callable[[str], None]] = None,
         forzar_login: bool = False,
+        permitir_ventana: bool = True,
     ) -> "SesionAirVault":
-        """Toma la sesion del navegador que abre el propio programa."""
+        """Toma la sesion del navegador que abre el propio programa.
+
+        ``permitir_ventana=False`` es para renovar con el trabajo en marcha:
+        Edge sigue en segundo plano pase lo que pase.
+        """
         from app.airvault import navegador
 
         if avisar is not None:
             self._avisar_sesion = avisar
-        if forzar_login:
-            # Las cookies viejas siguen en el tarro y taparian a las nuevas:
-            # ``requests`` manda las dos y AirVault se queda con la primera.
-            self.http.cookies.clear()
         self._perfil = perfil
-        return self.usar_cookies(
-            navegador.obtener_cookies(
+        try:
+            cookies = navegador.obtener_cookies(
                 self.config.base_url, perfil, self.config.url_sso,
                 espera_login_s=self.config.espera_login_s, avisar=avisar,
-                forzar_login=forzar_login, confirmar=self.sirven_cookies,
+                forzar_login=forzar_login, confirmar=self._confirmar_cookies,
                 # Entre dos lecturas de las cookies pasan uno o dos
                 # segundos, y la ventana de acceso espera hasta cinco
                 # minutos: sin esto, cancelar no se notaba hasta que se
                 # agotara esa espera.
                 dormir=self.dormir,
-            ),
-            ORIGEN_EDGE,
-        )
+                permitir_ventana=permitir_ventana,
+            )
+        except navegador.ServidorSinRespuesta as exc:
+            raise ErrorDeConexion(
+                f"No se pudo conectar con AirVault para comprobar la sesion: "
+                f"{exc}"
+            ) from exc
+        if forzar_login:
+            # Las cookies viejas siguen en el tarro y taparian a las nuevas:
+            # ``requests`` manda las dos y AirVault se queda con la primera.
+            # Se vacia con las nuevas ya en la mano: si no se pudo entrar,
+            # la sesion conserva lo que tenia.
+            self.http.cookies.clear()
+        return self.usar_cookies(cookies, ORIGEN_EDGE)
+
+    def _confirmar_cookies(self, cookies: Mapping[str, str]) -> bool:
+        """La prueba que usa el navegador mientras rehace el acceso.
+
+        Separa «no valen» de «no se pudo saber»: lo segundo no manda a
+        nadie a entrar otra vez.
+        """
+        from app.airvault import navegador
+
+        estado = self._probar_cookies(cookies)
+        if estado == SIN_RESPUESTA:
+            raise navegador.SondaIndeterminada(
+                "AirVault no contesto la prueba de la sesion"
+            )
+        return estado == SIRVEN
 
     def sirven_cookies(self, cookies: Mapping[str, str]) -> bool:
         """Si con esas cookies el servidor deja trabajar.
@@ -491,8 +537,17 @@ class SesionAirVault:
         mientras el navegador todavía esta rehaciendo el acceso, y adoptar
         cookies a medio hacer dejaria el tarro con dos juegos mezclados.
         """
+        return self._probar_cookies(cookies) == SIRVEN
+
+    def _probar_cookies(self, cookies: Mapping[str, str]) -> str:
+        """Que contesta el servidor a esas cookies.
+
+        Un error del servidor no es una sesion caducada. AirVault contesta
+        500 por causas que no tienen que ver con quien entra, y tomarlo por
+        «no valen» abria la ventana de acceso delante de una sesion buena.
+        """
         if not cookies:
-            return False
+            return CADUCADAS
         sonda = requests.Session()
         sonda.headers.update(dict(self.http.headers))
         host = galletas.dominio(self.config.base_url)
@@ -508,14 +563,20 @@ class SesionAirVault:
             raise ErrorDeConexion(_motivo_ssl(exc)) from exc
         except requests.RequestException as exc:
             logger.debug("No se pudo probar la sesion del perfil: {}", exc)
-            return False
+            return SIN_RESPUESTA
         finally:
             sonda.close()
         if respuesta.status_code in ESTADOS_DE_SESION:
-            return False
+            return CADUCADAS
         if self._pide_login(respuesta.text[:2000], respuesta.url):
-            return False
-        return respuesta.status_code < 400
+            return CADUCADAS
+        if respuesta.status_code >= 500:
+            logger.info(
+                "AirVault contesto {} al probar la sesion del perfil",
+                respuesta.status_code,
+            )
+            return SIN_RESPUESTA
+        return SIRVEN if respuesta.status_code < 400 else CADUCADAS
 
     def renovar_en_navegador(
         self, avisar: Optional[Callable[[str], None]] = None
@@ -532,6 +593,34 @@ class SesionAirVault:
             avisar or self._avisar_sesion,
             forzar_login=True,
         )
+
+    def renovar_sin_ventana(
+        self, avisar: Optional[Callable[[str], None]] = None,
+        forzar: bool = True,
+    ) -> "SesionAirVault":
+        """Vuelve a entrar con Edge en segundo plano, o dice que no pudo.
+
+        Es la renovacion de quien trabaja sin nadie delante: borra del
+        perfil la sesion de AirVault que ya no sirve y deja que el navegador
+        rehaga el acceso federado. Si la pagina de Microsoft pide a una
+        persona, no abre ninguna ventana: levanta el motivo y el trabajo lo
+        reintenta mas tarde.
+
+        Con ``forzar=False`` primero se le da ocasion al perfil de renovarla
+        solo, que es lo normal cuando simplemente caduco, y solo se borra si
+        el servidor sigue sin quererla.
+        """
+        from app.airvault import navegador
+
+        try:
+            return self.usar_navegador(
+                getattr(self, "_perfil", None),
+                avisar or self._avisar_sesion,
+                forzar_login=forzar,
+                permitir_ventana=False,
+            )
+        except navegador.ErrorDeNavegador as exc:
+            raise ErrorDeSesion(str(exc)) from exc
 
     def iniciar_sesion(self, credenciales: Credenciales) -> "SesionAirVault":
         """Autentica contra el formulario propio de AirVault.
@@ -762,12 +851,12 @@ class SesionAirVault:
                         # batch entero ni el paso de la interfaz.
                         renovaciones = 1
                         continue
-                    if renovaciones == 1:
+                    if renovaciones == 1 and self._reingresar_en_silencio():
                         # Si AirVault vuelve a pedir acceso aun con las
                         # cookies renovadas, se descarta la sesion guardada y
-                        # se abre Edge para entrar. Al terminar, la operacion
-                        # sigue desde la peticion que quedo pendiente.
-                        self.renovar_en_navegador()
+                        # se entra de nuevo, siempre con Edge en segundo
+                        # plano. La operacion sigue desde la peticion que
+                        # quedo pendiente.
                         renovaciones = 2
                         continue
                 if respuesta.status_code not in ESTADOS_TRANSITORIOS:
@@ -889,9 +978,41 @@ class SesionAirVault:
                 "AirVault pidio acceso a mitad del trabajo; se vuelve a "
                 "tomar la sesion del perfil de Edge"
             )
-            self.usar_navegador(self._perfil, self._avisar_sesion)
+            self.usar_navegador(
+                self._perfil, self._avisar_sesion, permitir_ventana=False
+            )
+        except SesionCancelada:
+            raise
         except Exception as exc:  # noqa: BLE001 - se sigue con lo que habia
             logger.info("No se pudo renovar la sesion sola: {}", exc)
+            return False
+        finally:
+            self._renovando = False
+        return True
+
+    def _reingresar_en_silencio(self) -> bool:
+        """Segundo intento: descarta la sesion del perfil y entra otra vez.
+
+        Tampoco abre ventana. A mitad de un trabajo Edge esta ocupado y no
+        hay nadie delante; si el acceso necesita a una persona, la peticion
+        sale con su motivo y el trabajo lo reintenta en la vuelta siguiente.
+        """
+        if (
+            self._origen != ORIGEN_EDGE or self._renovando
+            or not self._renovable
+        ):
+            return False
+        self._renovando = True
+        try:
+            logger.info(
+                "AirVault no acepto la sesion renovada; se entra de nuevo "
+                "con Edge en segundo plano"
+            )
+            self.renovar_sin_ventana()
+        except SesionCancelada:
+            raise
+        except Exception as exc:  # noqa: BLE001 - se sigue con lo que habia
+            logger.info("No se pudo entrar de nuevo sin ventana: {}", exc)
             return False
         finally:
             self._renovando = False
@@ -977,6 +1098,7 @@ def comprobar_o_renovar(
     sesion: SesionAirVault,
     avisar: Optional[Callable[[str], None]] = None,
     websearch: bool = False,
+    permitir_ventana: bool = True,
 ) -> int:
     """Comprueba la sesion y, si el perfil trae una caducada, vuelve a entrar.
 
@@ -986,9 +1108,23 @@ def comprobar_o_renovar(
     Aqui se hace lo que haria una persona: abrir el navegador y entrar otra
     vez. Web Search tambien recupera por navegador una cookie pegada que
     haya caducado, para no dejar la revision pendiente por falta de acceso.
+
+    Tambien vuelve a entrar cuando el servidor contesta con un error suyo.
+    AirVault no siempre devuelve la pagina de acceso a una sesion que dio
+    por terminada: a veces contesta 500 hasta que la cookie caduca del todo,
+    minutos despues, y sin renovar ahi el trabajo se quedaba diciendo que
+    AirVault no responde con el servidor en pie. Esa renovacion va siempre
+    con Edge en segundo plano; si el servidor esta caido de verdad, vuelve a
+    fallar y sale el mismo motivo.
+
+    Con ``permitir_ventana=False`` nunca se abre la ventana de acceso.
     """
     if sesion.cancelada:
         raise SesionCancelada("Se canceló el acceso a AirVault")
+    if avisar is not None:
+        # La sesion pasa de un trabajo al siguiente y el aviso que guardaba
+        # era el del anterior, que ya termino.
+        sesion._avisar_sesion = avisar
     comprobar = sesion.comprobar_websearch if websearch else sesion.comprobar
     try:
         return comprobar()
@@ -1001,12 +1137,32 @@ def comprobar_o_renovar(
             "La sesion guardada en el perfil de Edge ya no vale; se vuelve "
             "a entrar por el navegador"
         )
+        if not permitir_ventana:
+            sesion.renovar_sin_ventana(avisar)
+            return comprobar()
         if avisar is not None:
             avisar(
                 "La sesión guardada ya no vale; hay que entrar otra vez en "
                 "AirVault."
             )
         sesion.renovar_en_navegador(avisar)
+        return comprobar()
+    except ErrorDeConexion as exc:
+        if sesion.cancelada:
+            raise SesionCancelada("Se canceló el acceso a AirVault")
+        if sesion.origen != ORIGEN_EDGE:
+            raise
+        logger.info(
+            "AirVault no acepto la comprobacion de la sesion ({}); se entra "
+            "de nuevo en segundo plano por si es la sesion", exc,
+        )
+        try:
+            sesion.renovar_sin_ventana(avisar)
+        except SesionCancelada:
+            raise
+        except (ErrorDeSesion, ErrorDeConexion) as renovacion:
+            logger.info("No se pudo renovar la sesion: {}", renovacion)
+            raise exc from None
         return comprobar()
 
 

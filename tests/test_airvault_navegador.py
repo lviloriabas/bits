@@ -21,8 +21,11 @@ import pytest
 from app.airvault import navegador
 from app.airvault.navegador import (
     ErrorDeNavegador,
+    ServidorSinRespuesta,
+    SondaIndeterminada,
     _del_dominio,
     _WebSocket,
+    cookies_intrusas,
     obtener_cookies,
     ruta_de_edge,
 )
@@ -210,6 +213,53 @@ def test_solo_viajan_las_cookies_del_dominio():
     assert set(elegidas) == {"FedAuth", "consent"}
 
 
+def _del_sitio(nombre, valor):
+    """La cookie como la pone AirVault: de dominio y segura."""
+    return {"name": nombre, "value": valor, "domain": ".criticaltech.com",
+            "path": "/", "secure": True, "httpOnly": True,
+            "sourceScheme": "Secure"}
+
+
+def _copia(nombre, valor):
+    """La que escribia el programa al pasar la sesion al navegador."""
+    return {"name": nombre, "value": valor, "domain": HOST, "path": "/",
+            "secure": False, "httpOnly": False, "sourceScheme": "NonSecure"}
+
+
+def _agrupar(cookies):
+    por_dominio: dict = {}
+    for cookie in cookies:
+        por_dominio.setdefault(cookie["domain"], []).append(cookie)
+    return por_dominio
+
+
+@pytest.mark.parametrize("orden", [0, 1])
+def test_entre_dos_cookies_del_mismo_nombre_gana_la_del_sitio(orden):
+    """Tomar la copia dejaba la conexion probando una sesion vieja."""
+    cookies = [_copia("ProdSSO", "vieja"), _del_sitio("ProdSSO", "nueva")]
+    por_dominio = _agrupar(cookies[::-1] if orden else cookies)
+    assert _del_dominio(por_dominio, HOST) == {"ProdSSO": "nueva"}
+
+
+def test_son_intrusas_las_copias_sin_marca_de_seguras_venidas_de_http():
+    """Un sitio que solo se visita por https no pudo poner esas cookies."""
+    por_dominio = _agrupar([
+        _del_sitio("ProdSSO", "nueva"), _copia("ProdSSO", "vieja"),
+        _copia("Critical", "vieja"),
+        {"name": "ESTSAUTH", "value": "z", "secure": False,
+         "domain": ".login.microsoftonline.com", "sourceScheme": "NonSecure"},
+    ])
+    intrusas = cookies_intrusas(por_dominio, f"https://{HOST}")
+    assert sorted((c["name"], c["domain"]) for c in intrusas) == [
+        ("Critical", HOST), ("ProdSSO", HOST),
+    ]
+    # Sin https no hay como distinguirlas, y sin el origen tampoco.
+    assert cookies_intrusas(por_dominio, f"http://{HOST}") == []
+    assert cookies_intrusas(
+        {HOST: [{"name": "FedAuth", "value": "x"}]}, f"https://{HOST}"
+    ) == []
+
+
 # ── recorrido completo, con un navegador falso ─────────────────────
 
 class NavegadorFalso:
@@ -221,6 +271,8 @@ class NavegadorFalso:
         self.guion = list(guion)
         self.visible = None
         self.urls: list = []
+        self.borradas: list = []
+        self.visitas: list = []
 
     def __call__(self, perfil, edge=None, visible=True):
         self.visible = visible
@@ -239,7 +291,18 @@ class NavegadorFalso:
 
     def cookies(self, _version):
         actual = self.guion[0] if len(self.guion) == 1 else self.guion.pop(0)
+        if isinstance(actual, list):
+            # Cookies enteras, con su dominio y sus marcas.
+            return _agrupar(actual)
         return {HOST: [{"name": n, "value": v} for n, v in actual.items()]}
+
+    def borrar_cookies(self, _version, cookies):
+        self.borradas.append(sorted((c["name"], c["domain"]) for c in cookies))
+        return len(cookies)
+
+    def visitar(self, url, _version=None):
+        self.visitas.append(url)
+        return True
 
 
 def preparar(monkeypatch, guion):
@@ -309,20 +372,25 @@ def test_se_entra_por_el_enlace_federado(monkeypatch, tmp_path):
     assert falso.urls == [sso]
 
 
-def test_forzar_login_no_pregunta_al_perfil(monkeypatch, tmp_path):
+def test_forzar_login_no_se_fia_de_lo_que_guarda_el_perfil(monkeypatch,
+                                                           tmp_path):
     """Cuando el servidor ya rechazo lo del perfil, releerlo da lo mismo.
 
     Es la salida del callejon: la cookie guardada tiene la forma correcta,
-    asi que el intento sin ventana la daria por buena una y otra vez.
+    asi que releerla la daria por buena una y otra vez. Se borra del perfil
+    y se entra de nuevo, sin ventana: el acceso de Microsoft sigue ahi.
     """
-    preparar(monkeypatch, [{"FedAuth": FEDAUTH}])
+    falso = preparar(monkeypatch, [{"FedAuth": "rechazada"},
+                                   {"FedAuth": FEDAUTH}])
+    sso = f"https://{HOST}/zfp/?whr=https://login.microsoftonline.com/x/wsfed"
     cookies = obtener_cookies(
-        f"https://{HOST}", tmp_path, dormir=lambda _s: None,
+        f"https://{HOST}", tmp_path, sso, dormir=lambda _s: None,
         forzar_login=True,
     )
     assert cookies == {"FedAuth": FEDAUTH}
-    # Directo a la ventana: ningun intento silencioso de por medio.
-    assert NavegadorFalso.abiertos == [True]
+    assert falso.borradas == [[("FedAuth", HOST)]]
+    assert falso.visitas == [sso]
+    assert NavegadorFalso.abiertos == [False]
 
 
 def test_la_espera_agotada_dice_que_llego_y_que_falto(monkeypatch, tmp_path):
@@ -362,9 +430,30 @@ def test_no_se_toma_la_primera_cookie_que_aparece_sino_la_que_sirve(
     assert NavegadorFalso.abiertos == [False]
 
 
-def test_si_la_del_perfil_no_sirve_se_abre_la_ventana(monkeypatch, tmp_path):
-    """Una cookie con la forma correcta pero caducada no es una sesion."""
-    preparar(monkeypatch, [{"FedAuth": "caducada"}, {"FedAuth": FEDAUTH}])
+def test_si_la_del_perfil_no_sirve_se_entra_de_nuevo_sin_ventana(
+        monkeypatch, tmp_path):
+    """Una cookie con la forma correcta pero caducada no es una sesion.
+
+    Antes de molestar a nadie se quita la del perfil y se deja que el
+    navegador rehaga el acceso: Edge se queda en segundo plano.
+    """
+    falso = preparar(monkeypatch, [{"FedAuth": "caducada"},
+                                   {"FedAuth": FEDAUTH}])
+    cookies = obtener_cookies(
+        f"https://{HOST}", tmp_path, dormir=lambda _s: None,
+        espera_perfil_s=0,
+        confirmar=lambda c: c.get("FedAuth") == FEDAUTH,
+    )
+    assert cookies == {"FedAuth": FEDAUTH}
+    assert falso.borradas == [[("FedAuth", HOST)]]
+    assert NavegadorFalso.abiertos == [False]
+
+
+def test_la_ventana_queda_para_cuando_ni_entrando_de_nuevo(monkeypatch,
+                                                           tmp_path):
+    """Si Microsoft pide a una persona, ahi si hace falta la ventana."""
+    preparar(monkeypatch, [{"FedAuth": "caducada"}, {"FedAuth": "caducada"},
+                           {"FedAuth": FEDAUTH}])
     cookies = obtener_cookies(
         f"https://{HOST}", tmp_path, dormir=lambda _s: None,
         espera_perfil_s=0,
@@ -372,6 +461,101 @@ def test_si_la_del_perfil_no_sirve_se_abre_la_ventana(monkeypatch, tmp_path):
     )
     assert cookies == {"FedAuth": FEDAUTH}
     assert NavegadorFalso.abiertos == [False, True]
+
+
+def test_renovar_a_mitad_del_trabajo_nunca_abre_la_ventana(monkeypatch,
+                                                           tmp_path):
+    """Edge esta ocupado y no hay nadie delante: se dice y se reintenta."""
+    preparar(monkeypatch, [{"FedAuth": "caducada"}])
+    with pytest.raises(ErrorDeNavegador, match="segundo plano"):
+        obtener_cookies(
+            f"https://{HOST}", tmp_path, dormir=lambda _s: None,
+            espera_perfil_s=0, confirmar=lambda _c: False,
+            permitir_ventana=False,
+        )
+    assert NavegadorFalso.abiertos == [False]
+
+
+def test_sin_ventana_se_prueba_a_entrar_en_limpio_antes_de_rendirse(
+        monkeypatch, tmp_path):
+    """Aunque no quede cookie que autentique: no hay ventana que retrasar."""
+    falso = preparar(monkeypatch, [{"ASP.NET_SessionId": "vieja"},
+                                   {"ASP.NET_SessionId": "n", "FedAuth": FEDAUTH}])
+    cookies = obtener_cookies(
+        f"https://{HOST}", tmp_path, dormir=lambda _s: None,
+        espera_perfil_s=0, permitir_ventana=False,
+    )
+    assert cookies["FedAuth"] == FEDAUTH
+    assert falso.borradas == [[("ASP.NET_SessionId", HOST)]]
+    assert NavegadorFalso.abiertos == [False]
+
+
+def test_un_error_del_servidor_no_abre_la_ventana_de_acceso(monkeypatch,
+                                                            tmp_path):
+    """Un 500 no es una sesion caducada, y entrar otra vez no lo arregla.
+
+    Tomarlo por «no valen» dejaba la ventana de acceso cinco minutos
+    delante de un AirVault ya abierto.
+    """
+    falso = preparar(monkeypatch, [{"FedAuth": FEDAUTH}])
+
+    def confirmar(_cookies):
+        raise SondaIndeterminada("el servidor respondio 500")
+
+    with pytest.raises(ServidorSinRespuesta):
+        obtener_cookies(
+            f"https://{HOST}", tmp_path, dormir=lambda _s: None,
+            espera_perfil_s=0, confirmar=confirmar,
+        )
+    assert NavegadorFalso.abiertos == [False]
+    # Por si era la sesion, antes de rendirse se entra de nuevo.
+    assert falso.borradas == [[("FedAuth", HOST)]]
+
+
+def test_las_copias_que_no_puso_el_sitio_se_quitan_antes_de_leer(monkeypatch,
+                                                                 tmp_path):
+    """La copia vieja tapa a la renovada y AirVault pide acceso sin parar.
+
+    Paso de verdad: el chequeo de Web Search escribia en Edge la sesion de
+    la conexion sin dominio ni marca de segura, Chromium la guardaba junto a
+    la del sitio y, al renovarse esta, viajaban las dos.
+    """
+    entera = [_del_sitio("FedAuth", FEDAUTH), _del_sitio("ProdSSO", "nueva")]
+    falso = preparar(monkeypatch, [
+        entera + [_copia("ProdSSO", "vieja"), _copia("FedAuth", "vieja")],
+        entera,
+    ])
+    probadas: list = []
+
+    def confirmar(cookies):
+        probadas.append(dict(cookies))
+        return True
+
+    cookies = obtener_cookies(
+        f"https://{HOST}", tmp_path, dormir=lambda _s: None,
+        confirmar=confirmar,
+    )
+    assert cookies == {"FedAuth": FEDAUTH, "ProdSSO": "nueva"}
+    # Solo las copias: las del sitio y las de Microsoft no se tocan.
+    assert falso.borradas == [[("FedAuth", HOST), ("ProdSSO", HOST)]]
+    # Y se vuelve a entrar, porque el acceso en marcha viajo con ellas.
+    assert falso.visitas == [f"https://{HOST}"]
+    assert probadas == [{"FedAuth": FEDAUTH, "ProdSSO": "nueva"}]
+    assert NavegadorFalso.abiertos == [False]
+
+
+def test_un_aviso_que_falla_no_tumba_el_acceso(monkeypatch, tmp_path):
+    """La sesion guarda el aviso de un trabajo que pudo haber terminado."""
+    preparar(monkeypatch, [{}, {}, {"FedAuth": FEDAUTH}])
+
+    def avisar(_texto):
+        raise RuntimeError("Internal C++ object already deleted.")
+
+    cookies = obtener_cookies(
+        f"https://{HOST}", tmp_path, avisar=avisar,
+        dormir=lambda _s: None, espera_perfil_s=0,
+    )
+    assert cookies == {"FedAuth": FEDAUTH}
 
 
 def test_la_sesion_se_guarda_al_cerrar_el_navegador():

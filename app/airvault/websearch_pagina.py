@@ -14,8 +14,8 @@ from app.airvault.correcciones import (
     _MENSAJE,
     _NavegadorDeCorrecciones,
 )
-from app.airvault.navegador import PERFIL_POR_DEFECTO, _WebSocket
-from app.airvault.session import ErrorDeSesion, SesionCancelada, comprobar_o_renovar
+from app.airvault.navegador import PERFIL_POR_DEFECTO, _WebSocket, _viaja_a
+from app.airvault.session import ORIGEN_EDGE, ErrorDeSesion, SesionCancelada, comprobar_o_renovar
 from app.airvault.web_reports import ConsultaCancelada, ErrorDePaginaAirVault, _Pagina, url_busqueda_log
 
 
@@ -63,11 +63,16 @@ _LISTA_O_ACCESO = f"({_ACCESO_PEDIDO}) || !!({_MENSAJE}) || (({_LEER_MUESTRA}) !
 class AccesoWebSearch:
     """Comparte el navegador autenticado, con una pagina propia por batch."""
 
-    def __init__(self, config, sesion, avisar=None, cancelado=lambda: False):
+    def __init__(self, config, sesion, avisar=None, cancelado=lambda: False,
+                 permitir_ventana=True):
         self.config = config
         self.sesion = sesion
         self.avisar = avisar or (lambda _texto: None)
         self.cancelado = cancelado
+        # Una revision que arranca sola no puede abrir la ventana de acceso:
+        # no hay nadie delante. La que pide una persona si, como ultimo
+        # recurso y solo antes de empezar a leer.
+        self.permitir_ventana = permitir_ventana
         self.navegador = None
         self.version = None
         self.generacion = 0
@@ -76,7 +81,8 @@ class AccesoWebSearch:
 
     def __enter__(self):
         self.avisar("Iniciando sesión en Web Search")
-        comprobar_o_renovar(self.sesion, self.avisar, websearch=True)
+        comprobar_o_renovar(self.sesion, self.avisar, websearch=True,
+                            permitir_ventana=self.permitir_ventana)
         if self.cancelado():
             raise SesionCancelada("Se canceló el acceso a Web Search")
         perfil = Path(self.config.perfil_navegador) if self.config.perfil_navegador else PERFIL_POR_DEFECTO
@@ -98,25 +104,49 @@ class AccesoWebSearch:
             self.navegador = None
 
     def _usar_cookies(self):
-        """Mantiene el navegador y la conexion HTTP en la misma cuenta."""
+        """Pasa al navegador una sesion que no salio de el.
+
+        Solo hace falta cuando la conexion entro con una cookie pegada a
+        mano. Si la sesion se tomo de este mismo perfil, el navegador ya la
+        tiene, entera y con sus marcas, y escribirsela encima es justo lo
+        que rompia el acceso: de la conexion solo se sabe el nombre y el
+        valor, asi que cada cookie quedaba como una copia sin dominio ni
+        marca de segura al lado de la del sitio. Al renovarse la buena, la
+        copia vieja viajaba con ella y AirVault pedia acceso sin parar.
+
+        Cuando si se pasa, cada valor va sobre la cookie que el navegador ya
+        tenga con ese nombre, conservando su dominio y sus marcas; solo la
+        que no exista se crea, segura y del sitio.
+        """
+        if getattr(self.sesion, "origen", "") == ORIGEN_EDGE:
+            return
         host = dominio(self.config.base_url)
-        cookies = []
-        for cookie in self.sesion.http.cookies:
-            origen = cookie.domain.lstrip(".")
-            if origen and host != origen and not host.endswith("." + origen):
-                continue
-            dato = dict(name=cookie.name, value=cookie.value,
-                        domain=cookie.domain or host, path=cookie.path or "/",
-                        secure=bool(cookie.secure))
-            if cookie.expires is not None:
-                dato["expires"] = float(cookie.expires)
-            cookies.append(dato)
-        if cookies:
-            ws = _WebSocket(self.version["webSocketDebuggerUrl"])
-            try:
-                ws.pedir("Storage.setCookies", cookies=cookies)
-            finally:
-                ws.cerrar()
+        propias = [cookie for cookie in self.sesion.http.cookies
+                   if not cookie.domain or _viaja_a(cookie.domain, host)]
+        if not propias:
+            return
+        seguro = str(self.config.base_url).lower().startswith("https")
+        ws = _WebSocket(self.version["webSocketDebuggerUrl"])
+        try:
+            presentes = [c for c in (ws.pedir("Storage.getCookies") or {}).get("cookies", [])
+                         if _viaja_a(c.get("domain", ""), host)]
+            cookies = []
+            for cookie in propias:
+                iguales = [c for c in presentes if c.get("name") == cookie.name]
+                for igual in iguales:
+                    dato = {clave: igual[clave] for clave in
+                            ("name", "domain", "path", "secure", "httpOnly", "sameSite", "partitionKey")
+                            if igual.get(clave) is not None}
+                    dato["value"] = cookie.value
+                    if not igual.get("session", True) and igual.get("expires", -1) > 0:
+                        dato["expires"] = igual["expires"]
+                    cookies.append(dato)
+                if not iguales:
+                    cookies.append(dict(name=cookie.name, value=cookie.value, domain=host,
+                                        path="/", secure=seguro, httpOnly=True))
+            ws.pedir("Storage.setCookies", cookies=cookies)
+        finally:
+            ws.cerrar()
 
     def crear_lector(self):
         return LectorWebSearch(self)
@@ -128,10 +158,13 @@ class AccesoWebSearch:
                 return
             if self._error_acceso is not None:
                 raise self._error_acceso
-            self.avisar("Web Search pide acceso; iniciando sesión de nuevo")
+            self.avisar("Web Search pide acceso; renovando la sesión en segundo plano")
             try:
-                self.sesion.renovar_en_navegador(self.avisar)
-                comprobar_o_renovar(self.sesion, self.avisar, websearch=True)
+                # Hay pestañas leyendo: Edge no puede mostrar una ventana ni
+                # reiniciarse. Se rehace el acceso oculto o se deja pendiente.
+                self.sesion.renovar_sin_ventana(self.avisar, forzar=False)
+                comprobar_o_renovar(self.sesion, self.avisar, websearch=True,
+                                    permitir_ventana=False)
                 if self.navegador is not None:
                     self.version = self.navegador.abrir(self.config.url_sso, espera_s=self.config.espera_login_s)
                 self._usar_cookies()
@@ -139,6 +172,16 @@ class AccesoWebSearch:
                 self._error_acceso = exc
                 raise
             self.generacion += 1
+
+    def reintentar_acceso(self):
+        """Permite renovar otra vez despues de un acceso que no salio.
+
+        Dentro de una vuelta el fallo se recuerda para que treinta batches
+        no intenten entrar treinta veces. La vuelta siguiente empieza de
+        cero: lo que no dejaba entrar pudo haberse arreglado.
+        """
+        with self._acceso:
+            self._error_acceso = None
 
 
 class LectorWebSearch:
