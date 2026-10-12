@@ -829,6 +829,7 @@ def escribir_entrega(
     discrepancias_al_final: bool = False,
     paginas_por_parte: int = 0,
     revisar_aparte: bool = True,
+    antes_de_pagina=None,
 ) -> List[ArchivoDeEntrega]:
     """Escribe la entrega y devuelve cada archivo con lo que lleva dentro.
 
@@ -871,13 +872,19 @@ def escribir_entrega(
         for indice, tramo in enumerate(partes, start=1):
             nombre = nombre_de_parte(run_dir.name, indice, len(partes))
             destino = unique_path(run_dir / f"{nombre}.pdf")
-            _escribir_documento(destino, tramo, sources)
+            if antes_de_pagina is None:
+                _escribir_documento(destino, tramo, sources)
+            else:
+                _escribir_documento(destino, tramo, sources, antes_de_pagina=antes_de_pagina)
             escritas.append(ArchivoDeEntrega(destino, tramo))
         if revisar:
             destino = unique_path(
                 run_dir / f"{run_dir.name} {ETIQUETA_REVISAR}.pdf"
             )
-            _escribir_documento(destino, revisar, sources)
+            if antes_de_pagina is None:
+                _escribir_documento(destino, revisar, sources)
+            else:
+                _escribir_documento(destino, revisar, sources, antes_de_pagina=antes_de_pagina)
             escritas.append(ArchivoDeEntrega(destino, revisar, revisar=True))
     if len(partes) > 1:
         logger.info(
@@ -896,12 +903,15 @@ def escribir_entrega(
 
 
 def _escribir_documento(
-    destino: Path, secuencia: Sequence[EntradaPdf], sources: PdfDocumentCache
+    destino: Path, secuencia: Sequence[EntradaPdf], sources: PdfDocumentCache,
+    *, antes_de_pagina=None,
 ) -> None:
     """Vuelca una secuencia de páginas en un PDF."""
     doc = fitz.open()
     try:
         for indice, entrada in enumerate(secuencia):
+            if antes_de_pagina is not None:
+                antes_de_pagina()
             if entrada.ref is not None:
                 _insertar_pagina_fuente(doc, sources, entrada.ref)
                 continue

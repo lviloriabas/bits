@@ -152,8 +152,8 @@ Exportar vuelve a generar los datos y PDF sin repetir OCR. Conserva los PDF ante
 
 **Subir** envía los PDF. **Indexar** asigna a cada página sus datos de búsqueda: aeronave, número de bitácora, fecha y demás campos configurados. Un **batch** es un lote de páginas dentro de AirVault. **Completar** cierra un batch válido y lo envía a Web Search.
 
-1. Exporte con **Un solo PDF** y conserve matrícula, número de bitácora y fecha en el CSV principal.
-2. Pulse **Indexar en AirVault…**. Seleccione la ejecución en el historial: es el único sitio desde el que se elige lo que se sube, y lista las últimas 25 ejecuciones procesadas.
+1. Conserve matrícula, número de bitácora y fecha en el CSV principal de la ejecución procesada.
+2. Pulse **Indexar en AirVault…**. Seleccione una o varias ejecuciones en el historial, que lista las últimas 25. También puede marcar las que aparecen en gris: al pulsar **Empezar proceso**, BITS prepara automáticamente los PDF y la información de páginas que falten antes de subirlas. Usa los resultados guardados, conserva los CSV y no repite OCR. Si falta el original o los datos procesados están incompletos, informa el motivo y no envía la selección. Las entregas ya válidas se reutilizan.
 3. Revise **Nombre del batch**, **Máximo por batch** y **Fecha**. Deje **Sesión** vacío: BITS abre su propio Edge si hace falta. Complete el inicio de sesión y el segundo factor cuando se soliciten.
 4. Para controlar cada etapa manualmente, desmarque **Indexar páginas** y **Completar batch** en **Automatización**.
 5. Abra **Acciones -> Vista previa…**. Compruebe el reparto y use **Ver las bitácoras…** para revisar el contenido previsto. El recuadro **Resultado** resume cuántas van al flujo normal y cuántas a **REVISAR**.

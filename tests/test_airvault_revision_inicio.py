@@ -21,7 +21,8 @@ class WorkerFalso(QObject):
         self.estado = estado
         self.corriendo = False
         for nombre in (
-            "paso", "subidas_actualizadas", "batch_encontrado", "batch_indexado",
+            "paso", "subidas_actualizadas", "entrega_preparada", "preparacion_fallida",
+            "batch_encontrado", "batch_indexado",
             "batch_indexando", "subido", "comprobado", "buscado", "indexado",
             "fallo", "cancelado", "finished",
         ):

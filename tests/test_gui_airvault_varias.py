@@ -91,13 +91,14 @@ def test_sin_marcas_no_se_puede_subir(app, tmp_path):
     assert ventana.corrida() is None
 
 
-def test_una_ejecucion_sin_exportar_no_se_puede_marcar(app, tmp_path):
+def test_una_ejecucion_sin_exportar_se_puede_marcar(app, tmp_path):
     corrida(tmp_path)
     sin_exportar = corrida(tmp_path, "BITS 19 AUG 2026 05 50", exportada=False)
     ventana = AirVaultWindow(tmp_path)
     ventana._refrescar_historial()
     ventana.historial.marcar(ventana.historial.findData(str(sin_exportar)))
-    assert str(sin_exportar) not in ventana._corridas_seleccionadas()
+    assert str(sin_exportar) in ventana._corridas_seleccionadas()
+    assert ventana.boton_proceso.isEnabled()
 
 
 def test_filtrar_con_varias_incluye_solo_las_marcadas(app, tmp_path):
@@ -169,7 +170,7 @@ def test_retomar_varias_respeta_la_fecha_guardada_en_sus_batches(app, tmp_path, 
     assert next(e for e in lanzadas if e["csv"] == str(segunda))["nombre_lote"] == "DP | ENTREGA PERSONALIZADA"
 
 
-def test_la_subida_valida_todas_las_entregas_antes_de_arrancar(app, tmp_path, monkeypatch):
+def test_la_subida_deja_la_preparacion_de_entregas_al_hilo(app, tmp_path, monkeypatch):
     primera = corrida(tmp_path, "BITS 17 AUG 2026 05 50")
     segunda = corrida(tmp_path)
     ventana = AirVaultWindow(tmp_path)
@@ -179,7 +180,8 @@ def test_la_subida_valida_todas_las_entregas_antes_de_arrancar(app, tmp_path, mo
     lanzadas = []
     monkeypatch.setattr(ventana, "_lanzar", lambda *args: lanzadas.append(args))
     ventana._subir_a_mano()
-    assert lanzadas == []
+    assert len(lanzadas) == 1
+    assert lanzadas[0][0] == "subir"
     assert ventana.resumen.text()
 
 

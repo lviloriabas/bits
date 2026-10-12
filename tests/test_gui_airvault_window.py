@@ -436,16 +436,17 @@ def test_se_propone_la_exportada_aunque_no_sea_la_ultima(app, tmp_path):
     assert ventana.boton_subir.isEnabled()
 
 
-def test_una_corrida_sin_exportar_se_ve_pero_no_se_sube(app, tmp_path):
-    """Sin PDF de entrega no hay nada que subir, y hay que decir por qué."""
+def test_una_corrida_sin_exportar_se_prepara_al_empezar(app, tmp_path):
+    """La preparacion automatica permite iniciar una ejecucion sin PDF."""
     corrida(tmp_path, exportada=False)
     ventana = AirVaultWindow(tmp_path)
     ventana._refrescar_historial()
     assert "Sin exportar" in ventana.historial.itemData(
         1, Qt.ItemDataRole.ToolTipRole
     )
-    assert not ventana.boton_subir.isEnabled()
-    assert "Expórtela" in ventana.resumen.text()
+    assert ventana.boton_subir.isEnabled()
+    assert ventana.boton_proceso.isEnabled()
+    assert "prepararán" in ventana.resumen.text()
 
 
 def test_una_corrida_exportada_se_puede_subir(app, tmp_path):

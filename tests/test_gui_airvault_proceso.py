@@ -127,7 +127,7 @@ def test_el_limite_empieza_en_cinco_y_recuerda_el_valor_elegido(app, tmp_path):
     nueva.close()
 
 
-def test_todas_las_ejecuciones_tienen_casilla_y_las_no_exportadas_no_se_marcan(app, tmp_path):
+def test_todas_las_ejecuciones_tienen_casilla_y_se_pueden_marcar(app, tmp_path):
     listo = corrida(tmp_path, "BITS 10 OCT 2026 10 00")
     pendiente = corrida(tmp_path, "BITS 10 OCT 2026 11 00", exportada=False)
     ventana = AirVaultWindow(tmp_path)
@@ -137,8 +137,8 @@ def test_todas_las_ejecuciones_tienen_casilla_y_las_no_exportadas_no_se_marcan(a
         assert combo.itemData(combo.findData(str(csv)), Qt.ItemDataRole.CheckStateRole) is not None
     indice = combo.findData(str(pendiente))
     combo.marcar(indice)
-    assert combo.itemData(indice, Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Unchecked
-    assert str(pendiente) not in ventana._corridas_seleccionadas()
+    assert combo.itemData(indice, Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked
+    assert str(pendiente) in ventana._corridas_seleccionadas()
 
 
 def test_el_menu_se_reabre_y_no_ofrece_vista_previa(app, tmp_path):

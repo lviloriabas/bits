@@ -35,7 +35,7 @@ from typing import Dict, Optional, Sequence
 from loguru import logger
 from PySide6.QtCore import (QEvent, QItemSelection, QItemSelectionModel, QRectF,
                             QSignalBlocker, Qt, QThread, QTimer, Signal)
-from PySide6.QtGui import (QAction, QBrush, QColor, QGuiApplication, QIcon,
+from PySide6.QtGui import (QAction, QBrush, QColor, QGuiApplication, QIcon, QPalette,
                            QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut)
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox,
                                QDialog, QGridLayout, QGroupBox, QHBoxLayout,
@@ -517,10 +517,9 @@ def estado_de_entrega(
 ) -> tuple[str, bool]:
     """Qué tiene la ejecución para subir, y si con eso alcanza.
 
-    Se mira aquí para que el historial diga de un vistazo cuáles se pueden
-    subir. El motivo exacto lo vuelve a comprobar ``comprobar_entrega`` al
-    arrancar, que es quien manda: esto solo evita empezar un trabajo que ya
-    se sabe que no va a salir.
+    Se mira aquí para que el historial diga de un vistazo qué entregas están
+    preparadas. Al arrancar se reutilizan las válidas y se completa lo que
+    falte antes de conectar a AirVault.
 
     Con ``limite`` se añade en cuántos batches queda repartida, que es lo
     que de verdad se sube: un archivo de entrega grande se parte en varios,
@@ -568,7 +567,7 @@ class SelectorEjecuciones(QComboBox):
         self.view().installEventFilter(self)
 
     def marcar(self, indice: int) -> None:
-        if not self.permitir_marcar or not self.itemData(indice, ROL_SE_PUEDE_SUBIR):
+        if not self.permitir_marcar or indice <= 0 or not self.itemData(indice):
             return
         marcado = self.itemData(indice, Qt.ItemDataRole.CheckStateRole)
         self.setItemData(
@@ -626,14 +625,14 @@ class _CasillasEjecuciones(QStyledItemDelegate):
                                 if index.data(Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked
                                 else Qt.CheckState.Unchecked)
             if not index.data(ROL_SE_PUEDE_SUBIR):
-                opcion.state &= ~QStyle.StateFlag.State_Enabled
+                opcion.palette.setColor(QPalette.ColorRole.Text, QColor(paleta().TEXT_SECONDARY))
         estilo = opcion.widget.style() if opcion.widget is not None else self.parent().style()
         estilo.drawControl(QStyle.ControlElement.CE_ItemViewItem, opcion, painter, opcion.widget)
         if index.row() == 0:
             return
         caja = QRectF(estilo.subElementRect(QStyle.SubElement.SE_ItemViewItemCheckIndicator, opcion, opcion.widget))
         c = paleta()
-        habilitada = bool(index.data(ROL_SE_PUEDE_SUBIR))
+        habilitada = bool(index.data(Qt.ItemDataRole.UserRole))
         marcado = opcion.checkState == Qt.CheckState.Checked
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -679,6 +678,8 @@ class TrabajoAirVaultWorker(QThread):
 
     paso = Signal(str, int, int)
     subidas_actualizadas = Signal(object)
+    entrega_preparada = Signal(object)
+    preparacion_fallida = Signal(str)
     batch_encontrado = Signal(object)
     batch_indexado = Signal(object)
     batch_indexando = Signal(object, bool)
@@ -1030,20 +1031,43 @@ class TrabajoAirVaultWorker(QThread):
     # ── subir ──────────────────────────────────────────────────────
 
     def _subir(self) -> None:
-        from app.airvault.flujo import comprobar_entrega, preparar_partes
+        from app.airvault.flujo import carpeta_de_corrida, preparar_partes
         from app.airvault.mapping import FLOTA_CACHE_FILENAME, ResolutorFlota
+        from app.reports.preparar_entrega import preparar_entrega, ErrorPreparacionEntrega
 
         estado = self.estado
         raiz = Path(estado["raiz"])
         resolutor = ResolutorFlota.load(raiz / FLOTA_CACHE_FILENAME)
         ejecuciones = estado.pop("ejecuciones_subida", None) or [estado]
         trabajos = []
-        # Se prepara toda la seleccion antes de enviar. Cada ejecucion
-        # conserva su nombre, fecha y memoria de lo que ya se subio.
+        entregas = []
+        def comprobar_cancelacion():
+            if self.hay_que_parar():
+                raise TrabajoCancelado()
+
+        # Completa toda la seleccion en este hilo antes de conectar a
+        # AirVault. Una ejecucion que falla no deja subidas a medias.
         for ejecucion in ejecuciones:
             csv = Path(ejecucion["csv"])
+            try:
+                entrega, preparada = preparar_entrega(
+                    csv, raiz, avisar=self._avisar, resolutor=resolutor,
+                    comprobar_cancelacion=comprobar_cancelacion,
+                )
+            except Exception as exc:
+                logger.opt(exception=exc).error("No se pudo preparar la entrega de {}", csv.stem)
+                mensaje = (str(exc) if isinstance(exc, ErrorPreparacionEntrega) else
+                           mensaje_error(exc, "No se pudo preparar la entrega. Revise los PDF originales y vuelva a intentarlo."))
+                self.preparacion_fallida.emit(f"{carpeta_de_corrida(csv).name}: {mensaje}")
+                return
+            entregas.append(entrega)
+            if preparada:
+                self.entrega_preparada.emit(str(csv))
+        # Se prepara toda la seleccion antes de enviar. Cada ejecucion
+        # conserva su nombre, fecha y memoria de lo que ya se subio.
+        for ejecucion, entrega in zip(ejecuciones, entregas):
+            csv = Path(ejecucion["csv"])
             self._avisar(f"Leyendo la ejecución {csv.parent.parent.name}", 0, 0)
-            entrega = comprobar_entrega(csv)
             cuantas = sum(len(p.paginas) for p in entrega)
             archivos = ("1 archivo" if len(entrega) == 1
                         else f"{len(entrega)} archivos")
@@ -1740,6 +1764,7 @@ class AirVaultWindow(QDialog):
         self._websearch_proceso_activo = False
         self._deteniendo = False
         self._proceso_iniciado = False
+        self._preparacion_pendiente = False
         self._pausado = False
         self._cancelacion_solicitada = False
         self._controles_ocupados = False
@@ -3768,7 +3793,9 @@ class AirVaultWindow(QDialog):
         self._proceso_iniciado = True
         if continuar:
             self._anotar("Continuando el proceso desde lo guardado")
-            if self._continuacion_lector is not None:
+            if self._preparacion_pendiente:
+                self._subir_a_mano()
+            elif self._continuacion_lector is not None:
                 trabajos = self._continuacion_lector
                 self._continuacion_lector = None
                 self._iniciar_confirmacion(trabajos, automatico=False)
@@ -3925,22 +3952,23 @@ class AirVaultWindow(QDialog):
         self.historial.addItem(carpeta.name, str(csv))
         self.historial.setItemData(
             indice,
-            f"{carpeta.name}\n{cuenta} - {entrega}",
+            f"{carpeta.name}\n{cuenta} - {entrega}"
+            + (". Se preparará automáticamente al empezar." if not listo else ""),
             Qt.ItemDataRole.ToolTipRole,
         )
         self.historial.setItemData(indice, listo, ROL_SE_PUEDE_SUBIR)
         self.historial.setItemData(
             indice,
-            Qt.CheckState.Checked if listo and str(csv) in self._corridas_marcadas
+            Qt.CheckState.Checked if str(csv) in self._corridas_marcadas
             else Qt.CheckState.Unchecked,
             Qt.ItemDataRole.CheckStateRole,
         )
         if not listo:
             # Sale en la lista igualmente: quien la busca tiene que verla, y
-            # el gris es lo que dice que todavía le falta exportarla.
+            # el gris indica que su entrega se preparara antes de subirla.
             self.historial.setItemData(
                 indice,
-                QBrush(Qt.GlobalColor.gray),
+                QBrush(QColor(paleta().TEXT_SECONDARY)),
                 Qt.ItemDataRole.ForegroundRole,
             )
 
@@ -4020,7 +4048,7 @@ class AirVaultWindow(QDialog):
         )
         if varias:
             self.setWindowTitle(f"Indexar en AirVault - {len(elegidas)} ejecuciones")
-            self._listo_para_subir = all(estado_de_entrega(Path(csv))[1] for csv in elegidas)
+            self._listo_para_subir = all(Path(csv).is_file() for csv in elegidas)
             repartos = [reparto_de_revision(Path(csv)) for csv in elegidas]
             self._mostrar_reparto(
                 tuple(sum(r[i] for r in repartos) for i in range(2))
@@ -4039,7 +4067,7 @@ class AirVaultWindow(QDialog):
         clave = str(Path(texto)).casefold() if texto else ""
         with QSignalBlocker(combo):
             for indice in range(1, combo.count()):
-                if combo.itemData(indice, ROL_SE_PUEDE_SUBIR):
+                if combo.itemData(indice):
                     combo.setItemData(
                         indice,
                         Qt.CheckState.Checked if str(combo.itemData(indice)) in self._corridas_marcadas
@@ -4601,17 +4629,17 @@ class AirVaultWindow(QDialog):
         """Dice si la ejecución elegida se puede subir, antes de intentarlo."""
         entrega, listo = estado_de_entrega(csv)
         self._mostrar_reparto(reparto_de_revision(csv))
-        self._listo_para_subir = listo
+        self._listo_para_subir = csv.is_file()
         self._actualizar_botones_proceso()
         if listo:
             self.resumen.setText(TEXTO_SIN_SUBIR)
         elif entrega == "Sin exportar":
             self.resumen.setText(
-                "No tiene PDF de entrega. Expórtela antes de subirla."
+                "Se prepararán los PDF de entrega al empezar el proceso y después se subirán."
             )
         else:
             self.resumen.setText(
-                "Faltan datos de la entrega. Vuelva a exportarla antes de indexar."
+                "Se completará la entrega al empezar el proceso y después se subirá."
             )
 
     # ── la lista de batches ──────────────────────────────────────────
@@ -5323,20 +5351,6 @@ class AirVaultWindow(QDialog):
             return
         elegidas = self._corridas_seleccionadas()
         if len(elegidas) > 1:
-            from app.airvault.flujo import carpeta_de_corrida, comprobar_entrega
-
-            # La entrega puede haber cambiado desde que se abrio la lista.
-            # Se valida la seleccion entera antes de mandar ningun archivo.
-            try:
-                for csv in elegidas:
-                    comprobar_entrega(Path(csv))
-            except Exception as exc:  # noqa: BLE001 - se explica en la ventana
-                self.resumen.setText(
-                    f"{carpeta_de_corrida(csv).name}: "
-                    + mensaje_error(exc, "Vuelva a exportar la ejecución antes de subirla.")
-                )
-                self._anotar(self.resumen.text())
-                return
             self._cadena_manual = True
             self._subir(varias=True)
             return
@@ -5371,6 +5385,7 @@ class AirVaultWindow(QDialog):
                 for csv in self._corridas_seleccionadas()
             ]
         self._subidas_del_ciclo.clear()
+        self._preparacion_pendiente = True
         self._lanzar("subir", estado)
 
     def _comprobar(self) -> None:
@@ -5562,6 +5577,8 @@ class AirVaultWindow(QDialog):
         worker = TrabajoAirVaultWorker(modo, estado, self)
         worker.paso.connect(self._mostrar_paso)
         worker.subidas_actualizadas.connect(self._al_actualizar_subidas)
+        worker.entrega_preparada.connect(self._al_preparar_entrega)
+        worker.preparacion_fallida.connect(self._al_preparacion_fallida)
         worker.batch_encontrado.connect(self._al_batch_encontrado)
         worker.batch_indexado.connect(self._al_batch_indexado)
         worker.batch_indexando.connect(self._al_batch_indexando)
@@ -6025,10 +6042,25 @@ class AirVaultWindow(QDialog):
         # AirVault aun lo procese, pero nunca elimina esta primera comprobacion.
         self._comprobar_al_terminar = True
 
+    def _al_preparar_entrega(self, csv: str) -> None:
+        """Actualiza el historial sin perder las casillas elegidas."""
+        from app.airvault.flujo import carpeta_de_corrida
+
+        indice = self.historial.findData(csv)
+        if indice >= 0:
+            self.historial.setItemData(indice, True, ROL_SE_PUEDE_SUBIR)
+            self.historial.setItemData(indice, None, Qt.ItemDataRole.ForegroundRole)
+            entrega, _ = estado_de_entrega(Path(csv))
+            self.historial.setItemData(indice, f"{carpeta_de_corrida(csv).name}\n{entrega}",
+                                       Qt.ItemDataRole.ToolTipRole)
+        if csv == self._corrida:
+            self._sincronizar_entrega(Path(csv))
+
     def _al_actualizar_subidas(self, datos: dict) -> None:
         """Actualiza el estado interno antes de buscar los IDs."""
         from app.airvault.flujo import estado_local
 
+        self._preparacion_pendiente = False
         self._recibir_trabajos(datos["trabajos"])
         if self._alcance_proceso is not None:
             self._alcance_proceso.update(str(t.carpeta) for t in datos["trabajos"]
@@ -6358,7 +6390,10 @@ class AirVaultWindow(QDialog):
             )
         return "".join(partes)
 
-    def _al_fallar(self, mensaje: str) -> None:
+    def _al_preparacion_fallida(self, mensaje: str) -> None:
+        self._al_fallar(mensaje, preparacion=True)
+
+    def _al_fallar(self, mensaje: str, *, preparacion: bool = False) -> None:
         worker = self.hilo()
         if worker is not None and getattr(worker, "modo", "") == "buscar_websearch":
             mensaje = mensaje_error(mensaje, "No se pudo verificar la publicación en Web Search.")
@@ -6367,7 +6402,11 @@ class AirVaultWindow(QDialog):
             self._ajustar_confirmacion()
             self._pintar_avance()
             return
-        mensaje = mensaje_error(mensaje, "No se pudo continuar el indexado. Vuelva a revisar en AirVault.")
+        if preparacion:
+            self._detener_cadena()
+            self._proceso_iniciado = False
+        else:
+            mensaje = mensaje_error(mensaje, "No se pudo continuar el indexado. Vuelva a revisar en AirVault.")
         self._fin_pendiente = False
         self._resultado_fallido = True
         self._fin_confirmado = None
@@ -6388,7 +6427,7 @@ class AirVaultWindow(QDialog):
         # ejecución tiene que acabar indexada. Tras varios fallos seguidos
         # solo se pregunta más espaciado.
         self._fallos_seguidos += 1
-        if not self._cerrar_al_terminar:
+        if not self._cerrar_al_terminar and not preparacion:
             self._ajustar_vigilancia()
         sigue = bool(
             self.auto_check.isChecked()
@@ -6398,7 +6437,7 @@ class AirVaultWindow(QDialog):
         if sigue:
             mensaje += f" Se reintenta en {self._minutos_de_vigilancia()} min."
         self.resumen.setText(mensaje)
-        self.estado_label.setText("El indexado no pudo continuar")
+        self.estado_label.setText("No se pudo preparar la entrega" if preparacion else "El indexado no pudo continuar")
         # El detalle completo se puede consultar al pasar por la entrada del registro.
         self._anotar(f"Se detuvo: {primera_frase(mensaje)}", ayuda=mensaje)
         self._limpiar_progreso()
@@ -6676,6 +6715,7 @@ class AirVaultWindow(QDialog):
         self._cancelacion_solicitada = True
         self._pausado = False
         self._proceso_iniciado = False
+        self._preparacion_pendiente = False
         self._continuacion_lector = None
         self._detener_cadena()
         self._cola_de_acciones.clear()
