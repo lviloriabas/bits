@@ -290,6 +290,62 @@ def test_un_rechazo_de_lo_que_crea_el_batch_si_se_repite():
     assert len(s.http.pedidas) == 2
 
 
+@pytest.mark.parametrize("codigo", [502, 504])
+def test_lo_que_contesta_la_pasarela_tampoco_repite_lo_que_crea_el_batch(codigo):
+    """Un 502 o un 504 llegan con la peticion ya entregada al servidor."""
+    from app.airvault.session import RespuestaPerdida
+
+    s = sesion([
+        RespuestaFalsa(status_code=codigo, text="<html>Gateway</html>"),
+        RespuestaFalsa(),
+    ])
+    with pytest.raises(RespuestaPerdida):
+        s.post("/quickuploadex/Home/FinishUpload", json={},
+               repetir_sin_respuesta=False)
+    assert len(s.http.pedidas) == 1
+
+
+@pytest.mark.parametrize("codigo", [502, 504])
+def test_lo_repetible_si_insiste_ante_la_pasarela(codigo):
+    """Un trozo o una lectura se pueden mandar otra vez sin riesgo."""
+    s = sesion([
+        RespuestaFalsa(status_code=codigo, text="<html>Gateway</html>"),
+        RespuestaFalsa(json_data={"records": 3}),
+    ])
+    assert s.get("/index/Batch/GetBatches") == {"records": 3}
+    assert len(s.http.pedidas) == 2
+
+
+def test_un_503_de_lo_que_crea_el_batch_si_se_repite():
+    """Servidor no disponible: contesta el propio AirVault que no lo atendio."""
+    s = sesion([
+        RespuestaFalsa(status_code=503, text="<html>Service Unavailable</html>"),
+        RespuestaFalsa(),
+    ])
+    s.post("/quickuploadex/Home/FinishUpload", json={},
+           repetir_sin_respuesta=False)
+    assert len(s.http.pedidas) == 2
+
+
+def test_un_get_tambien_puede_pedir_que_no_se_repita():
+    """Completar el batch va por GET y tampoco se puede mandar dos veces."""
+    from app.airvault.session import RespuestaPerdida
+
+    s = sesion([requests.exceptions.ReadTimeout("nada"), RespuestaFalsa()])
+    tiempos = []
+    pedir = s.http.request
+
+    def request(metodo, url, **extra):
+        tiempos.append(extra.get("timeout"))
+        return pedir(metodo, url, **extra)
+
+    s.http.request = request
+    with pytest.raises(RespuestaPerdida):
+        s.get("/index/FormsProcessing/CompleteBatch", {},
+              repetir_sin_respuesta=False, tiempo_limite=300)
+    assert tiempos == [300.0]
+
+
 def test_una_peticion_larga_lleva_su_propio_tiempo_limite():
     s = sesion([RespuestaFalsa(), RespuestaFalsa()])
     tiempos = []

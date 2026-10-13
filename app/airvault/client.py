@@ -116,6 +116,41 @@ def codificar_texto(texto: str) -> str:
     return base64.b64encode(limpio.encode("utf-8")).decode("ascii")
 
 
+# Batches que se piden en cada pagina de la cola, y hasta cuantas paginas se
+# siguen. El tope existe para que una cuenta mal informada por el servidor no
+# deje el listado pidiendo paginas sin fin.
+FILAS_POR_PAGINA = 1000
+MAXIMO_DE_PAGINAS = 20
+
+# Cuanto se espera la respuesta de ``CompleteBatch``. Cierra el batch entero
+# y lo manda a Web Search, y con quinientas paginas puede pasar del minuto de
+# las demas peticiones.
+ESPERA_COMPLETAR_S = 300.0
+
+
+def _lotes_de(datos: Any) -> List["ResumenLote"]:
+    """Los batches que trae una pagina de ``GetBatches``."""
+    filas = datos.get("rows", datos) if isinstance(datos, Mapping) else datos
+    resultado: List[ResumenLote] = []
+    for fila in filas or []:
+        celda = fila.get("cell", fila) if isinstance(fila, Mapping) else fila
+        if isinstance(celda, Mapping):
+            resultado.append(ResumenLote.desde_fila(celda))
+        elif isinstance(celda, (list, tuple)):
+            resultado.append(ResumenLote.desde_celdas(celda))
+    return resultado
+
+
+def _total_de(datos: Any) -> int:
+    """Cuantos batches dice AirVault que hay en total; 0 si no lo dice."""
+    if not isinstance(datos, Mapping):
+        return 0
+    try:
+        return int(datos.get("records", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 class RespuestaInesperada(RuntimeError):
     """AirVault contesto algo con otra forma de la que se esperaba."""
 
@@ -267,23 +302,55 @@ class ClienteHttp:
         El filtro lo aplica el servidor como subcadena sin distinguir
         mayusculas, asi que mandarlo evita traerse la cola entera cuando
         solo interesan los batches de un dia.
+
+        La cola se pide por paginas. La primera es la peticion de siempre;
+        las siguientes solo salen cuando AirVault dice que tiene mas batches
+        de los que entrego. Con una sola pagina, una cola de mas de mil
+        batches escondia los que quedaban detras: una carga publicada salia
+        como «no encontrada» y la foto previa a una subida quedaba corta.
         """
-        datos = self.sesion.get(
-            "/index/Batch/GetBatches",
-            {"repoId": -1, "eventLabel": "",
-             "encodedFilter": codificar_texto(filtro),
-             "encodedKeywordFilter": "",
-             "_search": "false", "rows": 1000, "page": 1, "sidx": "",
-             "sord": "asc"},
-        )
-        filas = datos.get("rows", datos) if isinstance(datos, Mapping) else datos
-        resultado: List[ResumenLote] = []
-        for fila in filas or []:
-            celda = fila.get("cell", fila) if isinstance(fila, Mapping) else fila
-            if isinstance(celda, Mapping):
-                resultado.append(ResumenLote.desde_fila(celda))
-            elif isinstance(celda, (list, tuple)):
-                resultado.append(ResumenLote.desde_celdas(celda))
+        from app.airvault.session import SesionCancelada
+
+        consulta = {"repoId": -1, "eventLabel": "",
+                    "encodedFilter": codificar_texto(filtro),
+                    "encodedKeywordFilter": "",
+                    "_search": "false", "rows": FILAS_POR_PAGINA, "page": 1,
+                    "sidx": "", "sord": "asc"}
+        datos = self.sesion.get("/index/Batch/GetBatches", consulta)
+        resultado = _lotes_de(datos)
+        total = _total_de(datos)
+        vistos = {lote.batch_id for lote in resultado}
+        pagina = 1
+        while total > len(resultado) and pagina < MAXIMO_DE_PAGINAS:
+            pagina += 1
+            try:
+                datos = self.sesion.get(
+                    "/index/Batch/GetBatches", {**consulta, "page": pagina}
+                )
+            except SesionCancelada:
+                raise
+            except Exception as exc:  # noqa: BLE001 - queda lo ya leido
+                # Lo que habia antes de paginar: la primera pagina. No se
+                # pierde una revision entera por una pagina de mas.
+                logger.warning(
+                    "No se pudo leer la pagina {} de la cola de AirVault "
+                    "({} de {} batches leidos): {}",
+                    pagina, len(resultado), total, exc,
+                )
+                break
+            nuevos = [
+                lote for lote in _lotes_de(datos)
+                if lote.batch_id not in vistos
+            ]
+            if not nuevos:
+                break
+            vistos.update(lote.batch_id for lote in nuevos)
+            resultado.extend(nuevos)
+        if total > len(resultado):
+            logger.warning(
+                "La cola de AirVault tiene {} batches y solo se leyeron {}",
+                total, len(resultado),
+            )
         return resultado
 
     def abrir_lote(self, batch_id: str) -> Mapping[str, Any]:
@@ -416,11 +483,18 @@ class ClienteHttp:
         Es el boton «Complete» de la pantalla. AirVault solo lo acepta con
         el batch entero en verde; por eso quien lo llama mira antes las
         paginas y no lo intenta a ciegas.
+
+        No se repite si la respuesta se pierde: el batch completado sale de
+        la cola, y pedirlo otra vez contestaba un error que dejaba el cierre
+        sin anotar con el batch ya en Web Search. Quien llama recibe
+        :class:`app.airvault.session.RespuestaPerdida` y mira la cola.
         """
         respuesta = self.sesion.get(
             "/index/FormsProcessing/CompleteBatch",
             {"repoId": self.config.repo_id,
              "encodedBatchId": codificar_batch_id(batch_id)},
+            repetir_sin_respuesta=False,
+            tiempo_limite=ESPERA_COMPLETAR_S,
         )
         if not isinstance(respuesta, Mapping) or "IsError" not in respuesta:
             raise RespuestaInesperada(

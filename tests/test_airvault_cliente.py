@@ -127,6 +127,80 @@ def test_busqueda_paralela_repite_en_la_sesion_principal_lo_que_el_carril_no_pud
     assert len(principales) == 2
 
 
+class ColaPaginada:
+    """Una cola de AirVault que entrega sus batches de mil en mil."""
+
+    def __init__(self, total, por_pagina=1000, declarados=None, falla_en=None):
+        self.total = total
+        self.por_pagina = por_pagina
+        self.declarados = total if declarados is None else declarados
+        self.falla_en = falla_en
+        self.paginas: list[int] = []
+
+    def get(self, _ruta, params):
+        pagina = int(params["page"])
+        self.paginas.append(pagina)
+        if pagina == self.falla_en:
+            raise RuntimeError("500")
+        inicio = (pagina - 1) * self.por_pagina
+        filas = [
+            {"batchid": f"003B{numero:05d}", "userbatchname": f"Batch {numero}",
+             "imagecount": 1, "appid": 3209}
+            for numero in range(inicio, min(self.total, inicio + self.por_pagina))
+        ]
+        return {"records": self.declarados, "rows": filas}
+
+
+def test_la_cola_se_lee_entera_aunque_pase_de_mil_batches():
+    """Con una sola pagina, el batch 1001 no existia para el programa."""
+    cola = ColaPaginada(2500)
+    lotes = ClienteHttp(cola, AirVaultConfig()).listar_lotes()
+
+    assert len(lotes) == 2500
+    assert lotes[-1].batch_id == "003B02499"
+    assert cola.paginas == [1, 2, 3]
+
+
+def test_una_cola_corta_sigue_siendo_una_sola_peticion():
+    cola = ColaPaginada(40)
+    assert len(ClienteHttp(cola, AirVaultConfig()).listar_lotes()) == 40
+    assert cola.paginas == [1]
+
+
+def test_una_respuesta_sin_total_no_pide_mas_paginas():
+    """La forma antigua, una lista sin ``records``, se lee como siempre."""
+    cli = cliente([["3209", "", "", "MXDocs", "003A", 3, "Batch"]])
+    assert [lote.batch_id for lote in cli.listar_lotes()] == ["003A"]
+    assert len(cli.sesion.gets) == 1
+
+
+def test_si_falla_una_pagina_de_mas_queda_lo_ya_leido():
+    """Lo que habia antes de paginar: la revision no se pierde por eso."""
+    cola = ColaPaginada(2500, falla_en=2)
+    assert len(ClienteHttp(cola, AirVaultConfig()).listar_lotes()) == 1000
+    assert cola.paginas == [1, 2]
+
+
+def test_un_total_mal_informado_no_deja_el_listado_pidiendo_sin_fin():
+    """El servidor dice que hay mas de los que entrega: se para al no ver nuevos."""
+    cola = ColaPaginada(1000, declarados=5000)
+    assert len(ClienteHttp(cola, AirVaultConfig()).listar_lotes()) == 1000
+    assert cola.paginas == [1, 2]
+
+
+def test_la_cancelacion_sale_tambien_de_una_pagina_de_mas():
+    from app.airvault.session import SesionCancelada
+
+    class ColaCancelada(ColaPaginada):
+        def get(self, ruta, params):
+            if int(params["page"]) == 2:
+                raise SesionCancelada("se cancelo")
+            return super().get(ruta, params)
+
+    with pytest.raises(SesionCancelada):
+        ClienteHttp(ColaCancelada(2500), AirVaultConfig()).listar_lotes()
+
+
 def test_guardar_una_pagina_va_por_post():
     """Por GET la ruta ni existe y el 404 se leía como página borrada."""
     cli = cliente({"ok": True})
@@ -193,6 +267,21 @@ def test_completar_exige_una_confirmacion_explicita_de_airvault():
 
     with pytest.raises(RespuestaInesperada, match="no confirmo"):
         cli.completar_lote("003SUS")
+
+
+def test_completar_no_se_repite_a_ciegas_y_lleva_su_propio_plazo():
+    """Repetirlo con el batch ya cerrado contesta un error que tapa el cierre."""
+    opciones = []
+
+    class Sesion(SesionFalsa):
+        def get(self, ruta, params=None, **extra):
+            opciones.append(extra)
+            return super().get(ruta, params)
+
+    ClienteHttp(Sesion({"IsError": False}), AirVaultConfig()).completar_lote("003SUS")
+
+    assert opciones[0]["repetir_sin_respuesta"] is False
+    assert opciones[0]["tiempo_limite"] > AirVaultConfig().timeout_s
 
 
 def test_completar_acepta_iserror_false():

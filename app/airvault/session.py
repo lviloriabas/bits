@@ -122,6 +122,12 @@ CONSULTA_DE_PRUEBA = {
 
 ESTADOS_TRANSITORIOS = frozenset({408, 429, 500, 502, 503, 504})
 
+# Los dos que no contesta AirVault sino lo que haya delante de el: la pasarela
+# dejo de esperar (504) o perdio la respuesta (502). La peticion si llego al
+# servidor, asi que para lo que no se puede mandar dos veces valen lo mismo
+# que un tiempo agotado: pudo haberse atendido.
+ESTADOS_DE_RESPUESTA_PERDIDA = frozenset({502, 504})
+
 # Lo que puede salir de probar unas cookies contra el servidor.
 SIRVEN = "sirven"
 CADUCADAS = "caducadas"
@@ -783,8 +789,10 @@ class SesionAirVault:
         y la respuesta no llego, se levanta :class:`RespuestaPerdida` en vez
         de repetirla, y quien llama comprueba en la cola si se hizo. Un
         rechazo del servidor (un 500) si se repite: ese si dice que no se
-        hizo. ``tiempo_limite`` sustituye al de la configuracion para una
-        peticion que se sabe larga.
+        hizo. Un 502 o un 504 no: los contesta la pasarela, con la peticion
+        ya entregada al servidor, y cuentan como respuesta perdida.
+        ``tiempo_limite`` sustituye al de la configuracion para una peticion
+        que se sabe larga.
         """
         if not self._autenticada:
             raise ErrorDeSesion("La sesion no esta autenticada")
@@ -869,6 +877,15 @@ class SesionAirVault:
                     raise ErrorDeAirVault(
                         f"AirVault rechazo {ruta}: {motivo}."
                     )
+                if (
+                    not repetir_sin_respuesta
+                    and respuesta.status_code in ESTADOS_DE_RESPUESTA_PERDIDA
+                ):
+                    raise RespuestaPerdida(
+                        f"La pasarela de AirVault contesto "
+                        f"{respuesta.status_code} a {ruta}; el servidor pudo "
+                        "haberla atendido."
+                    )
                 ultimo = (
                     f"el servidor respondio {respuesta.status_code} "
                     f"({_describir_cuerpo(respuesta)})"
@@ -892,9 +909,13 @@ class SesionAirVault:
         )
 
     def get(self, ruta: str, params: Dict[str, object] | None = None,
-            json_esperado: bool = True):
-        """GET con reintentos. Devuelve el JSON o el texto de la respuesta."""
-        respuesta = self._pedir("GET", ruta, params=params)
+            json_esperado: bool = True, **extra):
+        """GET con reintentos. Devuelve el JSON o el texto de la respuesta.
+
+        ``extra`` lleva ``repetir_sin_respuesta`` y ``tiempo_limite`` a
+        :meth:`_pedir`, para el GET que no se puede mandar dos veces.
+        """
+        respuesta = self._pedir("GET", ruta, params=params, **extra)
         self._comprobar_respuesta(respuesta, ruta)
         if not json_esperado:
             return respuesta.text
