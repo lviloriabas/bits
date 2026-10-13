@@ -3360,10 +3360,11 @@ class AirVaultWindow(QDialog):
                     self._reenvios_automaticos -= {str(t.carpeta) for t in ausentes}
                 self._encolar(
                     "recuperar_ausentes", ausentes,
-                    "Chequeo terminado: 1 batch no está en Web Search; se vuelve a subir"
+                    "Chequeo terminado: 1 batch no está en Web Search; se vuelve a subir "
+                    "si tampoco está en la cola de AirVault"
                     if len(ausentes) == 1 else
                     f"Chequeo terminado: {len(ausentes)} batches no están en Web Search; "
-                    "se vuelven a subir uno por uno",
+                    "se vuelven a subir uno por uno los que tampoco estén en la cola de AirVault",
                 )
             if self._revision_airvault_pendiente and not self._deteniendo:
                 self._revision_airvault_pendiente = False
@@ -3487,7 +3488,10 @@ class AirVaultWindow(QDialog):
             # entero, que es lo que hace la recuperación antes de subir.
             quedo = f"incompleto en Web Search, {encontradas}; se revisa entero antes de volver a subir"
         elif manifiesto.websearch_resultado == "ausente":
-            quedo = f"no está publicado, {encontradas}; queda pendiente de subir"
+            quedo = (f"no está publicado, {encontradas}; queda pendiente de subir "
+                     "si tampoco está en la cola de AirVault")
+        elif manifiesto.websearch_resultado == "en_cola":
+            quedo = f"sigue en la cola de AirVault sin completar, {encontradas}; no se vuelve a subir"
         else:
             quedo = "sin verificar. " + (manifiesto.websearch_detalle or "No se pudo leer en Web Search.")
         self._fila_websearch(carpeta, f"{nombre}: {quedo}", False)

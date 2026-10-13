@@ -52,6 +52,69 @@ def copiar_confirmacion(origen: Manifiesto, destino: Manifiesto) -> None:
                 destino.etapas.pop(nombre, None)
 
 
+def _visto_en_la_cola_despues(manifiesto) -> bool:
+    """Si la cola de Web Index mostro el batch despues de la ausencia.
+
+    Web Search solo tiene lo completado. Un batch que sigue en la cola de Web
+    Index, esperando a que se indexe o a que alguien lo revise, no aparece
+    alli, y eso no es que falte: darlo por ausente lo pintaba como «No
+    encontrado» y lo ponia en turno para volver a subirlo con el ID, el
+    nombre y las paginas correctos delante. Encontrarlo en la cola despues
+    del chequeo manda sobre esa respuesta.
+    """
+    from app.airvault.model import EstadoEtapa
+
+    hallazgo = manifiesto.etapas.get("descubrir")
+    return bool(
+        manifiesto.batch_id
+        and hallazgo is not None
+        and hallazgo.estado is EstadoEtapa.HECHA
+        and hallazgo.actualizada
+        and hallazgo.actualizada > manifiesto.websearch_revision
+    )
+
+
+# Cuanto vale haber visto el batch en la cola de Web Index para no darlo por
+# ausente. Es el mismo rato que vale la respuesta de Web Search: pasado ese
+# tiempo alguien pudo completarlo o borrarlo a mano, y hay que volver a mirar.
+VIGENCIA_DE_LA_COLA_S = 3600.0
+
+
+def _visto_en_la_cola_hace_poco(manifiesto, momento: str) -> bool:
+    """Si la cola mostro el batch poco antes de que Web Search contestara.
+
+    Es lo que decide en el momento del chequeo, cuando la cola todavia no se
+    ha vuelto a leer. Un batch que estaba ahi hace un rato y que el programa
+    no ha completado sigue ahi, o lo acaba de completar una persona y Web
+    Search aun no lo enseña: en ninguno de los dos casos falta. El que el
+    programa si completo ya salio de la cola, y para ese la respuesta de Web
+    Search es la que vale.
+    """
+    from datetime import datetime
+
+    from app.airvault.model import EstadoEtapa
+
+    hallazgo = manifiesto.etapas.get("descubrir")
+    cierre = manifiesto.etapas.get("completar")
+    if (
+        not manifiesto.batch_id
+        or hallazgo is None
+        or hallazgo.estado is not EstadoEtapa.HECHA
+        or not hallazgo.actualizada
+        or (cierre is not None
+            and cierre.estado in (EstadoEtapa.HECHA, EstadoEtapa.EN_CURSO))
+    ):
+        return False
+    try:
+        transcurrido = (
+            datetime.fromisoformat(momento)
+            - datetime.fromisoformat(hallazgo.actualizada)
+        ).total_seconds()
+    except (TypeError, ValueError):
+        return False
+    return 0 <= transcurrido <= VIGENCIA_DE_LA_COLA_S
+
+
 def _aplicar_cierre_por_muestra(manifiesto):
     """Mantiene el cierre local ligado a la muestra y al contenido comprobado."""
     from app.airvault.confirmacion import METODOS_MUESTRA
@@ -65,6 +128,8 @@ def _aplicar_cierre_por_muestra(manifiesto):
         nuevas = [manifiesto.etapas.get(nombre) for nombre in ("subir", "completar")]
         if any(etapa and etapa.actualizada and etapa.actualizada > manifiesto.websearch_revision for etapa in nuevas):
             manifiesto.websearch_resultado = ""
+        elif _visto_en_la_cola_despues(manifiesto):
+            manifiesto.websearch_resultado = "en_cola"
         return
     if manifiesto.websearch_metodo not in METODOS_MUESTRA:
         return
@@ -124,6 +189,10 @@ def cargar(carpeta_job: Path | str) -> Manifiesto:
     manifiesto = Manifiesto.model_validate(datos)
     if manifiesto.version != 1:
         raise ValueError(f"Manifiesto version {manifiesto.version}, esperada 1")
+    if manifiesto.websearch_resultado == "ausente" and _visto_en_la_cola_despues(manifiesto):
+        # Lo guardo una version que no le daba la razon a la cola: sin esto
+        # seguiria en «No encontrado» hasta el siguiente guardado.
+        manifiesto.websearch_resultado = "en_cola"
     return manifiesto
 
 
@@ -189,8 +258,14 @@ def guardar_confirmacion(datos: dict, carpeta_job: Path | str) -> Manifiesto:
             actualizada = etapa.actualizada if etapa else ""
             if clave in datos and actualizada != datos[clave]:
                 raise ValueError("El batch avanzó durante el chequeo. Se verificará de nuevo.")
+    en_cola = datos.get("websearch_resultado") == "ausente" and _visto_en_la_cola_hace_poco(
+        manifiesto, datos["websearch_revision"]
+    )
     for campo in _CAMPOS_CONFIRMACION:
         setattr(manifiesto, campo, datos.get(campo, "") if campo == "websearch_resultado" else datos[campo])
+    if en_cola:
+        # No esta en Web Search porque no se ha completado, no porque falte.
+        manifiesto.websearch_resultado = "en_cola"
     if manifiesto.websearch_resultado == "ausente":
         for nombre in ("completar", "verificar"):
             manifiesto.etapas.pop(nombre, None)

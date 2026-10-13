@@ -3635,6 +3635,13 @@ def _esperar_cargas_en_vuelo(
         and not parte.trabajo.manifiesto.batch_id
         and _subida_rastreable(parte.trabajo)
         and not getattr(parte.trabajo.manifiesto, "no_encontrado_desde", "")
+        # Un batch que la cola ya tiene entero no esta en vuelo, aunque
+        # falte decidir cual de sus copias es: no se junta con otra carga.
+        and not (
+            parte.lote is not None
+            and parte.lote.paginas
+            in parte.trabajo.manifiesto.cantidades_paginas_compatibles()
+        )
     ]
     ocupados = {
         str(trabajo.manifiesto.batch_id).strip().upper()
@@ -3722,6 +3729,32 @@ def ya_esta_en_airvault(trabajo: "Trabajo", cliente):
         if lote.batch_id not in trabajo.manifiesto.batches_descartados
         and not lote.nombre.startswith("NO INDEXAR - CARGA MEZCLADA ")
     ]
+    conocido = str(manifiesto.batch_id or "").strip().upper()
+    suyo = next(
+        (
+            lote for lote in lotes
+            if conocido
+            and lote.batch_id.strip().upper() == conocido
+            and (not lote.repo_id or lote.repo_id == manifiesto.repo_id)
+            and lote.paginas in manifiesto.cantidades_paginas_compatibles()
+        ),
+        None,
+    )
+    if suyo is not None:
+        # El ID que el trabajo ya tenia sigue en la cola con sus paginas.
+        # Buscarlo solo por titulo lo perdia entre dos copias con el mismo
+        # nombre, y con el titulo cambiado a mano la orden lo subia otra vez.
+        if _nombre_visible_compatible(
+            suyo.nombre, manifiesto.nombre_batch
+        ) or _es_nombre_provisional(suyo.nombre, manifiesto.nombre_batch):
+            return suyo
+        raise LoteAmbiguo(
+            f"AirVault tiene el batch {suyo.batch_id} de esta carga con otro "
+            f"título («{suyo.nombre}»). No se subió otra vez para no dejar "
+            "la misma bitácora publicada por duplicado. Vuelva a revisar en "
+            "AirVault: el programa contrasta su contenido y le devuelve su "
+            "título."
+        )
     try:
         return buscar_lote(
             lotes,
@@ -4609,13 +4642,28 @@ def _registros_de_huella(
     return [disponibles[indice] for indice in sorted(indices)]
 
 
+def _contenido_ajeno(coincidencias: int, discrepancias: int) -> bool:
+    """Si los Log Page Number leidos prueban que el batch es de otra carga.
+
+    Una pagina con otro numero no lo prueba. AirVault lee por su cuenta la
+    letra de mano y quien revisa en Web Index corrige lo que ve: en un batch
+    de 227 bitacoras basto que una pagina dijera 2324732 donde el manifiesto
+    tenia 2334732 para descartarlo entero, borrarle el ID y dejarlo como no
+    encontrado con el nombre y las paginas correctos. Un batch de otra carga
+    no coincide en ninguna; el propio coincide en casi todas, y la pagina
+    suelta la contrasta despues la planificacion antes de escribir.
+    """
+    return discrepancias > coincidencias
+
+
 def _coincide_huella_ocr(
     trabajo: "Trabajo", cliente, lote: ResumenLote
 ) -> tuple[bool, int, bool]:
     """Contrasta el OCR remoto con logs locales repartidos por el batch.
 
     Los valores vacios no cuentan en contra: AirVault a veces no coloca el
-    resultado del OCR. Un valor presente y distinto si descarta al candidato.
+    resultado del OCR. Los presentes y distintos descartan al candidato
+    cuando son mas que los que coinciden (ver :func:`_contenido_ajeno`).
     Se exigen varias coincidencias cuando el batch las permite, de modo que un
     solo log repetido en otra carga no autorice un renombrado.
     """
@@ -4626,11 +4674,12 @@ def _coincide_huella_ocr(
         return False, 0, False
     abierto = False
     coincidencias = 0
+    discrepancias = 0
     apoyos = 0
     try:
         cliente.abrir_lote(lote.batch_id)
         abierto = True
-        for pagina, registro in muestras:
+        for leidas, (pagina, registro) in enumerate(muestras, start=1):
             remota = cliente.leer_pagina(lote.batch_id, pagina)
             log_remoto = normalizar_log_number(
                 remota.valores.get(CAMPO_LOG_NUMBER, "")
@@ -4638,7 +4687,12 @@ def _coincide_huella_ocr(
             if not log_remoto:
                 continue
             if log_remoto != normalizar_log_number(registro.log_number):
-                return False, 0, True
+                discrepancias += 1
+                if discrepancias > coincidencias + len(muestras) - leidas:
+                    # Ni coincidiendo todas las que faltan dejaria de ser
+                    # de otra carga: no hace falta leerlas.
+                    return False, 0, True
+                continue
             coincidencias += 1
             matricula_remota = normalizar_matricula(
                 remota.valores.get(CAMPO_MATRICULA, "")
@@ -4671,6 +4725,8 @@ def _coincide_huella_ocr(
                     lote.batch_id,
                     exc,
                 )
+    if _contenido_ajeno(coincidencias, discrepancias):
+        return False, 0, True
     minimo = min(3, len(muestras))
     suficiente = coincidencias >= minimo or (
         coincidencias >= 1 and apoyos >= 2
@@ -4737,43 +4793,76 @@ def _contradice_sin_abrir(trabajo: "Trabajo", cliente, lote: ResumenLote) -> boo
     vacio no cuenta en contra (AirVault no siempre coloca el OCR), y una
     pagina que no se puede leer tampoco: la planificacion la volvera a
     contrastar antes de escribir.
+
+    Una pagina con otro numero tampoco decide sola (ver
+    :func:`_contenido_ajeno`). Con tres paginas una distinta ya puede
+    inclinar la cuenta, asi que antes de darlo por ajeno se leen las demas de
+    la muestra amplia, tambien sin tomarlo.
     """
     from app.airvault.indexer import FALLOS_DE_CAMINO
 
     manifiesto = trabajo.manifiesto
     esperado = normalizar_nombre(manifiesto.nombre_batch)
-    muestras = dict(_registros_de_huella(manifiesto, maximo=3))
-    for pagina in sorted({1, *muestras}):
-        try:
-            remota = cliente.leer_pagina(lote.batch_id, pagina)
-        except FALLOS_DE_CAMINO:
-            raise
-        except Exception as exc:  # noqa: BLE001 - no decide nada
-            logger.debug(
-                "No se pudo leer la pagina {} de {} al confirmarlo: {}",
-                pagina, lote.batch_id, exc,
+    coincidencias = 0
+    discrepancias = 0
+    leidas: set[int] = set()
+    for maximo in (3, 7):
+        muestras = dict(_registros_de_huella(manifiesto, maximo=maximo))
+        for pagina in sorted({1, *muestras} - leidas):
+            leidas.add(pagina)
+            try:
+                remota = cliente.leer_pagina(lote.batch_id, pagina)
+            except FALLOS_DE_CAMINO:
+                raise
+            except Exception as exc:  # noqa: BLE001 - no decide nada
+                logger.debug(
+                    "No se pudo leer la pagina {} de {} al confirmarlo: {}",
+                    pagina, lote.batch_id, exc,
+                )
+                continue
+            if pagina == 1:
+                interno = normalizar_nombre(
+                    remota.valores.get(CAMPO_BATCH_NAME)
+                    or remota.columnas.get("Batch Name")
+                    or remota.columnas.get("C_BatchName")
+                    or ""
+                )
+                if interno and interno != esperado:
+                    return True
+            registro = muestras.get(pagina)
+            if registro is None:
+                continue
+            log_remoto = normalizar_log_number(
+                remota.valores.get(CAMPO_LOG_NUMBER, "")
             )
-            continue
-        if pagina == 1:
-            interno = normalizar_nombre(
-                remota.valores.get(CAMPO_BATCH_NAME)
-                or remota.columnas.get("Batch Name")
-                or remota.columnas.get("C_BatchName")
-                or ""
-            )
-            if interno and interno != esperado:
-                return True
-        registro = muestras.get(pagina)
-        if registro is None:
-            continue
-        log_remoto = normalizar_log_number(
-            remota.valores.get(CAMPO_LOG_NUMBER, "")
-        )
-        if log_remoto and log_remoto != normalizar_log_number(
-            registro.log_number
-        ):
-            return True
-    return False
+            if not log_remoto:
+                continue
+            if log_remoto == normalizar_log_number(registro.log_number):
+                coincidencias += 1
+            else:
+                discrepancias += 1
+        if not _contenido_ajeno(coincidencias, discrepancias):
+            return False
+    return True
+
+
+def _id_conocido(trabajo: "Trabajo") -> str:
+    """El ID que este trabajo tiene o tuvo en AirVault, en mayusculas.
+
+    El manifiesto lo pierde cuando una revision no lo confirma, y sin ese
+    recuerdo el batch de siempre quedaba al nivel de un desconocido: un
+    titulo cambiado a mano lo escondia y una segunda copia con el mismo
+    titulo impedia elegirlo. No autoriza nada por si solo; decide entre
+    candidatos que ya pasaron el contraste de paginas y contenido.
+    """
+    actual = str(trabajo.manifiesto.batch_id or "").strip().upper()
+    if actual:
+        return actual
+    recordado = getattr(trabajo, "_id_conocido", None)
+    if recordado is None:
+        recordado = str(id_recordado(trabajo) or "").strip().upper()
+        trabajo._id_conocido = recordado
+    return recordado
 
 
 def _lote_por_identidad_y_contenido(
@@ -4788,12 +4877,14 @@ def _lote_por_identidad_y_contenido(
 
     Se aplica también cuando el título visible ya parece correcto. Un nombre
     nunca autoriza por sí solo un batch con páginas distintas ni prevalece
-    sobre un Log Page Number que contradice el manifiesto. Si AirVault no
-    publicó ningún OCR, el nombre completo o el Batch Name interno sirven de
-    respaldo junto con la cantidad exacta de páginas.
+    sobre un contenido que contradice el manifiesto. Si AirVault no publicó
+    ningún OCR, el nombre completo o el Batch Name interno sirven de respaldo
+    junto con la cantidad exacta de páginas.
 
     El batch que este trabajo ya identificó en una revisión anterior no se
-    vuelve a abrir (ver :func:`_ya_confirmado`).
+    vuelve a abrir (ver :func:`_ya_confirmado`). Si dos candidatos quedan
+    igual de probados, que son dos copias de la misma carga, se sigue con el
+    que el trabajo ya tenía (ver :func:`_id_conocido`).
     """
     manifiesto = trabajo.manifiesto
     compatibles = manifiesto.cantidades_paginas_compatibles()
@@ -4822,9 +4913,15 @@ def _lote_por_identidad_y_contenido(
             lote.nombre, manifiesto.nombre_batch
         )
         # Un batch con otro título solo puede ser el nuestro si apareció
-        # después de esta subida. Así no se inspeccionan ni renombran cargas
-        # antiguas ajenas que casualmente tengan la misma cantidad.
-        if not nombre_visible and clave not in ids_nuevos:
+        # después de esta subida, o si es el ID que el trabajo ya tenía y
+        # alguien le cambió el título en Web Index. Así no se inspeccionan
+        # ni renombran cargas antiguas ajenas que casualmente tengan la
+        # misma cantidad.
+        if (
+            not nombre_visible
+            and clave not in ids_nuevos
+            and clave != _id_conocido(trabajo)
+        ):
             continue
         if clave not in cache:
             cache[clave] = _nombre_embebido_empty_batch(cliente, lote)
@@ -4870,7 +4967,15 @@ def _lote_por_identidad_y_contenido(
         return None
     candidatos.sort(key=lambda elemento: elemento[0], reverse=True)
     if len(candidatos) > 1 and candidatos[0][0] == candidatos[1][0]:
-        return None
+        conocido = _id_conocido(trabajo)
+        suyos = [
+            candidato for candidato in candidatos
+            if candidato[0] == candidatos[0][0]
+            and candidato[1].batch_id.strip().upper() == conocido
+        ]
+        if not suyos:
+            return None
+        candidatos = suyos
     _puntaje, lote, _motivo = candidatos[0]
     if avisar is not None:
         if normalizar_nombre(lote.nombre) == "empty batch":
@@ -4921,6 +5026,10 @@ def _ubicar(
     )
     if lote is None:
         if manifiesto.batch_id:
+            # Deja de darse por suyo, pero no se olvida cual era: la
+            # busqueda en la cola entera, que viene despues, lo reconoce
+            # aunque esta consulta por titulo no lo haya traido.
+            trabajo._id_conocido = str(manifiesto.batch_id).strip().upper()
             manifiesto.batch_id = None
             manifiesto.etapas["descubrir"] = Etapa()
             trabajo.guardar()
@@ -5094,27 +5203,51 @@ def _puede_ser_mezcla(
     return lote.paginas in mezclas
 
 
-def _candidatos_con_contenido_contradictorio(
-    trabajo: "Trabajo", cliente, lotes: Sequence[ResumenLote]
+def _con_su_titulo_y_sus_paginas(
+    trabajo: "Trabajo", lotes: Sequence[ResumenLote]
 ) -> List[ResumenLote]:
-    """Batches con nombre y páginas correctos, pero Log Page Number ajenos."""
+    """Batches de la cola que llevan el titulo y las paginas de esta carga."""
     manifiesto = trabajo.manifiesto
     compatibles = manifiesto.cantidades_paginas_compatibles()
-    encontrados: List[ResumenLote] = []
-    for lote in lotes:
-        if (
-            (lote.repo_id and lote.repo_id != manifiesto.repo_id)
-            or lote.paginas not in compatibles
-            or not _nombre_visible_compatible(
-                lote.nombre, manifiesto.nombre_batch
-            )
-        ):
+    descartados = {
+        str(valor).strip().upper() for valor in manifiesto.batches_descartados
+    }
+    return [
+        lote
+        for lote in lotes
+        if (not lote.repo_id or lote.repo_id == manifiesto.repo_id)
+        and lote.paginas in compatibles
+        and lote.batch_id.strip().upper() not in descartados
+        and _nombre_visible_compatible(lote.nombre, manifiesto.nombre_batch)
+    ]
+
+
+def _candidatos_con_contenido_contradictorio(
+    trabajo: "Trabajo",
+    cliente,
+    lotes: Sequence[ResumenLote],
+    cache: Optional[dict[str, str]] = None,
+) -> List[tuple[ResumenLote, str]]:
+    """Batches con nombre y páginas correctos, pero contenido de otra carga.
+
+    Cada uno va con lo que lo delata: un Batch Name interno que no es el de
+    este trabajo (el que ya se leyó en ``cache``) o Log Page Number ajenos.
+    """
+    esperado = normalizar_nombre(trabajo.manifiesto.nombre_batch)
+    encontrados: List[tuple[ResumenLote, str]] = []
+    for lote in _con_su_titulo_y_sus_paginas(trabajo, lotes):
+        interno = normalizar_nombre(
+            (cache or {}).get(lote.batch_id.strip().upper(), "")
+        )
+        if interno:
+            if interno != esperado:
+                encontrados.append((lote, "tiene el Batch Name de otra carga"))
             continue
         _coincide, _puntaje, contradice = _coincide_huella_ocr(
             trabajo, cliente, lote
         )
         if contradice:
-            encontrados.append(lote)
+            encontrados.append((lote, "tiene otro Log Page Number"))
     return encontrados
 
 
@@ -5161,7 +5294,7 @@ def _reconciliar_batches(
         and _pendiente_de_busqueda(trabajo)
         and trabajo.manifiesto.lotes_previos
         and trabajo.manifiesto.etapa_hecha("subir")
-        and not trabajo.manifiesto.etapa_hecha("completar")
+        and not trabajo.manifiesto.cierre_hecho()
     ]
     renombrados = 0
     nombres_embebidos = cache if cache is not None else {}
@@ -5243,7 +5376,7 @@ def _revisar_ids_asignados(
     for trabajo in trabajos:
         manifiesto = trabajo.manifiesto
         anterior = str(manifiesto.batch_id or "").strip()
-        if not anterior or manifiesto.etapa_hecha("completar"):
+        if not anterior or manifiesto.cierre_hecho():
             continue
         remoto_anterior = por_id.get(anterior.upper())
         nombre_incorrecto = bool(
@@ -5597,12 +5730,12 @@ def _estado_de(
                 candidato,
             )
         contradictorios = _candidatos_con_contenido_contradictorio(
-            trabajo, cliente, lotes
+            trabajo, cliente, lotes, cache
         )
         if contradictorios:
             detalle = "; ".join(
-                f"{candidato.batch_id} tiene otro Log Page Number"
-                for candidato in contradictorios[:3]
+                f"{candidato.batch_id} {motivo}"
+                for candidato, motivo in contradictorios[:3]
             )
             return EstadoParte(
                 trabajo,
@@ -5611,6 +5744,26 @@ def _estado_de(
                 f"corresponde ({detalle}). No se renombra, indexa ni vuelve "
                 "a subir por su cuenta; si esta carga no está, mándela otra "
                 "vez desde la tabla",
+            )
+        presentes = _con_su_titulo_y_sus_paginas(trabajo, lotes)
+        if presentes:
+            # La cola la tiene, con su titulo y sus paginas: lo que falta es
+            # saber cual es, no volver a subirla. Antes este caso seguia de
+            # largo y acababa como «No encontrado».
+            if manifiesto.no_encontrado_desde:
+                manifiesto.no_encontrado_desde = ""
+                trabajo.guardar()
+            ids = ", ".join(candidato.batch_id for candidato in presentes[:4])
+            return EstadoParte(
+                trabajo,
+                PROCESANDO,
+                f"batch {ids} encontrado con su título y sus páginas; "
+                "falta confirmar su contenido"
+                if len(presentes) == 1 else
+                f"hay {len(presentes)} batches con este título y estas "
+                f"páginas ({ids}); no se elige ninguno ni se vuelve a subir. "
+                "Deje uno solo en Web Index y vuelva a revisar",
+                presentes[0],
             )
         if _hay_candidato_provisional(trabajo, cliente, lotes, cache):
             return EstadoParte(
@@ -5700,9 +5853,15 @@ def _estado_de(
 
 
 def _pendiente_de_busqueda(trabajo: "Trabajo") -> bool:
-    """Si la fila local aun necesita localizar algo en AirVault."""
+    """Si la fila local aun necesita localizar algo en AirVault.
+
+    El cierre omitido no la saca de la busqueda: ese batch sigue en la cola
+    de Web Index. Darlo por cerrado lo dejaba sin consultar, y a
+    continuacion se le borraba el ID por no aparecer en una lista en la que
+    nadie lo habia buscado.
+    """
     manifiesto = trabajo.manifiesto
-    if manifiesto.cancelado or manifiesto.etapa_hecha("completar") or websearch_confirmacion_valida(manifiesto):
+    if manifiesto.cancelado or manifiesto.cierre_hecho() or websearch_confirmacion_valida(manifiesto):
         return False
     return not manifiesto.etapa_hecha("verificar")
 
