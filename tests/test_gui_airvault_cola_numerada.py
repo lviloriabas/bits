@@ -140,25 +140,24 @@ def test_una_ausencia_se_recupera_una_sola_vez_por_orden(app, tmp_path, monkeypa
     assert not ventana._websearch_recuperados
 
 
-def test_la_revision_automatica_se_detiene_si_nada_cambia(app, tmp_path, monkeypatch):
+def test_una_orden_devuelve_su_ritmo_a_la_revision_espaciada(app, tmp_path, monkeypatch):
+    """Sin cambios se espacia (no se detiene) y una orden la deja como estaba."""
     ventana, _trabajos = cola(app, tmp_path, [("subido", BUSCANDO)])
     reloj = [1000.0]
     monkeypatch.setattr(modulo.time, "monotonic", lambda: reloj[0])
     ventana.auto_check.setChecked(True)
     ventana._ajustar_vigilancia()
-    assert ventana._vigilando()
-    reloj[0] += modulo.HORAS_SIN_CAMBIOS_ANTES_DE_PARAR * 3600 - 60
+    normal = ventana._vigilante.interval()
+    reloj[0] += modulo.HORAS_SIN_CAMBIOS_ANTES_DE_ESPACIAR * 3600 - 60
     ventana._ajustar_vigilancia()
-    assert ventana._vigilando()
+    assert ventana._vigilante.interval() == normal
     reloj[0] += 120
     ventana._ajustar_vigilancia()
-    assert not ventana._vigilando()
-    assert "Revisión automática detenida" in ventana.resumen.text()
-    # Un cambio en la cola o una orden devuelven el plazo entero.
-    ventana._estados = [EstadoParte(ventana._estados[0].trabajo, SIN_SUBIR)]
-    ventana._estados[0].trabajo.manifiesto.etapa("subir").marcar(EstadoEtapa.HECHA)
-    ventana._estados = [EstadoParte(ventana._estados[0].trabajo, BUSCANDO, "otra vuelta")]
+    assert ventana._vigilando()
+    assert ventana._vigilante.interval() == modulo.MINUTOS_SIN_CAMBIOS * 60_000
+    # Lo que hace `_lanzar` con una orden dada a mano.
     ventana._firma_vigilada = None
     ventana._ajustar_vigilancia()
     assert ventana._vigilando()
+    assert ventana._vigilante.interval() == normal
     ventana._parar_vigilancia()

@@ -288,6 +288,59 @@ def test_el_boton_del_proceso_retoma_los_manifiestos_sin_repetir_subidas(cadena,
     assert not ventana._pausado
 
 
+def test_un_batch_que_airvault_no_deja_indexar_no_frena_a_los_demas(cadena, monkeypatch):
+    """El segundo no se deja abrir: el tercero se sube, indexa y completa.
+
+    Y el proceso no se da por terminado ni se queda quieto: sigue revisando
+    y, cuando AirVault vuelve a dejar abrir el batch, lo termina solo.
+    """
+    import time
+
+    from app.airvault.session import ErrorDeAirVault
+
+    ventana, cliente, trabajos, fallos, modos = cadena
+    original = TrabajoAirVaultWorker._ejecutar_indexado
+
+    def ejecutar(self, lote, planes, cliente_, completar=False):
+        if any(t.manifiesto.nombre_batch.endswith("-2") for t in lote):
+            raise ErrorDeAirVault(
+                "AirVault rechazo /index/Batch/LockAndGetBatchInfo: "
+                "Sql command has timed out.."
+            )
+        return original(self, lote, planes, cliente_, completar=completar)
+
+    monkeypatch.setattr(TrabajoAirVaultWorker, "_ejecutar_indexado", ejecutar)
+
+    ventana._subir_a_mano()
+
+    guardados = [manifiestos.cargar(t.carpeta) for t in trabajos]
+    assert [m.batch_id for m in guardados] == ["003B1", "003B2", "003B3"]
+    assert cliente.completados == ["003B1", "003B3"]
+    assert not guardados[1].etapa_hecha("verificar")
+    # Ningún fallo tumbó el hilo: se informó de ese batch y se siguió.
+    assert fallos == []
+    bitacora = "\n".join(
+        ventana.bitacora.item(i).text() for i in range(ventana.bitacora.count())
+    )
+    assert f"«DP | {NOMBRE} -2»" in bitacora
+    assert "Proceso terminado" not in bitacora
+    assert "se detuvo" not in bitacora
+    assert ventana.progreso.value() < 100
+    assert ventana._vigilando()
+
+    # AirVault se repone y pasa el intervalo: la revisión siguiente lo acaba.
+    monkeypatch.setattr(TrabajoAirVaultWorker, "_ejecutar_indexado", original)
+    ahora = time.monotonic()
+    monkeypatch.setattr(
+        time, "monotonic", lambda: ahora + ventana.minutos_spin.value() * 60 + 1
+    )
+    ventana._comprobar_solo()
+
+    assert cliente.completados == ["003B1", "003B3", "003B2"]
+    assert "Proceso terminado: 3 completados." in ventana.resumen.text()
+    assert not ventana._vigilando()
+
+
 def test_la_cadena_termina_y_no_queda_nada_por_hacer(cadena):
     """Al acabar, una revisión más no sube ni escribe nada."""
     ventana, cliente, trabajos, fallos, modos = cadena
