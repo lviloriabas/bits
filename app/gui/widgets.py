@@ -386,6 +386,20 @@ QToolButton#primaryButton[menuRole="split"]::menu-button {{
 QToolButton#primaryButton[menuRole="split"]::menu-arrow {{
     image: url("{flecha_acento}");
 }}
+/* Desactivado se apaga como los demás botones. El selector de ID pesa más
+   que «QPushButton:disabled», así que sin estas reglas el botón de acento
+   seguía con su color y su texto mientras no se podía pulsar. */
+#primaryButton:disabled {{
+    color: {c.TEXT_DISABLED};
+    background-color: {c.CONTROL_DISABLED};
+    border-color: {c.PANE_BG};
+}}
+QToolButton#primaryButton[menuRole="split"]::menu-button:disabled {{
+    border-left: 1px solid {c.PANE_BORDER};
+}}
+QToolButton#primaryButton[menuRole="split"]::menu-arrow:disabled {{
+    image: url("{flecha}");
+}}
 QToolButton#spinStepButton {{
     min-width: 18px; max-width: 18px; min-height: 0;
     padding: 0;

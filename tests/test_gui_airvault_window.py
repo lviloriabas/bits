@@ -359,7 +359,7 @@ def test_los_controles_del_proceso_son_empezar_pausar_y_cancelar(ventana):
         if botones.itemAt(indice).widget() is not None
     ]
 
-    assert [boton.text() for boton in widgets] == ["Empezar proceso", "Pausar", "Cancelar"]
+    assert [boton.text() for boton in widgets] == ["Empezar", "Pausar", "Cancelar"]
     assert not hasattr(ventana, "boton_cerrar")
 
 

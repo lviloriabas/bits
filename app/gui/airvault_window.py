@@ -52,7 +52,7 @@ from app.airvault.config import (AIRVAULT_FILENAME, AirVaultConfig,
                                  guardar_paginas_por_batch)
 from app.airvault.session import SesionCancelada
 from app.gui.airvault_busqueda import buscar_en_la_cola, frase_de
-from app.gui.airvault_bitacora import RegistroAirVaultDelegate
+from app.gui.airvault_bitacora import RegistroAirVaultDelegate, pintar_latido
 from app.gui.batches_sidebar import (ROL_ID_ANTERIOR, BatchesSidebar,
                                      agregar_filtros_al_menu)
 from app.gui.automatizacion import (COMPLETAR, MenuAutomatizacion,
@@ -2108,6 +2108,10 @@ class AirVaultWindow(QDialog):
         self._paso_visible = ""
         # La cuenta del paso en curso («30 de 120»), para la línea viva.
         self._cuenta_paso = (0, 0)
+        # El batch del que habla el paso en curso, por carpeta. Con los que
+        # suben, se escriben o se leen en Web Search, es el que lleva el arco
+        # que gira en su tarjeta de la cola; ver `_claves_en_proceso`.
+        self._clave_del_paso = ""
         # Lo que lleva el paso en curso de cada batch que está subiendo o
         # escribiendo, por carpeta: (etapa, fracción). Es lo que deja a la
         # barra moverse dentro de un batch y no solo al cambiar de estado.
@@ -2301,7 +2305,17 @@ class AirVaultWindow(QDialog):
             f"QGroupBox#airvaultResultado {{ padding: {SPACE_XL}px {SPACE_M}px {SPACE_M}px; }}"
             f"QGroupBox#airvaultResultado::title {{ left: {SPACE_M}px; }}"
             f"QListWidget#airvaultBitacora {{ padding: {SPACE_S}px; }}"
-            f"QListWidget#airvaultBitacora::item {{ padding: {SPACE_XS}px {SPACE_S}px; }}"
+            f"QListWidget#airvaultBitacora::item {{ padding: {SPACE_XS}px {SPACE_S}px; "
+            f"border-radius: 6px; }}"
+            # El fondo del cursor y el de la fila elegida se escriben aquí.
+            # Sin ellos los pintaba el estilo de Windows con su propio gris,
+            # y el texto de la fila elegida salía negro sobre él.
+            f"QListWidget#airvaultBitacora::item:hover:!selected {{ "
+            f"background: {c.PANE_CONTROL_HOVER}; }}"
+            f"QListWidget#airvaultBitacora::item:selected {{ background: {c.STROKE_STRONG}; "
+            f"color: {c.PANE_TEXT}; }}"
+            f"QListWidget#airvaultBitacora::item:selected:!active {{ background: {c.STROKE_STRONG}; "
+            f"color: {c.PANE_TEXT}; }}"
             f"QToolButton#spinStepButton {{ min-width: {SPACE_L + 2}px; "
             f"max-width: {SPACE_L + 2}px; padding: 0; }}"
         )
@@ -2316,6 +2330,8 @@ class AirVaultWindow(QDialog):
             for columna in range(4):
                 if papel:
                     pintar_celda_del_tema(self.lotes.item(fila, columna), papel)
+        # El arco de lo que está en proceso va en el acento del tema nuevo.
+        self._marcar_en_proceso()
 
     # ── construcción ───────────────────────────────────────────────
 
@@ -4621,18 +4637,23 @@ class AirVaultWindow(QDialog):
 
         fila.addStretch()
 
-        self.boton_subir = QPushButton("Empezar proceso")
+        self.boton_subir = QPushButton("Empezar")
         self.boton_proceso = self.boton_subir
         self.boton_subir.setObjectName("primaryButton")
         self.boton_subir.setEnabled(False)
         self.boton_subir.setToolTip(
-            "Revisa en AirVault los batches de la cola. Primero indexa y "
-            "completa los que ya están subidos; después sube los que falten, "
-            "de uno en uno. Los batches omitidos no entran."
+            "Pone en proceso todos los batches de la cola que no estén "
+            "terminados. Primero indexa y completa los que ya están subidos; "
+            "después sube los que falten, de uno en uno. Los batches omitidos "
+            "no entran."
         )
-        self.boton_subir.setFixedWidth(max(
-            160, self.boton_subir.fontMetrics().horizontalAdvance("Continuar proceso") + SPACE_L * 2,
-        ))
+        # Un solo ancho para los dos rótulos, el del más largo: el botón no
+        # cambia de tamaño al pausar y los de al lado no se mueven.
+        medida = self.boton_subir.fontMetrics()
+        self.boton_subir.setFixedWidth(
+            max(medida.horizontalAdvance(texto) for texto in ("Empezar", "Continuar"))
+            + SPACE_L * 2
+        )
         self.boton_subir.clicked.connect(self._empezar_o_continuar)
 
         self.boton_revisar = QAction("Revisar en AirVault", self)
@@ -4685,7 +4706,7 @@ class AirVaultWindow(QDialog):
         ocupado = (self._controles_ocupados or liberando
                    or self.hilo() is not None or self.lectura_websearch() is not None)
         en_curso = ocupado or self._vigilando() or self._reintentando_chequeo()
-        self.boton_proceso.setText("Continuar proceso" if self._pausado else "Empezar proceso")
+        self.boton_proceso.setText("Continuar" if self._pausado else "Empezar")
         self.boton_proceso.setEnabled(
             not ocupado if self._pausado else not en_curso and self._listo_para_subir
         )
@@ -5961,6 +5982,9 @@ class AirVaultWindow(QDialog):
             ANCHO_MAXIMO_NOMBRE_BATCH,
         )
         tabla.setColumnWidth(1, ancho_nombre)
+        # La tabla se rehízo entera: las tarjetas de lo que está en proceso
+        # recuperan su arco sin esperar a la vuelta siguiente del latido.
+        self._marcar_en_proceso()
         tabla.verticalScrollBar().setValue(scroll)
         tabla.setUpdatesEnabled(True)
         del bloqueo
@@ -6335,7 +6359,7 @@ class AirVaultWindow(QDialog):
             self._vigilancia_agotada = True
             texto = (
                 f"Revisión automática detenida: {HORAS_SIN_CAMBIOS_ANTES_DE_PARAR} horas "
-                "sin ningún cambio en AirVault. Pulse «Empezar proceso» para "
+                "sin ningún cambio en AirVault. Pulse «Empezar» para "
                 "volver a revisar."
             )
             self.resumen.setText(texto)
@@ -7150,17 +7174,26 @@ class AirVaultWindow(QDialog):
         """Identifica el batch por su nombre en los avisos de trabajo."""
         from app.airvault.flujo import _prefijo
 
+        trabajo = self._trabajo_del_paso(texto)
+        if trabajo is None:
+            return texto
+        paso = texto[len(_prefijo(trabajo)):]
+        if paso.startswith("Posible duplicado:"):
+            paso = (
+                "Posible duplicado; se continúa la subida autorizada."
+                if "se continúa" in paso else "Posible duplicado; no se sube."
+            )
+        return f"{self._rotulo(trabajo)}: {paso}"
+
+    def _trabajo_del_paso(self, texto: str):
+        """El batch del que habla un aviso del hilo, por su prefijo."""
+        from app.airvault.flujo import _prefijo
+
         for trabajo in self._estado.get("trabajos") or self._trabajos:
             prefijo = _prefijo(trabajo)
             if prefijo and texto.startswith(prefijo):
-                paso = texto[len(prefijo):]
-                if paso.startswith("Posible duplicado:"):
-                    paso = (
-                        "Posible duplicado; se continúa la subida autorizada."
-                        if "se continúa" in paso else "Posible duplicado; no se sube."
-                    )
-                return f"{self._rotulo(trabajo)}: {paso}"
-        return texto
+                return trabajo
+        return None
 
     def _actualizar_latido(self) -> None:
         """Pone, cambia o quita la línea viva según lo que esté en marcha.
@@ -7178,6 +7211,7 @@ class AirVaultWindow(QDialog):
             if self._linea_viva is not None:
                 self.bitacora.takeItem(self.bitacora.row(self._linea_viva))
                 self._linea_viva = None
+            self._marcar_en_proceso()
             return
         if self._linea_viva is None:
             self._linea_viva = QListWidgetItem()
@@ -7273,6 +7307,7 @@ class AirVaultWindow(QDialog):
         linea.setForeground(QColor(color))
         linea.setIcon(self._icono_de_latido(color, girando=worker is not None))
         self._pintar_filas_websearch()
+        self._marcar_en_proceso()
 
     def _icono_de_latido(self, color: str, girando: bool) -> QIcon:
         """Un arco que da una vuelta por segundo, o un círculo quieto.
@@ -7288,27 +7323,48 @@ class AirVaultWindow(QDialog):
         mapa.setDevicePixelRatio(escala)
         mapa.fill(Qt.GlobalColor.transparent)
         pintor = QPainter(mapa)
-        pintor.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pluma = QPen(QColor(color))
-        pluma.setWidthF(2.0)
-        pluma.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pintor.setPen(pluma)
-        caja = QRectF(2, 2, lado - 4, lado - 4)
-        if girando:
-            # Ángulos de Qt en dieciseisavos de grado y en sentido contrario
-            # al reloj; el signo lo hace girar como uno.
-            angulo = int(time.monotonic() * 360) % 360
-            pintor.drawArc(caja, -angulo * 16, 270 * 16)
-        else:
-            pintor.drawEllipse(caja)
+        pintar_latido(pintor, QRectF(0, 0, lado, lado), color, girando)
         pintor.end()
         return QIcon(mapa)
+
+    def _claves_en_proceso(self) -> set[str]:
+        """Los batches a los que se les está haciendo algo ahora mismo.
+
+        El que sube o se escribe, el que nombra el paso en curso y los que
+        se están leyendo en Web Search. Uno que solo espera su turno o la
+        próxima revisión no gira: girar es que el programa trabaja en él.
+        """
+        claves = set(self._filas_websearch_activas) if self.lectura_websearch() is not None else set()
+        if self.hilo() is not None:
+            claves |= self._indexando | set(self._en_vuelo)
+            if self._clave_del_paso:
+                claves.add(self._clave_del_paso)
+        return claves
+
+    def _marcar_en_proceso(self) -> None:
+        """Pone el arco que gira en las tarjetas de los batches en proceso."""
+        if not hasattr(self, "lotes"):
+            return
+        claves = self._claves_en_proceso()
+        color = color_indexando() if claves else ""
+        girando = False
+        for fila in range(self.lotes.rowCount()):
+            activo = self.lotes.item(fila).data(Qt.ItemDataRole.UserRole) in claves
+            self.lotes.marcar_en_proceso(fila, color if activo else "")
+            girando = girando or activo
+        if girando:
+            # El arco no cambia de dato entre una vuelta y la siguiente: lo
+            # que cambia es la hora con la que se dibuja.
+            self.lotes.viewport().update()
 
     # ── respuestas del hilo ────────────────────────────────────────
 
     def _mostrar_paso(self, texto: str, hechas: int, total: int) -> None:
         visible = self._nombre_del_paso(texto)
         self._paso_visible = visible
+        if texto != self._ultimo_paso:
+            trabajo = self._trabajo_del_paso(texto)
+            self._clave_del_paso = str(trabajo.carpeta) if trabajo is not None else ""
         self.estado_label.setText(visible)
         self.estado_label.setToolTip(visible)
         # La barra no se vuelve «en marcha continua» en los pasos sin
@@ -7794,7 +7850,7 @@ class AirVaultWindow(QDialog):
             self._fin_pendiente = False
             self._resultado_fallido = False
             self.estado_label.setText("Proceso pausado")
-            self._anotar("Proceso pausado: pulse Continuar proceso para retomarlo")
+            self._anotar("Proceso pausado: pulse «Continuar» para retomarlo")
             self._soltar_lotes()
             return
         self._fin_pendiente = False
@@ -7814,6 +7870,7 @@ class AirVaultWindow(QDialog):
         """Cierre común del hilo, salga como salga."""
         self._worker_filtrado = None
         self._indexando.clear()
+        self._clave_del_paso = ""
         # Lo que quedaba a medias ya lo cuentan los estados que devolvió el
         # hilo; una subida que falló no puede seguir sumando lo que llevaba.
         self._en_vuelo.clear()

@@ -1,10 +1,38 @@
 """Registro con una columna de iconos, otra de hora y el texto alineado."""
 
-from PySide6.QtCore import QRect, QSize, Qt
-from PySide6.QtGui import QColor, QIcon
+import time
+
+from PySide6.QtCore import QRect, QRectF, QSize, Qt
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen
 from PySide6.QtWidgets import QStyledItemDelegate, QStyle, QStyleOptionViewItem
 
-from app.gui.tokens import SPACE_M, SPACE_S, SPACE_XS, on_accent_text, paleta
+from app.gui.tokens import SPACE_M, SPACE_S, SPACE_XS, paleta
+
+
+def pintar_latido(pintor: QPainter, caja: QRectF, color: str, girando: bool) -> None:
+    """Un arco que da una vuelta por segundo, o un circulo quieto.
+
+    Es la marca de lo que esta en marcha: la lleva la linea viva del
+    registro y la tarjeta del batch que se esta procesando. Se dibuja y no
+    se escribe con un caracter porque la fuente de la interfaz no trae los
+    de una terminal y cada Windows los sustituia por otro.
+    """
+    pintor.save()
+    pintor.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pluma = QPen(QColor(color))
+    pluma.setWidthF(2.0)
+    pluma.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pintor.setPen(pluma)
+    pintor.setBrush(Qt.BrushStyle.NoBrush)
+    arco = caja.adjusted(2, 2, -2, -2)
+    if girando:
+        # Angulos de Qt en dieciseisavos de grado y en sentido contrario al
+        # reloj; el signo lo hace girar como uno.
+        angulo = int(time.monotonic() * 360) % 360
+        pintor.drawArc(arco, -angulo * 16, 270 * 16)
+    else:
+        pintor.drawEllipse(arco)
+    pintor.restore()
 
 
 class RegistroAirVaultDelegate(QStyledItemDelegate):
@@ -73,7 +101,11 @@ class RegistroAirVaultDelegate(QStyledItemDelegate):
         opcion.widget.style().drawControl(QStyle.ControlElement.CE_ItemViewItem, opcion, painter, opcion.widget)
         c = paleta()
         seleccionado = bool(opcion.state & QStyle.StateFlag.State_Selected)
-        principal = on_accent_text() if seleccionado else c.PANE_TEXT
+        # La fila elegida y la que tiene el cursor encima cambian de fondo
+        # con un gris del tema (lo pone la hoja de la ventana), no con el
+        # acento: el texto sigue siendo el del panel. Pintado con el color
+        # de encima del acento salia negro sobre ese gris y no se leia.
+        principal = c.PANE_TEXT
         secundario = principal if seleccionado else c.TEXT_SECONDARY
         caja = opcion.rect.adjusted(SPACE_S, SPACE_XS, -SPACE_S, -SPACE_XS)
         lado = opcion.fontMetrics.height()

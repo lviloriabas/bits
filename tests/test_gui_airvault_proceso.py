@@ -44,7 +44,7 @@ def test_pausar_y_continuar_conserva_el_trabajo_y_el_ancho_del_boton(app, tmp_pa
     esperar(app, lambda: ventana.hilo() is None and ventana.boton_proceso.isEnabled())
     guardadas = list(estado["guardadas"])
     assert 0 < len(guardadas) < 40
-    assert ventana.boton_proceso.text() == "Continuar proceso"
+    assert ventana.boton_proceso.text() == "Continuar"
     assert ventana.boton_proceso.width() == ancho
     QTest.qWait(30)
     assert estado["guardadas"] == guardadas
@@ -87,7 +87,7 @@ def test_la_pausa_detiene_tambien_lecturas_y_comprobaciones_pendientes(app, tmp_
     ventana._confirmar_solo()
     ventana._al_terminar()
     assert lanzados == []
-    assert ventana.boton_proceso.text() == "Continuar proceso"
+    assert ventana.boton_proceso.text() == "Continuar"
 
 
 def test_continuar_una_lectura_independiente_recupera_tambien_las_consultas_en_cola(app, tmp_path, monkeypatch):
@@ -112,7 +112,7 @@ def test_cancelar_un_proceso_pausado_no_lo_reanuda(app, tmp_path, monkeypatch):
     ventana._pausar_proceso()
     ventana.boton_cancelar.click()
     assert not ventana._pausado
-    assert ventana.boton_proceso.text() == "Empezar proceso"
+    assert ventana.boton_proceso.text() == "Empezar"
     assert not ventana.boton_pausar.isEnabled()
     lanzados = []
     monkeypatch.setattr(ventana, "_comprobar", lambda: lanzados.append("revision"))

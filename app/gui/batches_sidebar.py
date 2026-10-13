@@ -1,11 +1,12 @@
 """Lista lateral de batches con seleccion multiple y acciones de la cola."""
 
-from PySide6.QtCore import QItemSelectionModel, QPoint, QRect, QSize, Qt
+from PySide6.QtCore import QItemSelectionModel, QPoint, QRect, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QPalette
 from PySide6.QtWidgets import (QAbstractItemView, QListView, QListWidget,
                                QListWidgetItem, QStyle, QStyledItemDelegate,
                                QStyleOptionViewItem)
 
+from app.gui.airvault_bitacora import pintar_latido
 from app.gui.tokens import SPACE_S, paleta
 
 # El numero con el que se nombra el batch en la cola y en el registro. Va en
@@ -14,6 +15,11 @@ from app.gui.tokens import SPACE_S, paleta
 ROL_NUMERO = Qt.ItemDataRole.UserRole + 1
 # Un ID que AirVault devolvio alguna vez y el manifiesto ya no conserva.
 ROL_ID_ANTERIOR = Qt.ItemDataRole.UserRole + 2
+# El color del arco que gira en la tarjeta del batch que se esta procesando
+# ahora mismo, o nada si esta quieto. Es el mismo arco de la linea viva del
+# registro, y va bajo el numero: esa columna ya esta reservada y el texto de
+# la tarjeta no se mueve cuando el batch empieza o termina.
+ROL_EN_PROCESO = Qt.ItemDataRole.UserRole + 3
 
 
 class _TarjetaBatchDelegate(QStyledItemDelegate):
@@ -64,6 +70,15 @@ class _TarjetaBatchDelegate(QStyledItemDelegate):
             QRect(caja.left(), caja.top(), canal - SPACE_S, caja.height()),
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop, str(numero),
         )
+        giro = index.data(ROL_EN_PROCESO)
+        if giro:
+            lado = min(opcion.fontMetrics.height(), canal - SPACE_S)
+            pintar_latido(
+                painter,
+                QRectF(caja.left() + canal - SPACE_S - lado,
+                       caja.top() + opcion.fontMetrics.lineSpacing(), lado, lado),
+                giro, True,
+            )
         painter.setFont(opcion.font)
         painter.drawText(
             caja.adjusted(canal, 0, 0, 0),
@@ -155,6 +170,12 @@ class BatchesSidebar(QListWidget):
     def numerar(self, row, numero):
         """Pone el numero del batch en su columna de la tarjeta."""
         super().item(row).setData(ROL_NUMERO, int(numero))
+
+    def marcar_en_proceso(self, row, color):
+        """Pone o quita el arco que gira en la tarjeta de ese batch."""
+        tarjeta = super().item(row)
+        if (tarjeta.data(ROL_EN_PROCESO) or "") != (color or ""):
+            tarjeta.setData(ROL_EN_PROCESO, color or None)
 
     def sizeHintForColumn(self, column):
         return self.minimumWidth()

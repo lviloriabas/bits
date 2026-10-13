@@ -276,7 +276,7 @@ def test_el_boton_del_proceso_retoma_los_manifiestos_sin_repetir_subidas(cadena,
     ventana, cliente, trabajos, fallos, _modos = cadena
     if pausado:
         ventana._pausar_proceso()
-        assert ventana.boton_proceso.text() == "Continuar proceso"
+        assert ventana.boton_proceso.text() == "Continuar"
     else:
         ventana.auto_check.setChecked(False)
         ventana._actualizar_botones_proceso()
