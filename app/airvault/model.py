@@ -172,6 +172,13 @@ class Manifiesto(BaseModel):
     batches_descartados: List[str] = Field(default_factory=list)
     mezcla_pendiente: str = ""
     resubir_por_mezcla: bool = False
+    # Divisorias que el programa ya borro del batch en AirVault. Con ellas se
+    # sabe que el batch puede tener menos paginas que el PDF. Antes la cuenta
+    # solo estaba en el texto de la etapa «indexar», que se reescribe al
+    # volver a indexar o al reiniciar el paso: se perdia justo antes de
+    # usarla y el batch dejaba de cuadrar en paginas. Vuelve a cero solo
+    # cuando el archivo se sube de nuevo, que es un batch con todas.
+    separadores_quitados: int = 0
     # Antes de considerar perdida una subida, varias revisiones completas
     # recorren nombres, cantidades y contenido. Solo al agotarlas empieza el
     # reloj de espera que eventualmente permite ofrecer una resubida.
@@ -256,6 +263,17 @@ class Manifiesto(BaseModel):
             EstadoEtapa.HECHA, EstadoEtapa.OMITIDA
         )
 
+    def cierre_hecho(self) -> bool:
+        """Si el batch se completo de verdad en AirVault.
+
+        ``etapa_hecha`` no sirve para el cierre: da por hecha tambien la
+        etapa omitida, y el cierre que no se pudo hacer (paginas en
+        amarillo, separadoras sin borrar) se anota justamente como omitido.
+        Ese batch sigue en la cola de Web Index.
+        """
+        cierre = self.etapas.get("completar")
+        return cierre is not None and cierre.estado is EstadoEtapa.HECHA
+
     def anotar(self, paso: str, resultado: str, detalle: str = "") -> None:
         """Deja constancia de un hecho de la carga. No guarda el manifiesto."""
         self.historial.append(Evento(
@@ -297,17 +315,28 @@ class Manifiesto(BaseModel):
         return [r for r in self.registros if r.es_separador]
 
     def separadores_borrados(self) -> int:
-        """Divisorias que el ultimo indexado confirmo borradas en AirVault."""
+        """Divisorias que el indexado confirmo borradas en AirVault.
+
+        La cuenta vive en ``separadores_quitados``. El detalle de la etapa
+        se sigue leyendo por los manifiestos escritos antes de ese campo.
+        """
+        del_detalle = 0
         etapa = self.etapas.get("indexar")
-        if etapa is None:
-            return 0
-        coincidencia = re.search(
-            r"separadores borrados\s+(\d+)", etapa.detalle or "",
-            flags=re.IGNORECASE,
+        if etapa is not None:
+            coincidencia = re.search(
+                r"separadores borrados\s+(\d+)", etapa.detalle or "",
+                flags=re.IGNORECASE,
+            )
+            if coincidencia is not None:
+                del_detalle = int(coincidencia.group(1))
+        anotados = max(0, int(self.separadores_quitados or 0))
+        return min(max(anotados, del_detalle), len(self.separadores()))
+
+    def anotar_separadores_borrados(self, cuantos: int) -> None:
+        """Conserva la mayor cuenta vista: en AirVault no se desborran solas."""
+        self.separadores_quitados = max(
+            self.separadores_borrados(), max(0, int(cuantos or 0))
         )
-        if coincidencia is None:
-            return 0
-        return min(int(coincidencia.group(1)), len(self.separadores()))
 
     def cantidades_paginas_compatibles(self) -> set[int]:
         """Cantidades validas antes y despues de borrar divisorias."""

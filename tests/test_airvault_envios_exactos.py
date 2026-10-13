@@ -90,6 +90,82 @@ def test_rechazo_confirmado_deja_reintentar(tmp_path):
     envios_exactos.enviar(raiz, trabajo, archivo, subidor([]), {})
 
 
+def test_un_corte_antes_de_finishupload_deja_reintentar(tmp_path):
+    """Solo viajaron trozos: AirVault no tiene nada que publicar."""
+    trabajo = _trabajo(tmp_path)
+    raiz = carpeta_del_libro(trabajo)
+    archivo = trabajo.manifiesto.pdf_origen
+
+    def cortar(*args, **kwargs):
+        raise ConnectionError("se cayo la red en un trozo")
+
+    sin_cerrar = SimpleNamespace(subir=cortar, finish_enviado=False)
+    with pytest.raises(ConnectionError):
+        envios_exactos.enviar(raiz, trabajo, archivo, sin_cerrar, {})
+    assert envios_exactos.motivo(raiz, archivo, trabajo.config) == ""
+
+    ya_pedido = SimpleNamespace(subir=cortar, finish_enviado=True)
+    with pytest.raises(ConnectionError):
+        envios_exactos.enviar(raiz, trabajo, archivo, ya_pedido, {})
+    assert "Este mismo PDF" in envios_exactos.motivo(raiz, archivo, trabajo.config)
+
+
+def test_cancelar_mientras_suben_los_trozos_tambien_libera_la_reserva(tmp_path):
+    """La cancelacion de la ventana no es una ``Exception`` y pasaba de largo."""
+    trabajo = _trabajo(tmp_path)
+    raiz = carpeta_del_libro(trabajo)
+    archivo = trabajo.manifiesto.pdf_origen
+
+    class Cancelado(BaseException):
+        pass
+
+    def cancelar(*args, **kwargs):
+        raise Cancelado()
+
+    with pytest.raises(Cancelado):
+        envios_exactos.enviar(
+            raiz, trabajo, archivo,
+            SimpleNamespace(subir=cancelar, finish_enviado=False), {},
+        )
+    assert envios_exactos.motivo(raiz, archivo, trabajo.config) == ""
+
+
+def test_un_corte_antes_de_finishupload_no_gasta_la_autorizacion(tmp_path):
+    """La orden de repetir el PDF no se cumplio: sigue valiendo."""
+    trabajo = _trabajo(tmp_path)
+    raiz = carpeta_del_libro(trabajo)
+    archivo = trabajo.manifiesto.pdf_origen
+    envios_exactos.enviar(raiz, trabajo, archivo, subidor([]), {})
+    autorizar_posible_duplicado(trabajo)
+
+    def cortar(*args, **kwargs):
+        raise ConnectionError("se cayo la red en un trozo")
+
+    with pytest.raises(ConnectionError):
+        envios_exactos.enviar(
+            raiz, trabajo, archivo,
+            SimpleNamespace(subir=cortar, finish_enviado=False), {},
+        )
+    assert trabajo._duplicado_permitido
+    # La reserva es la de la carga anterior, que si llego: se conserva.
+    assert "Este mismo PDF" in envios_exactos.motivo(raiz, archivo, trabajo.config)
+
+
+def test_el_turno_ocupado_no_es_un_pdf_repetido(tmp_path):
+    """Otra carga en vuelo no dice nada de este archivo."""
+    trabajo = _trabajo(tmp_path)
+    raiz = carpeta_del_libro(trabajo)
+    llamadas = []
+    with envios_exactos._exclusiva(raiz):
+        with pytest.raises(envios_exactos.TurnoOcupado):
+            envios_exactos.enviar(
+                raiz, trabajo, trabajo.manifiesto.pdf_origen, subidor(llamadas), {},
+            )
+    assert llamadas == []
+    assert envios_exactos.motivo(raiz, trabajo.manifiesto.pdf_origen, trabajo.config) == ""
+    assert issubclass(envios_exactos.TurnoOcupado, envios_exactos.CargaRepetida)
+
+
 def test_otro_proceso_no_puede_cargar_durante_un_envio(tmp_path):
     script = (
         "from app.airvault.envios_exactos import _exclusiva, CargaRepetida; "

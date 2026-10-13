@@ -145,6 +145,11 @@ class SubidorQuickUpload:
     def __init__(self, sesion, repo_id: int):
         self.sesion = sesion
         self.repo_id = repo_id
+        # Si la ultima carga llego a pedir ``FinishUpload``, que es lo unico
+        # que crea el batch. Mientras siga en falso solo viajaron trozos:
+        # AirVault no tiene nada que publicar y la carga se puede repetir
+        # entera sin miedo a una segunda copia.
+        self.finish_enviado = False
 
     @serializar_cargas
     def subir(
@@ -157,6 +162,7 @@ class SubidorQuickUpload:
         trozos de un mega, asi que sin ``avisar`` la subida parece colgada
         durante media hora.
         """
+        self.finish_enviado = False
         archivo = Path(ruta)
         if not archivo.is_file():
             return ResultadoSubida(str(archivo), False, "no existe")
@@ -186,6 +192,8 @@ class SubidorQuickUpload:
 
         if avisar is not None:
             avisar(f"AirVault está recibiendo {archivo.name}", 0, 0)
+        # Desde aqui la carga pudo crear un batch aunque falle lo que sigue.
+        self.finish_enviado = True
         try:
             # Una sola vez si la respuesta no llega. Repetir FinishUpload a
             # ciegas, como se hacia al agotar el minuto de espera, es pedirle

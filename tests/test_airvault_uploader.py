@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.airvault.config import (
     CAMPO_BATCH_NAME,
     CAMPO_BATCH_USERNAME,
@@ -139,6 +141,51 @@ def test_finishupload_se_manda_una_sola_vez_si_no_contesta(tmp_path):
     assert sesion.opciones[0] == {}
     assert sesion.opciones[1]["repetir_sin_respuesta"] is False
     assert sesion.opciones[1]["tiempo_limite"] >= 600
+
+
+def test_el_subidor_dice_si_llego_a_pedir_finishupload(tmp_path):
+    """Sin ``FinishUpload`` no hay batch posible: la carga se puede repetir."""
+    from app.airvault.session import ErrorDeConexion
+    from app.airvault.uploader import SubidorQuickUpload
+
+    class Sesion:
+        def __init__(self, falla_en):
+            self.falla_en = falla_en
+
+        def post(self, ruta, **_extra):
+            if ruta.endswith(self.falla_en):
+                raise ErrorDeConexion("se cayo la red")
+
+    archivo = tmp_path / "entrega.pdf"
+    archivo.write_bytes(b"%PDF-1.4\n")
+
+    en_trozos = SubidorQuickUpload(Sesion("Upload/"), 3209)
+    with pytest.raises(ErrorDeConexion):
+        en_trozos.subir(archivo, {})
+    assert en_trozos.finish_enviado is False
+
+    al_cerrar = SubidorQuickUpload(Sesion("FinishUpload"), 3209)
+    with pytest.raises(ErrorDeConexion):
+        al_cerrar.subir(archivo, {})
+    assert al_cerrar.finish_enviado is True
+
+
+def test_cada_carga_empieza_sin_haber_pedido_finishupload(tmp_path):
+    """El subidor se reutiliza: una carga buena no cubre el fallo de otra."""
+    from app.airvault.uploader import SubidorQuickUpload
+
+    class Sesion:
+        def post(self, _ruta, **_extra):
+            return None
+
+    archivo = tmp_path / "entrega.pdf"
+    archivo.write_bytes(b"%PDF-1.4\n")
+    subidor = SubidorQuickUpload(Sesion(), 3209)
+
+    assert subidor.subir(archivo, {}).ok
+    assert subidor.finish_enviado is True
+    assert not subidor.subir(tmp_path / "no-esta.pdf", {}).ok
+    assert subidor.finish_enviado is False
 
 
 def test_un_batch_username_propio_no_se_pisa():

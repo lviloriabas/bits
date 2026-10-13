@@ -178,7 +178,8 @@ def _anotacion_de(trabajo) -> BatchAnotado:
         paginas=paginas,
         subido=manifiesto.etapa_hecha("subir"),
         indexado=manifiesto.etapa_hecha("verificar"),
-        completado=manifiesto.etapa_hecha("completar"),
+        # El cierre hecho, no el omitido: ese batch sigue en la cola.
+        completado=manifiesto.cierre_hecho(),
         actualizado=datetime.now().isoformat(timespec="seconds"),
     )
 

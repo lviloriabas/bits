@@ -84,6 +84,11 @@ CARPETA_TRABAJOS = Path("output") / "airvault"
 # reenvíos: en todos se vuelve a leer la cola de AirVault.
 INTENTOS_IDENTIFICACION_ANTES_DE_ESPERA = 3
 
+# Veces que se vuelve a pedir que AirVault suelte un batch cuando la peticion
+# no llega (sin red o sin sesion). Agotadas, se deja de insistir y queda el
+# aviso de quitar el bloqueo alli a mano.
+INTENTOS_DE_SOLTAR = 3
+
 # La pantalla de Quick Upload declara 2048 MB por archivo. La compresion
 # conserva margen respecto de ese techo y usa una calidad JPEG moderada:
 # bajar de 300/600 DPI a 200 aporta la mayor parte del ahorro sin castigar
@@ -99,6 +104,10 @@ Aviso = Callable[[str, int, int], None]
 
 class ErrorDeCorrida(RuntimeError):
     """La ejecución no trae lo que hace falta para indexarla."""
+
+
+class TurnoDeCargaOcupado(ErrorDeCorrida):
+    """Otra ventana esta subiendo: este archivo no se envio y espera su turno."""
 
 
 class PaginasAmarillas(ErrorDeCorrida):
@@ -825,6 +834,8 @@ class Trabajo:
         # Si el batch esta tomado ahora mismo por este trabajo. Soltarlo dos
         # veces es un error del servidor, no una limpieza de mas.
         self._tomado = False
+        # Veces que no se pudo soltar porque la peticion no llego a AirVault.
+        self._intentos_de_soltar = 0
         # Solo vive durante esta sesion. Una autorizacion de reenvio no debe
         # sobrevivir a un cierre inesperado y convertirse en permiso automatico.
         self._duplicado_permitido = False
@@ -1151,6 +1162,7 @@ class Trabajo:
         if not reparados:
             return 0
         manifiesto.registros = registros
+        manifiesto.anotar_separadores_borrados(0)
         manifiesto.etapas["indexar"] = Etapa()
         manifiesto.etapas["verificar"] = Etapa()
         manifiesto.etapas["completar"] = Etapa()
@@ -1265,22 +1277,55 @@ class Trabajo:
             self.manifiesto.nombre_batch,
         )
         subidor = SubidorQuickUpload(sesion, self.manifiesto.repo_id)
+        previa = self.manifiesto.etapa("subir").model_copy()
         self.manifiesto.etapa("subir").marcar(EstadoEtapa.EN_CURSO)
         self.guardar()
         try:
             resultado = envios_exactos.enviar(
                 carpeta_del_libro(self), self, archivo, subidor, valores, avisar
             )
+        except envios_exactos.TurnoOcupado as exc:
+            # Otra ventana tiene el turno: de este archivo no salio nada y
+            # no es un duplicado. Marcarlo como tal lo dejaba «en curso» y
+            # bloqueado como PDF repetido sin haberse enviado nunca.
+            self.manifiesto.etapas["subir"] = previa
+            self.guardar()
+            raise TurnoDeCargaOcupado(
+                f"No se subió «{self.manifiesto.nombre_batch}»: hay otra "
+                "carga en curso. Se vuelve a intentar cuando termine."
+            ) from exc
         except envios_exactos.CargaRepetida as exc:
             self.manifiesto.duplicado_exacto = True
             marcar_posible_duplicado(self, str(exc))
             raise ErrorDeCorrida(str(exc)) from exc
-        except Exception as exc:
-            # La etapa sigue «en curso»: los trozos pudieron llegar. Queda
-            # anotado que este envio se corto, para que la busqueda que
-            # viene despues sepa de donde parte.
-            self.manifiesto.anotar("subida", "interrumpida", str(exc))
-            self.guardar()
+        except BaseException as exc:
+            from app.airvault.session import SesionCancelada
+
+            if not getattr(subidor, "finish_enviado", True):
+                # Solo viajaron trozos: ``FinishUpload`` es lo unico que crea
+                # el batch y no llego a pedirse, asi que AirVault no tiene
+                # nada que publicar. Dejarla «en curso» ponia al programa a
+                # buscar durante su plazo entero un batch que no existe,
+                # con las cargas siguientes esperando detras.
+                if isinstance(exc, SesionCancelada) or not isinstance(exc, Exception):
+                    self.manifiesto.etapas["subir"] = previa
+                    self.manifiesto.anotar(
+                        "subida", "cancelada", "antes de terminar de enviarse"
+                    )
+                else:
+                    self.manifiesto.etapa("subir").marcar(
+                        EstadoEtapa.ERROR,
+                        f"{archivo.name}: la carga se cortó antes de "
+                        f"terminar de enviarse ({exc})",
+                    )
+                    self.manifiesto.anotar("subida", "no_enviada", str(exc))
+                self.guardar()
+            elif isinstance(exc, Exception):
+                # La etapa sigue «en curso»: los trozos pudieron llegar.
+                # Queda anotado que este envio se corto, para que la
+                # busqueda que viene despues sepa de donde parte.
+                self.manifiesto.anotar("subida", "interrumpida", str(exc))
+                self.guardar()
             raise
         if not resultado.ok:
             self.manifiesto.etapa("subir").marcar(EstadoEtapa.ERROR, resultado.detalle)
@@ -1768,14 +1813,49 @@ class Trabajo:
         que AirVault contestara «Batch no esta tomado por este usuario» con
         un 500, que ademas se reintentaba tres veces y terminaba en un
         aviso que hacia pensar que el batch habia quedado colgado.
+
+        Lo que si se repite es la peticion que no llego a AirVault. Al
+        cancelar, la sesion esta cortada justo cuando se suelta, y sin red
+        tampoco sale: el batch seguia tomado alli y aqui se daba por
+        suelto, asi que la limpieza posterior ya no lo intentaba y quedaba
+        «abierto por otra persona» a nombre propio. Ahora sigue marcado
+        como tomado y lo suelta la limpieza o la revision siguiente.
         """
+        from app.airvault.indexer import FALLOS_DE_CAMINO
+        from app.airvault.session import SesionCancelada
+
         batch_id = self.manifiesto.batch_id
         if not batch_id or not self._tomado:
             return
-        self._tomado = False
         try:
             cliente.cerrar_lote(batch_id)
+        except SesionCancelada:
+            # No salio ninguna peticion: no cuenta como intento.
+            logger.info(
+                "El batch {} sigue tomado en AirVault: se suelta al "
+                "terminar la cancelación",
+                batch_id,
+            )
+        except FALLOS_DE_CAMINO as exc:
+            self._intentos_de_soltar += 1
+            if self._intentos_de_soltar >= INTENTOS_DE_SOLTAR:
+                self._tomado = False
+                self._intentos_de_soltar = 0
+                logger.warning(
+                    "No se pudo desbloquear el batch {} en AirVault tras {} "
+                    "intentos: {}. Si la siguiente apertura se queda "
+                    "esperando, hay que quitarle el bloqueo alli a mano.",
+                    batch_id, INTENTOS_DE_SOLTAR, exc,
+                )
+            else:
+                logger.warning(
+                    "No se pudo desbloquear el batch {} en AirVault: {}. Se "
+                    "vuelve a intentar en la siguiente revisión.",
+                    batch_id, exc,
+                )
         except Exception as exc:  # noqa: BLE001 - cerrar nunca tumba nada
+            self._tomado = False
+            self._intentos_de_soltar = 0
             logger.warning(
                 "No se pudo desbloquear el batch {} en AirVault: {}. Si la "
                 "siguiente apertura se queda esperando, hay que quitarle "
@@ -1784,6 +1864,8 @@ class Trabajo:
                 exc,
             )
         else:
+            self._tomado = False
+            self._intentos_de_soltar = 0
             logger.info("Batch {} desbloqueado en AirVault", batch_id)
 
     def indexar(
@@ -1801,6 +1883,9 @@ class Trabajo:
         """
         if plan.batch_id != self.manifiesto.batch_id:
             raise ErrorDeCorrida("El batch cambio desde la revision; vuelva a revisar antes de indexar")
+        # Antes de reescribir la etapa: un manifiesto anterior solo guarda
+        # las divisorias borradas en ese texto, y marcarla lo deja vacio.
+        self.manifiesto.anotar_separadores_borrados(0)
         self.manifiesto.etapa("indexar").marcar(EstadoEtapa.EN_CURSO)
         self.guardar()
         avanzar = None
@@ -1835,6 +1920,7 @@ class Trabajo:
         )
         if resultado.separadores_pendientes:
             detalle += f", separadores sin borrar {resultado.separadores_pendientes}"
+        self.manifiesto.anotar_separadores_borrados(resultado.separadores_borrados)
         self.manifiesto.etapa("indexar").marcar(
             EstadoEtapa.ERROR if con_error else EstadoEtapa.HECHA, detalle
         )
@@ -1922,6 +2008,21 @@ class Trabajo:
             raise ErrorDeCorrida(
                 "El trabajo todavía no tiene batch; no hay nada que terminar."
             )
+        cierre = self.manifiesto.etapas.get("completar")
+        if (
+            cierre is not None
+            and cierre.estado is EstadoEtapa.EN_CURSO
+            and not _sigue_en_la_cola(cliente, batch_id)
+        ):
+            # Ya se pidio completarlo y la respuesta se perdio. Que haya
+            # salido de la cola es la respuesta que faltaba: pedirlo otra
+            # vez solo conseguiria un error sobre un batch que ya no esta.
+            self._tomado = False
+            return self._anotar_cierre(
+                "AirVault no contestó al completar, pero el batch ya salió "
+                "de la cola de Web Index",
+                len(self.manifiesto.registros), [], automatico,
+            )
         paginas = list(cliente.paginas_del_lote(batch_id))
         separadores = {r.seq for r in self.manifiesto.separadores()}
         bloqueadas = [
@@ -1963,6 +2064,12 @@ class Trabajo:
             presentes = {p.pagina for p in tras_borrar if not p.borrada}
             faltan = [n for n in quitables if n in presentes]
             quitadas = [n for n in quitables if n not in presentes]
+            # Las divisorias que el mapa ya da por borradas, las de ahora y
+            # las de antes: el batch puede quedar con menos paginas aunque
+            # el cierre no llegue a hacerse.
+            self.manifiesto.anotar_separadores_borrados(sum(
+                1 for p in tras_borrar if p.borrada and p.pagina in separadores
+            ))
             if faltan:
                 # Quitar paginas pide un permiso aparte. Sin el, el batch se
                 # queda como estaba y hay que sacarlas en AirVault a mano.
@@ -2017,7 +2124,33 @@ class Trabajo:
                 return ResultadoCompletar(
                     False, rechazadas, len(paginas), detalle, quitadas
                 )
-            cliente.completar_lote(batch_id)
+            from app.airvault.session import RespuestaPerdida
+
+            sin_respuesta = False
+            try:
+                cliente.completar_lote(batch_id)
+            except RespuestaPerdida as exc:
+                # La peticion salio y no se sabe si AirVault la atendio.
+                # Repetirla a ciegas contestaba un error sobre un batch ya
+                # cerrado y el cierre se quedaba sin anotar. Queda escrito
+                # que se pidio, y la cola dice si se hizo.
+                logger.warning(
+                    "CompleteBatch del batch {} no contesto ({}); se "
+                    "comprueba en la cola", batch_id, exc,
+                )
+                self.manifiesto.etapa("completar").marcar(
+                    EstadoEtapa.EN_CURSO,
+                    "AirVault no contestó al completar; se comprueba en la "
+                    "cola antes de pedirlo otra vez",
+                )
+                self.guardar()
+                if _sigue_en_la_cola(cliente, batch_id):
+                    self.cerrar(cliente)
+                    return ResultadoCompletar(
+                        False, [], len(paginas),
+                        self.manifiesto.etapa("completar").detalle, quitadas,
+                    )
+                sin_respuesta = True
         except BaseException:
             self.cerrar(cliente)
             raise
@@ -2027,6 +2160,14 @@ class Trabajo:
         detalle = f"{len(paginas) - len(quitadas)} paginas en verde"
         if quitadas:
             detalle += f", {len(quitadas)} separadores quitados del batch"
+        if sin_respuesta:
+            detalle += "; AirVault no contestó, pero el batch ya salió de la cola"
+        return self._anotar_cierre(detalle, len(paginas), quitadas, automatico)
+
+    def _anotar_cierre(
+        self, detalle: str, paginas: int, quitadas: List[int], automatico: bool,
+    ) -> "ResultadoCompletar":
+        """Deja escrito que el batch se completo y salio hacia Web Search."""
         self.manifiesto.completado_automatico = bool(automatico)
         self.manifiesto.etapa("completar").marcar(EstadoEtapa.HECHA, detalle)
         self.guardar()
@@ -2036,8 +2177,10 @@ class Trabajo:
         # una consulta a Web Search esta preguntando donde tiene que
         # preguntar: si no encuentra estas, no encuentra nada.
         libro_de_envios.anotar(carpeta_del_libro(self), [self])
-        logger.info("Batch {} dado por terminado en AirVault", batch_id)
-        return ResultadoCompletar(True, [], len(paginas), detalle, quitadas)
+        logger.info(
+            "Batch {} dado por terminado en AirVault", self.manifiesto.batch_id
+        )
+        return ResultadoCompletar(True, [], paginas, detalle, quitadas)
 
 
 # ── la ejecución entera, parte por parte ─────────────────────────────
@@ -3374,6 +3517,12 @@ def subir_partes(
                 # La respuesta pudo perderse despues de aceptar los trozos.
                 # Otra carga aqui podria incorporarse al mismo batch remoto.
                 break
+            from app.airvault.indexer import FALLOS_DE_CAMINO
+
+            if isinstance(exc, (TurnoDeCargaOcupado, *FALLOS_DE_CAMINO)):
+                # Sin red, sin sesion o con el turno de otra ventana, las
+                # cargas siguientes fallarian igual una detras de otra.
+                break
             continue
         # Quick Upload lo acepto: desde aqui esas bitacoras estan
         # comprometidas y no se vuelven a repartir aunque cambie la
@@ -3651,6 +3800,19 @@ def _listar_cola(cliente) -> Sequence[ResumenLote]:
         return list(cliente.listar_lotes())
 
 
+def _sigue_en_la_cola(cliente, batch_id: str) -> bool:
+    """Si la cola de Web Index todavia muestra ese batch.
+
+    Por su ID y sobre la cola entera, no por su nombre: quien pregunta
+    quiere saber si el batch se fue, y un titulo cambiado no es irse.
+    """
+    objetivo = str(batch_id or "").strip().upper()
+    return any(
+        lote.batch_id.strip().upper() == objetivo
+        for lote in _listar_cola(cliente)
+    )
+
+
 def reiniciar_subida(trabajo: "Trabajo") -> None:
     """Olvida lo que el programa creia haber subido de este batch.
 
@@ -3681,6 +3843,8 @@ def _reiniciar_subida_ausente(trabajo: "Trabajo") -> None:
         )
     manifiesto.batch_id = None
     manifiesto.lotes_previos = []
+    # El archivo vuelve a subir entero: el batch nuevo trae sus divisorias.
+    manifiesto.separadores_quitados = 0
     manifiesto.intentos_identificacion = 0
     manifiesto.busquedas_amplias_sin_hallar = 0
     manifiesto.espera_reenvio_desde = ""
@@ -3851,6 +4015,10 @@ def partes_por_subir(estados: Sequence[EstadoParte]) -> List["Trabajo"]:
     boton tienen que decidir exactamente lo mismo: si la lista se calculara
     en dos sitios, uno de los dos acabaria dejando archivos parados para
     siempre.
+
+    La carga que ya se corto varias veces seguidas antes de terminar de
+    enviarse tampoco sale sola (ver :func:`cargas_cortadas_seguidas`):
+    sigue «sin subir» con su motivo y la manda quien la tenga delante.
     """
     return [
         parte.trabajo
@@ -3858,7 +4026,33 @@ def partes_por_subir(estados: Sequence[EstadoParte]) -> List["Trabajo"]:
         # La alerta solo impide subir cuando la preferencia lo exige.
         if not duplicado_bloquea(parte.trabajo)
         and parte.estado == SIN_SUBIR
+        and cargas_cortadas_seguidas(parte.trabajo) < CARGAS_CORTADAS_MAXIMAS
     ]
+
+
+# Veces seguidas que el programa vuelve a mandar por su cuenta un archivo que
+# se corto mientras viajaban sus trozos. Una red que se cae se recupera a la
+# siguiente; si el mismo archivo se corta tres veces seguidas ya no es un
+# tropiezo, y repetir casi dos gigas en cada revision no lo va a arreglar.
+CARGAS_CORTADAS_MAXIMAS = 3
+
+
+def cargas_cortadas_seguidas(trabajo: "Trabajo") -> int:
+    """Ultimas subidas seguidas que se cortaron antes de pedir FinishUpload.
+
+    Cualquier otro final de una subida (aceptada, sin respuesta, cancelada)
+    corta la racha. La cuenta solo frena lo que sale solo: la orden dada a
+    mano manda el archivo aunque la racha este llena.
+    """
+    eventos = getattr(trabajo.manifiesto, "eventos", None)
+    if not callable(eventos):
+        return 0
+    cuenta = 0
+    for evento in reversed(eventos("subida")):
+        if evento.resultado != "no_enviada":
+            break
+        cuenta += 1
+    return cuenta
 
 
 def subir_y_descubrir_partes(
@@ -4223,6 +4417,7 @@ def reiniciar_trabajos_incompletos(
         )
         if not subida_hecha:
             manifiesto.batch_id = None
+            manifiesto.separadores_quitados = 0
             manifiesto.etapas["subir"] = Etapa()
             manifiesto.etapas["descubrir"] = Etapa()
             manifiesto.etapas["indexar"] = Etapa()
@@ -4232,6 +4427,8 @@ def reiniciar_trabajos_incompletos(
         else:
             verificada = manifiesto.etapas.get("verificar")
             if not verificada or verificada.estado is not EstadoEtapa.HECHA:
+                # El batch sigue en AirVault como quedo: lo borrado, borrado.
+                manifiesto.anotar_separadores_borrados(0)
                 manifiesto.etapas["indexar"] = Etapa()
                 manifiesto.etapas["verificar"] = Etapa()
                 manifiesto.etapas["completar"] = Etapa()
@@ -5541,6 +5738,10 @@ def comprobar_partes(
     incorrecto. Que un batch tarde en aparecer no es un fallo: AirVault lo
     procesa en su cola y puede tardar minutos u horas.
     """
+    # Un batch que no se pudo soltar (se cancelo o se cayo la red) sigue
+    # tomado en AirVault a nombre propio. Se suelta antes de mirar la cola:
+    # si no, la revision lo veria «abierto por otra persona» sin fin.
+    cerrar_partes(trabajos, cliente)
     pendientes = [
         trabajo for trabajo in trabajos if _pendiente_de_busqueda(trabajo)
     ]

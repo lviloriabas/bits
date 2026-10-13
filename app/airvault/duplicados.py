@@ -197,7 +197,10 @@ def guardar(libro: Libro, raiz: Path | str) -> Path:
 def _envios_de(trabajo) -> Dict[str, Envio]:
     """Lo que este batch anota de si mismo, por numero de bitacora."""
     manifiesto = trabajo.manifiesto
-    completado = manifiesto.etapa_hecha("completar")
+    # Solo el cierre hecho: el omitido (paginas en amarillo, separadoras sin
+    # borrar) deja el batch en la cola, y sus bitacoras no sirven de control
+    # de lo que ya esta en Web Search.
+    completado = manifiesto.cierre_hecho()
     momento = datetime.now().isoformat(timespec="seconds")
     anotados: Dict[str, Envio] = {}
     for registro in manifiesto.registros:

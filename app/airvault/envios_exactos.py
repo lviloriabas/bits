@@ -17,6 +17,14 @@ class CargaRepetida(RuntimeError):
     pass
 
 
+class TurnoOcupado(CargaRepetida):
+    """Otra carga tiene el turno: no se envio nada y no es un duplicado.
+
+    Hereda de :class:`CargaRepetida` para quien solo necesita saber que no
+    se subio; quien marca el batch como repetido la distingue antes.
+    """
+
+
 def huella(archivo, config):
     digest = hashlib.sha256()
     digest.update(f"{config.base_url.rstrip('/')}|{config.repo_id}|".encode())
@@ -78,7 +86,7 @@ def motivo(raiz, archivo, config):
 def _exclusiva(raiz):
     # El candado del sistema se libera incluso si Windows termina el proceso.
     if not _HILO.acquire(blocking=False):
-        raise CargaRepetida("Hay una carga en curso; espere antes de reenviar")
+        raise TurnoOcupado("Hay una carga en curso; espere antes de reenviar")
     archivo = None
     tomado = False
     try:
@@ -97,7 +105,7 @@ def _exclusiva(raiz):
                 fcntl.flock(archivo.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             tomado = True
         except OSError as exc:
-            raise CargaRepetida("Otra ventana esta subiendo; espere antes de reenviar") from exc
+            raise TurnoOcupado("Otra ventana esta subiendo; espere antes de reenviar") from exc
         yield
     finally:
         if archivo is not None:
@@ -124,12 +132,31 @@ def enviar(raiz, trabajo, archivo, subidor, valores, avisar=None):
             db.execute("INSERT OR REPLACE INTO cargas VALUES (?, ?)",
                        (clave, trabajo.manifiesto.nombre_batch))
             db.commit()
+        permitido = trabajo._duplicado_permitido
         trabajo._duplicado_permitido = False
-        resultado = subidor.subir(archivo, valores, avisar=avisar)
+        try:
+            resultado = subidor.subir(archivo, valores, avisar=avisar)
+        except BaseException:
+            # Sin ``FinishUpload`` no hay batch posible: se corto mientras
+            # viajaban los trozos, o al cancelar, y conservar la reserva
+            # dejaba el archivo marcado como ya enviado sin haberlo sido.
+            # Un subidor que no dice hasta donde llego conserva la reserva,
+            # igual que una respuesta incierta.
+            if not getattr(subidor, "finish_enviado", True):
+                if not anterior:
+                    _liberar(raiz, clave)
+                # La orden de repetir el PDF sigue pendiente: no se cumplio.
+                trabajo._duplicado_permitido = permitido
+            raise
         if not resultado.ok and not anterior:
             # Un rechazo confirmado permite reintentar. Una excepcion o una
             # respuesta incierta conserva la reserva y requiere advertencia.
-            with _conexion(raiz) as db:
-                db.execute("DELETE FROM cargas WHERE huella=?", (clave,))
-                db.commit()
+            _liberar(raiz, clave)
         return resultado
+
+
+def _liberar(raiz, clave) -> None:
+    """Quita la reserva de un PDF que al final no llego a enviarse."""
+    with _conexion(raiz) as db:
+        db.execute("DELETE FROM cargas WHERE huella=?", (clave,))
+        db.commit()
