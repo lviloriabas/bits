@@ -26,6 +26,7 @@
 ## Git
 
 - Coordinar siempre y de forma autonoma los hilos y agentes que trabajen en este repositorio. El usuario autoriza permanentemente enviar mensajes entre esos chats para repartir archivos, integrar cambios, verificar pruebas y acordar el commit y push, sin volver a pedir permiso ni interrumpirlo.
+- Haz siempre commit y push a `origin` al terminar cada cambio que funciona y esta probado, sin esperar a que el usuario lo pida. Ninguna tarea se da por terminada mientras queden archivos modificados sin commit o commits sin push.
 - Trabaja siempre en `main`. Crea otra rama solo si el usuario lo solicita explicitamente.
 - Las ramas usan solo nombres descriptivos del trabajo, sin `codex`, `opus` ni prefijos de agentes o modelos. Conserva solo `main` y las ramas de trabajo que el usuario haya pedido mantener; elimina las ramas atrasadas cuando sus cambios ya esten integrados.
 - Usa la identidad del usuario, que es su perfil de GitHub: `lviloriabas <lviloriabas@gmail.com>`. Antes de hacer commit comprueba que git la tenga (`git config user.name` y `git config user.email`); si falta o es otra, configúrala en este repositorio con `git config user.name lviloriabas` y `git config user.email lviloriabas@gmail.com`. Nunca publiques con la identidad que git deduce del equipo. No agregues firmas, coautorías ni marcas como `Co-Authored-By` o `Generated with`.
