@@ -88,6 +88,87 @@ ESPERAS_REINTENTO_PAGINA = (3.0, 10.0)
 ESPERAS_TRAS_ESCRIBIR = (5, 15, 40)
 
 
+# ── lo que ya quedo confirmado ─────────────────────────────────────
+#
+# Un batch al que le quedan dos paginas amarillas se releia entero en cada
+# reintento: una lectura por pagina al planificar y otra al verificar, hasta
+# tres veces por vuelta. Con cuatrocientas paginas eso era lo que tardaba,
+# no las dos que habia que arreglar. Aqui se recuerda cada bitacora que una
+# verificacion dio por buena, con lo que se leyo de ella, y el mapa del
+# batch (una sola peticion) dice despues cuales siguen igual.
+
+
+@dataclass(frozen=True)
+class _Confirmada:
+    """Una bitacora que la verificacion dio por buena, y lo que se leyo."""
+
+    firma: tuple
+    remota: object
+
+
+def _firma(manifiesto: Manifiesto, registro: Registro) -> tuple:
+    """Lo que se confirmo. Si el batch o el registro cambian, deja de valer."""
+    return (
+        manifiesto.batch_id or "", registro.log_number, registro.matricula,
+        registro.fecha, registro.fecha_dudosa,
+    )
+
+
+def _confirmadas_de(manifiesto) -> Dict[int, _Confirmada]:
+    guardadas = getattr(manifiesto, "_confirmadas", None)
+    return guardadas if isinstance(guardadas, dict) else {}
+
+
+def recordar_confirmada(manifiesto, registro: Registro, remota) -> None:
+    _confirmadas_de(manifiesto)[registro.seq] = _Confirmada(
+        _firma(manifiesto, registro), remota
+    )
+
+
+def olvidar_confirmada(manifiesto, seq: int) -> None:
+    _confirmadas_de(manifiesto).pop(seq, None)
+
+
+def confirmadas_sin_cambios(cliente, manifiesto) -> Dict[int, object]:
+    """Lo leido de las bitacoras confirmadas que AirVault no ha cambiado.
+
+    Devuelve, por ``seq``, la lectura con la que se confirmo cada bitacora
+    que el mapa del batch sigue mostrando sin borrar y en el mismo estado.
+    Quien llama usa esa lectura en lugar de pedir la pagina otra vez.
+
+    Si no hay nada confirmado no se pide ni el mapa. Si el mapa no se puede
+    leer, o el cliente no lo ofrece, no se da nada por igual y se lee el
+    batch entero, como siempre.
+    """
+    guardadas = _confirmadas_de(manifiesto)
+    batch_id = manifiesto.batch_id or ""
+    leer_mapa = getattr(cliente, "paginas_del_lote", None)
+    if not guardadas or not batch_id or not callable(leer_mapa):
+        return {}
+    try:
+        mapa = {pagina.pagina: pagina for pagina in leer_mapa(batch_id)}
+    except FALLOS_DE_CAMINO:
+        raise
+    except Exception as exc:  # noqa: BLE001 - se cae a la lectura completa
+        logger.debug("No se pudo leer el mapa del batch {}: {}", batch_id, exc)
+        return {}
+    iguales: Dict[int, object] = {}
+    for registro in manifiesto.bitacoras():
+        guardada = guardadas.get(registro.seq)
+        if guardada is None or guardada.firma != _firma(manifiesto, registro):
+            continue
+        numero = registro.pagina_batch or registro.seq
+        actual = mapa.get(numero)
+        if (
+            actual is None or actual.borrada
+            or getattr(guardada.remota, "pagina", numero) != numero
+            or actual.estado != getattr(guardada.remota, "estado", None)
+        ):
+            continue
+        iguales[registro.seq] = guardada.remota
+    return iguales
+
+
 @dataclass
 class PlanPagina:
     """Lo que se haria en una pagina concreta."""
@@ -235,19 +316,42 @@ class Indexador:
         # corrigen antes de construir los valores que se van a escribir.
         leidas: Dict[int, object] = {}
         ilegibles: Dict[int, str] = {}
+        # Lo que una verificacion ya confirmo y el mapa del batch sigue
+        # mostrando igual no se vuelve a pedir: se planifica con lo que se
+        # leyo entonces. Asi el reintento de un batch con dos paginas
+        # amarillas lee esas dos y no las cuatrocientas. Con «sobrescribir»
+        # se lee todo: quien lo pide quiere el estado de ahora.
+        confirmadas = (
+            {} if self.sobrescribir
+            else confirmadas_sin_cambios(self.cliente, self.manifiesto)
+        )
         # Una divisoria no se lee: no tiene indices que aprender ni con que
         # contrastar, y son peticiones de mas contra el servidor.
-        por_leer = [
-            (registro, registro.pagina_batch or indice)
-            for indice, registro in enumerate(registros, start=1)
-            if not registro.es_separador
-        ]
+        por_leer = []
+        for indice, registro in enumerate(registros, start=1):
+            if registro.es_separador:
+                continue
+            pagina = registro.pagina_batch or indice
+            previa = confirmadas.get(registro.seq)
+            if previa is not None and getattr(previa, "pagina", pagina) == pagina:
+                leidas[registro.seq] = previa
+            else:
+                por_leer.append((registro, pagina))
+        if leidas:
+            logger.info(
+                "Batch {}: {} paginas ya confirmadas no se releen; se leen "
+                "las {} que faltan",
+                batch_id, len(leidas), len(por_leer),
+            )
 
         def leer(cliente, tarea):
             return cliente.leer_pagina(batch_id, tarea[1])
 
         def recibir(tarea, remota, error) -> bool:
             registro, pagina = tarea
+            # Lo que se vuelve a leer deja de estar confirmado hasta que la
+            # verificacion lo compruebe otra vez.
+            olvidar_confirmada(self.manifiesto, registro.seq)
             if error is None:
                 leidas[registro.seq] = remota
                 return True
@@ -272,7 +376,8 @@ class Indexador:
         # antes.
         remotas: Dict[int, object] = {
             registro.seq: leidas[registro.seq]
-            for registro, _pagina in por_leer if registro.seq in leidas
+            for registro in registros
+            if not registro.es_separador and registro.seq in leidas
         }
         self.remotas = remotas
         self._aprender_flota(remotas.values())
@@ -616,6 +721,10 @@ class Indexador:
                 al_avanzar(resultado.escritas, previstas)
             return True
 
+        # Lo que se va a escribir deja de estar confirmado hasta que la
+        # verificacion lo relea.
+        for entrada, _valores, _estado in por_escribir:
+            olvidar_confirmada(self.manifiesto, entrada.seq)
         repartir(self.cliente, por_escribir, escribir, recibir)
 
         # Las divisorias conservaron hasta aqui la numeracion con la que se
@@ -787,6 +896,27 @@ def _con_relecturas_varias(cliente, revisores, esperas=(), dormir=None):
     registros = [list(manifiesto.bitacoras()) for manifiesto, _, _ in revisores]
     dormir = dormir or time.sleep
     revisiones: Dict[tuple[int, int], _Revision] = {}
+    # Lo que ya se confirmo y el mapa del batch sigue mostrando igual no se
+    # relee: se revisa contra lo que se leyo entonces. Si el registro cambio
+    # y ya no cuadra con esa lectura, la pagina se vuelve a pedir.
+    previas = [0] * len(revisores)
+    for numero, (manifiesto, revisar, _) in enumerate(revisores):
+        iguales = confirmadas_sin_cambios(cliente, manifiesto)
+        for registro in registros[numero] if iguales else ():
+            remota = iguales.get(registro.seq)
+            if remota is None:
+                continue
+            revision = revisar(
+                registro, remota, registro.pagina_batch or registro.seq
+            )
+            if revision.valida:
+                revisiones[numero, registro.seq] = revision
+                previas[numero] += 1
+        if previas[numero]:
+            logger.info(
+                "Batch {}: {} de {} paginas ya confirmadas no se releen",
+                manifiesto.batch_id, previas[numero], len(registros[numero]),
+            )
 
     def leer_todas(por_leer, relectura: bool) -> None:
         """Lee las paginas repartidas y las compara aqui, de una en una.
@@ -795,7 +925,7 @@ def _con_relecturas_varias(cliente, revisores, esperas=(), dormir=None):
         en este hilo aunque la lectura venga de otro carril. La barra solo
         avanza en la primera lectura; las relecturas son de unas pocas.
         """
-        hechas = [0] * len(revisores)
+        hechas = [0] * len(revisores) if relectura else list(previas)
 
         def leer(conexion, tarea):
             numero, registro = tarea
@@ -818,6 +948,10 @@ def _con_relecturas_varias(cliente, revisores, esperas=(), dormir=None):
                 )
             else:
                 revision = revisar(registro, remota, pagina)
+            if error is None and revision.valida:
+                recordar_confirmada(manifiesto, registro, remota)
+            else:
+                olvidar_confirmada(manifiesto, registro.seq)
             revisiones[numero, registro.seq] = revision
             hechas[numero] += 1
             if relectura:
@@ -840,7 +974,9 @@ def _con_relecturas_varias(cliente, revisores, esperas=(), dormir=None):
     tareas = [
         (numero, grupo[pagina])
         for pagina in range(max((len(grupo) for grupo in registros), default=0))
-        for numero, grupo in enumerate(registros) if pagina < len(grupo)
+        for numero, grupo in enumerate(registros)
+        if pagina < len(grupo)
+        and (numero, grupo[pagina].seq) not in revisiones
     ]
     leer_todas(tareas, relectura=False)
     for ronda, espera in enumerate(esperas, start=1):

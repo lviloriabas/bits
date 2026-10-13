@@ -260,14 +260,27 @@ def verificar_alineacion(
     ancla: Quick Upload clasifica el archivo entero con el Aircraft de su
     primera bitacora, asi que la trae puesta cada pagina del batch y es
     nuestra, no de AirVault.
+
+    Tampoco sirve de ancla un log remoto que no es un numero de bitacora.
+    AirVault lee la letra por su cuenta al recibir el archivo y a veces deja
+    «00» o «1» en una pagina que nadie ha indexado. Eso no es el numero de
+    otra bitacora: es una lectura fallida, y tomarla por un PDF corrido
+    dejaba esa pagina sin escribir y el batch en amarillo por ella sola. En
+    una pagina ya verde si cuenta: ahi lo dejo el indexado o una persona.
     """
     avisos: List[Aviso] = []
     log_remoto = str(valores_en_airvault.get(CAMPO_LOG_NUMBER, "")).strip()
+    lectura_fallida = (
+        estado_pagina is not None
+        and estado_pagina != ESTADO_VALIDO
+        and not normalizar_log_number(log_remoto)
+    )
     if (
         log_remoto
         and registro.log_number
         and log_remoto != registro.log_number
         and not permitir_log_distinto
+        and not lectura_fallida
     ):
         avisos.append(
             Aviso(

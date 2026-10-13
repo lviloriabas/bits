@@ -103,6 +103,39 @@ def test_sin_dato_remoto_se_sigue_por_posicion():
     assert verificar_alineacion(registro(), {}) == []
 
 
+@pytest.mark.parametrize("leido", ["00", "1", "228732", "22873255", "N/A"])
+def test_una_lectura_fallida_de_airvault_no_es_desalineacion(leido):
+    """AirVault lee la letra por su cuenta y a veces deja algo que no es un log.
+
+    En una pagina sin indexar eso no nombra otra bitacora. Tomarlo por un
+    PDF corrido dejaba la pagina sin escribir y el batch en amarillo.
+    """
+    for estado in (1, 2, 3):
+        assert verificar_alineacion(
+            registro(log="2287325"), {CAMPO_LOG_NUMBER: leido},
+            estado_pagina=estado,
+        ) == [], f"estado {estado}"
+
+
+@pytest.mark.parametrize("estado", [None, ESTADO_VALIDO])
+def test_un_log_raro_si_bloquea_en_verde_o_sin_saber_el_estado(estado):
+    avisos = verificar_alineacion(
+        registro(log="2287325"), {CAMPO_LOG_NUMBER: "00"},
+        estado_pagina=estado,
+    )
+
+    assert [aviso.codigo for aviso in avisos] == ["desalineado"]
+
+
+def test_otro_numero_de_bitacora_bloquea_aunque_la_pagina_no_este_verde():
+    avisos = verificar_alineacion(
+        registro(log="2287325"), {CAMPO_LOG_NUMBER: "2287999"},
+        estado_pagina=3,
+    )
+
+    assert [aviso.codigo for aviso in avisos] == ["desalineado"]
+
+
 def test_la_matricula_de_quick_upload_nunca_bloquea():
     """Es la del archivo entero, puesta por nosotros: no dice nada.
 

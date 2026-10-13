@@ -13,7 +13,7 @@ from datetime import datetime
 from enum import Enum
 from typing import ClassVar, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 
 class EstadoEtapa(str, Enum):
@@ -243,6 +243,13 @@ class Manifiesto(BaseModel):
     # y cuantas lo reenvio el programa por su cuenta.
     historial: List[Evento] = Field(default_factory=list)
     registros: List[Registro] = Field(default_factory=list)
+
+    # Bitacoras que una verificacion ya confirmo en AirVault, por ``seq``,
+    # con lo que se leyo de cada una. No viaja en el JSON: vive lo que el
+    # manifiesto en memoria, y un programa recien abierto vuelve a leer el
+    # batch entero una vez. Lo usa :mod:`app.airvault.indexer` para que un
+    # reintento lea solo las paginas que siguen pendientes.
+    _confirmadas: Dict[int, object] = PrivateAttr(default_factory=dict)
 
     # Orden canonico de las etapas. Es una constante de clase, no un campo:
     # no tiene por que viajar en el JSON del manifiesto ni cambiar por

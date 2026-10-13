@@ -124,6 +124,22 @@ def test_log_distinto_bloquea_esa_pagina():
     assert plan.bloqueadas[0].avisos[0].codigo == "desalineado"
 
 
+def test_una_lectura_fallida_de_airvault_no_deja_la_pagina_en_amarillo():
+    """«00» en una pagina sin indexar no es otra bitacora: se escribe."""
+    m = manifiesto()
+    cliente = ClienteFalso(
+        paginas={2: pagina(2, estado=3, valores={CAMPO_LOG_NUMBER: "00"})},
+        page_count=2,
+    )
+    indexador = Indexador(cliente, m, PICKLIST)
+    plan = indexador.planificar(2)
+
+    assert len(plan.escribibles) == 2
+    indexador.aplicar(plan)
+    assert cliente.paginas[2].valores[CAMPO_LOG_NUMBER] == "2287322"
+    assert verificar_lote(cliente, m) == (2, 2, [])
+
+
 def test_otro_avion_en_el_libro_bloquea_las_paginas_que_lo_contradicen():
     """Un libro es un avion, y AirVault ya dijo cual en una pagina verde.
 
