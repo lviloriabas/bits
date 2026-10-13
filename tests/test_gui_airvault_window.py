@@ -32,6 +32,8 @@ from PySide6.QtWidgets import (
 )
 
 from app.airvault.config import AirVaultConfig
+from app.airvault.session import (ErrorDeAirVault, ErrorDeConexion,
+                                  ErrorDeSesion)
 from app.core.parallelism import available_cpu_threads
 from app.gui.automatizacion import OpcionesAutomatizacion
 from app.gui.airvault_window import (
@@ -1500,6 +1502,123 @@ def test_una_comprobacion_buena_borra_la_racha_de_fallos(ventana):
 
     assert ventana._fallos_seguidos == 0
     assert ventana._vigilante.isActive()
+
+
+class HiloSinConexion:
+    """El hilo que acaba de cortarse por falta de conexión o de sesión."""
+
+    conexion_perdida = True
+
+    @staticmethod
+    def isRunning() -> bool:
+        return False
+
+
+def _bitacora(ventana) -> str:
+    return "\n".join(
+        ventana.bitacora.item(i).text() for i in range(ventana.bitacora.count())
+    )
+
+
+def test_perder_la_conexion_reconecta_enseguida_y_nunca_se_espacia(ventana):
+    """Una caída de AirVault de una hora no deja la ventana quince minutos quieta.
+
+    Quedarse sin conexión no cuenta como los demás fallos: por muchas veces
+    seguidas que pase, el reloj vuelve a intentar a los pocos segundos, hasta
+    que una comprobación buena devuelve el intervalo elegido.
+    """
+    from app.airvault.flujo import PROCESANDO
+    from app.gui.airvault_window import (FALLOS_SEGUIDOS_ANTES_DE_ESPACIAR,
+                                         SEGUNDOS_PARA_RECONECTAR)
+
+    ventana._estados = [parte(PROCESANDO)]
+    ventana._ajustar_vigilancia()
+    ventana._worker = HiloSinConexion()
+    for _ in range(FALLOS_SEGUIDOS_ANTES_DE_ESPACIAR + 2):
+        ventana._al_fallar("AirVault no responde. Revise la conexión y vuelva a intentarlo.")
+        ventana._al_terminar()
+
+    assert ventana._vigilante.isActive()
+    assert ventana._vigilante.interval() == SEGUNDOS_PARA_RECONECTAR * 1000
+    assert ventana._fallos_seguidos == 0
+    assert "Se vuelve a conectar enseguida, hasta lograrlo." in ventana.resumen.text()
+    assert "Se reintenta en" not in ventana.resumen.text()
+    assert ventana.estado_label.text() == "Reconectando con AirVault"
+    ventana._pintar_linea_viva()
+    assert ventana._linea_viva.text().startswith(
+        "Sin conexión con AirVault: se vuelve a conectar en "
+    )
+    # Fallar cada pocos segundos por lo mismo no llena la bitácora.
+    assert _bitacora(ventana).count("Se detuvo:") == 1
+
+    ventana._al_comprobar({
+        "estados": [parte(PROCESANDO)], "planes": {}, "partes": [],
+    })
+    assert ventana._intentos_de_reconexion == 0
+    assert ventana._vigilante.interval() == 2 * 60_000
+    assert "Conexión con AirVault recuperada" in _bitacora(ventana)
+    ventana._worker = None
+    ventana.close()
+
+
+def test_un_fallo_que_no_es_de_conexion_deja_de_reconectar(ventana):
+    """AirVault ya contesta, aunque sea con un rechazo: vuelve el reloj normal."""
+    from app.airvault.flujo import PROCESANDO
+
+    ventana._estados = [parte(PROCESANDO)]
+    ventana._ajustar_vigilancia()
+    ventana._worker = HiloSinConexion()
+    ventana._al_fallar("AirVault no responde. Revise la conexión y vuelva a intentarlo.")
+    ventana._worker = None
+
+    ventana._al_fallar("El batch está abierto en AirVault. Ciérrelo y vuelva a intentarlo.")
+
+    assert ventana._intentos_de_reconexion == 0
+    assert ventana._fallos_seguidos == 1
+    assert ventana._vigilante.interval() == 2 * 60_000
+    assert "Se reintenta en 2 min." in ventana.resumen.text()
+    ventana.close()
+
+
+def test_un_indexado_cortado_por_la_conexion_se_retoma_enseguida(ventana):
+    from app.airvault.flujo import LISTO
+    from app.gui.airvault_window import SEGUNDOS_PARA_RECONECTAR
+
+    ventana._al_comprobar({
+        "estados": [parte(LISTO)], "planes": {}, "partes": [],
+    })
+
+    class Cortado(ResultadoFalso):
+        interrumpido = "No se pudo completar /index/x tras 3 intentos: no se pudo conectar"
+
+    ventana._al_indexar({"resultado": Cortado(), "validas": 1, "total": 3})
+
+    assert ventana._vigilante.isActive()
+    assert ventana._vigilante.interval() == SEGUNDOS_PARA_RECONECTAR * 1000
+    ventana.close()
+
+
+@pytest.mark.parametrize("error,perdida", [
+    (ErrorDeConexion("No se pudo completar /index/Batch/GetBatches tras 3 intentos"), True),
+    (ErrorDeSesion("La sesion de AirVault caduco."), True),
+    (TimeoutError("timed out"), True),
+    (ErrorDeAirVault("AirVault rechazo /index/x: This batch is being locked by other user."), False),
+    (ValueError("otra cosa"), False),
+])
+def test_el_hilo_dice_si_lo_que_lo_corto_fue_la_conexion(error, perdida, monkeypatch):
+    worker = TrabajoAirVaultWorker("comprobar", {})
+
+    def fallar():
+        raise error
+
+    monkeypatch.setattr(worker, "_comprobar", fallar)
+    fallos: list = []
+    worker.fallo.connect(fallos.append)
+
+    worker.run()
+
+    assert len(fallos) == 1
+    assert worker.conexion_perdida is perdida
 
 
 # ── completar el batch ─────────────────────────────────────────────

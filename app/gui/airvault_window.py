@@ -302,6 +302,15 @@ REINTENTOS_AMARILLOS_ESPACIADOS = 6
 FALLOS_SEGUIDOS_ANTES_DE_ESPACIAR = 3
 MINUTOS_TRAS_FALLOS = 15
 
+# Perder la conexión o la sesión de AirVault no entra en esa cuenta ni
+# espera al reloj: se vuelve a conectar enseguida, una y otra vez, hasta
+# lograrlo. Antes contaba como cualquier otro fallo, y una caída de AirVault
+# de una hora dejaba la ventana preguntando cada quince minutos, con lo que
+# el proceso seguía parado un buen rato después de volver el servidor. La
+# pausa es solo para no girar en vacío cuando el intento falla al instante;
+# cada intento ya trae sus propios reintentos de red.
+SEGUNDOS_PARA_RECONECTAR = 5
+
 # Minutos que se espera antes de repetir un chequeo de Web Search que no se
 # pudo terminar: el que no llegó a abrir Web Search, o el que dejó batches
 # sin leer después de sus vueltas. Cada espera es un intento; gastadas
@@ -797,6 +806,10 @@ class TrabajoAirVaultWorker(QThread):
         # ventana puede pedir la cancelacion en ese hueco.
         self._parar = False
         self._lecturas_websearch: list = []
+        # Si lo que cortó el trabajo fue quedarse sin conexión o sin sesión.
+        # La ventana lo mira al recibir el fallo para reconectar enseguida
+        # en vez de esperar a la revisión siguiente.
+        self.conexion_perdida = False
 
     def cancelar(self) -> None:
         """Pide que pare, arrancado o no.
@@ -861,6 +874,10 @@ class TrabajoAirVaultWorker(QThread):
                 from app.airvault.errores_websearch import mensaje_error_websearch
                 self.fallo.emit(mensaje_error_websearch(exc))
             else:
+                from app.airvault.session import ErrorDeConexion, ErrorDeSesion
+                self.conexion_perdida = isinstance(
+                    exc, (ErrorDeConexion, ErrorDeSesion, ConnectionError, TimeoutError)
+                )
                 self.fallo.emit(mensaje_error(exc, "No se pudo continuar el indexado. Vuelva a revisar en AirVault."))
 
     def _avisar(self, texto: str, hechas: int, total: int) -> None:
@@ -2283,6 +2300,10 @@ class AirVaultWindow(QDialog):
         # que separa un tropiezo de AirVault de un problema que tarda en
         # arreglarse; ver `FALLOS_SEGUIDOS_ANTES_DE_ESPACIAR`.
         self._fallos_seguidos = 0
+        # Intentos seguidos que se cortaron por falta de conexión o de
+        # sesión. Mientras no sea cero el reloj no espera sus minutos:
+        # vuelve a conectar enseguida; ver `SEGUNDOS_PARA_RECONECTAR`.
+        self._intentos_de_reconexion = 0
         # Encadena una comprobacion en cuanto termine lo que esta en vuelo:
         # subir e indexar dejan la lista desactualizada.
         self._comprobar_al_terminar = False
@@ -6638,7 +6659,7 @@ class AirVaultWindow(QDialog):
         if self._vigilante is None:
             self._vigilante = QTimer(self)
             self._vigilante.timeout.connect(self._comprobar_solo)
-        self._vigilante.setInterval(self._minutos_de_vigilancia() * 60_000)
+        self._vigilante.setInterval(self._ms_de_vigilancia())
         self._vigilante.start()
         self._actualizar_latido()
 
@@ -6790,6 +6811,16 @@ class AirVaultWindow(QDialog):
         if self._fallos_seguidos >= FALLOS_SEGUIDOS_ANTES_DE_ESPACIAR:
             return max(minutos, MINUTOS_TRAS_FALLOS)
         return minutos
+
+    def _ms_de_vigilancia(self) -> int:
+        """Lo que tarda el reloj en volver a preguntar, en milisegundos.
+
+        Sin conexión con AirVault no cuentan los minutos elegidos ni ningún
+        espaciado: se vuelve a intentar enseguida, hasta reconectar.
+        """
+        if self._intentos_de_reconexion:
+            return SEGUNDOS_PARA_RECONECTAR * 1000
+        return self._minutos_de_vigilancia() * 60_000
 
     def _parar_vigilancia(self) -> None:
         if self._vigilante is not None:
@@ -7624,6 +7655,8 @@ class AirVaultWindow(QDialog):
                 else self._paso_websearch if lector
                 else "Ahora: " + (
                     self._paso_visible
+                    or (f"Reconectando con AirVault, intento {self._intentos_de_reconexion + 1}"
+                        if self._intentos_de_reconexion else "")
                     or PASO_INICIAL.get(getattr(worker, "modo", ""), "Preparando el proceso")
                 )
             ) + f" ({_minutos(time.monotonic() - inicio)})"
@@ -7658,7 +7691,9 @@ class AirVaultWindow(QDialog):
             # un fallo y una cola que lleva horas igual no son lo mismo que
             # AirVault armando una carga, y la espera se leía como un
             # proceso parado.
-            if self._fallos_seguidos:
+            if self._intentos_de_reconexion:
+                texto = f"Sin conexión con AirVault: se vuelve a conectar en {_minutos(restante)}"
+            elif self._fallos_seguidos:
                 texto = f"El último intento falló: se reintenta en {_minutos(restante)}"
             elif self._vigilancia_agotada:
                 texto = (
@@ -7907,6 +7942,9 @@ class AirVaultWindow(QDialog):
         # Una comprobación buena borra la racha: lo que llevara fallando
         # dejó de fallar.
         self._fallos_seguidos = 0
+        if self._intentos_de_reconexion:
+            self._intentos_de_reconexion = 0
+            self._anotar("Conexión con AirVault recuperada: el proceso continúa")
         self._fin_pendiente = True
         self._estado["planes"] = datos["planes"]
         self._recibir_trabajos(self._estado.get("trabajos") or self._trabajos)
@@ -8093,8 +8131,9 @@ class AirVaultWindow(QDialog):
         if resultado.interrumpido:
             if not acotado:
                 # Sin sesión o sin red no se puede seguir ahora, pero la
-                # ejecución no se queda quieta: la próxima vuelta del reloj
-                # lo retoma desde donde quedó.
+                # ejecución no se queda quieta: el reloj vuelve a conectar
+                # enseguida y lo retoma desde donde quedó.
+                self._intentos_de_reconexion += 1
                 self._ajustar_vigilancia()
             self.resumen.setText(
                 f"{mensaje_error(resultado.interrumpido, 'El indexado se detuvo.')} {cuenta}"
@@ -8235,8 +8274,16 @@ class AirVaultWindow(QDialog):
         # todas las papeletas de salir bien, y nadie está delante para volver
         # a pulsar. Tampoco una racha: la red o AirVault vuelven, y la
         # ejecución tiene que acabar indexada. Tras varios fallos seguidos
-        # solo se pregunta más espaciado.
-        self._fallos_seguidos += 1
+        # solo se pregunta más espaciado. Quedarse sin conexión o sin sesión
+        # va aparte: no suma a esa racha y se reconecta enseguida.
+        sin_conexion = bool(
+            not preparacion and getattr(self._worker, "conexion_perdida", False)
+        )
+        if sin_conexion:
+            self._intentos_de_reconexion += 1
+        else:
+            self._intentos_de_reconexion = 0
+            self._fallos_seguidos += 1
         if not self._cerrar_al_terminar and not preparacion:
             self._ajustar_vigilancia()
         sigue = bool(
@@ -8244,12 +8291,22 @@ class AirVaultWindow(QDialog):
             and self._vigilante is not None
             and self._vigilante.isActive()
         )
-        if sigue:
+        reconecta = sin_conexion and sigue
+        if reconecta:
+            mensaje += " Se vuelve a conectar enseguida, hasta lograrlo."
+        elif sigue:
             mensaje += f" Se reintenta en {self._minutos_de_vigilancia()} min."
         self.resumen.setText(mensaje)
-        self.estado_label.setText("No se pudo preparar la entrega" if preparacion else "El indexado no pudo continuar")
+        self.estado_label.setText(
+            "No se pudo preparar la entrega" if preparacion
+            else "Reconectando con AirVault" if reconecta
+            else "El indexado no pudo continuar"
+        )
         self.estado_label.setToolTip("")
-        self._anotar(f"Se detuvo: {mensaje}")
+        # Reconectando se falla cada pocos segundos por lo mismo: se anota
+        # la primera vez y, al volver, que la conexión se recuperó.
+        if not reconecta or self._intentos_de_reconexion == 1:
+            self._anotar(f"Se detuvo: {mensaje}")
         self._limpiar_progreso()
 
     def _al_cancelar(self) -> None:
@@ -8265,6 +8322,7 @@ class AirVaultWindow(QDialog):
         self._resultado_fallido = True
         self._fin_confirmado = None
         self.estado_label.setText("Cancelado")
+        self._intentos_de_reconexion = 0
         self._anotar("Cancelado: se desbloquean los batches abiertos")
         self._parar_vigilancia()
         self._soltar_lotes()
