@@ -85,7 +85,7 @@ Cada decisión de estructura responde a una restricción concreta. Conviene cono
 3. **Hilo para la interfaz, procesos para el OCR.** PaddleOCR es trabajo pesado de CPU y el GIL de Python impide repartirlo con hilos. `QThread` mantiene la ventana viva y `OcrProcessPool` reparte páginas o archivos entre procesos que cargan los modelos una sola vez y se reutilizan. `parallelism.py` decide cuántos procesos e hilos caben según núcleos y memoria libre.
 4. **El JSON es la fuente de verdad; CSV y PDF son vistas.** El JSON guarda alternativas, procedencia y confianza de cada campo. Por eso se puede exportar otra vez, depurar o cambiar la política de fecha sin repetir OCR. El CSV no alcanza para investigar una página.
 5. **Ante la duda, REVISAR, y una sola vez.** `needs_review()` (`app/validation/page_status.py`) decide a la vez la columna `review` del CSV y el reparto de la entrega. Si cada salida lo decidiera por su cuenta, el CSV y los PDF podrían contar cosas distintas.
-6. **AirVault reanudable y verificable.** Cada batch tiene un manifiesto en `output/airvault/` con el estado de cada etapa y de cada página. Reanudar no repite guardados ya verificados, y una carga aceptada sin descubrir nunca autoriza un reenvío automático. `flujo.py` no abre sesiones: recibe el cliente, así el recorrido entero se ejercita con el cliente falso de `tests/airvault_fake.py`. Lo que decide si una página se escribe vive aparte, en `guards.py` e `indexer.py`, que son lo más probado.
+6. **AirVault reanudable y verificable.** Cada batch tiene un manifiesto en `output/airvault/` con el estado de cada etapa y de cada página. Reanudar no repite guardados ya verificados. Una carga aceptada que AirVault no publica solo vuelve a enviarse sola cuando la cola no la tiene, venció su plazo y Web Search tampoco tiene sus bitácoras, y como mucho dos veces. `flujo.py` no abre sesiones: recibe el cliente, así el recorrido entero se ejercita con el cliente falso de `tests/airvault_fake.py`. Lo que decide si una página se escribe vive aparte, en `guards.py` e `indexer.py`, que son lo más probado.
 7. **Portable, sin red y solo CPU.** Intérprete, bibliotecas y modelos viven en `portable/`; el OCR no descarga nada ni detecta GPU. Solo AirVault necesita red y Edge.
 8. **Web Reports por pantalla, no por peticiones sueltas.** El informe es SSRS y se conduce con Edge para que valgan los permisos de la cuenta y las validaciones del propio AirVault.
 
@@ -329,7 +329,7 @@ Código: `app/reports/outputs.py`, `csv_reporter.py`, `json_reporter.py`, `organ
 | Sesión | Edge obtiene la autenticación federada y conserva el perfil en `portable/edge-airvault/`. Python reutiliza cookies y tokens antifalsificación. |
 | Preparar | Relaciona CSV, PDF e índice de páginas; divide las cargas y separa revisión. La compresión opcional crea copias a 200 DPI. |
 | Subir | Envía un PDF por vez a Quick Upload. Registra la aceptación antes de buscar el batch remoto. `FinishUpload`, que crea el batch, no se repite si su respuesta se pierde: la carga queda `en_curso` y se confirma en la cola. |
-| Revisar | Identifica la carga por nombre, cantidad y contenido, esperando a que AirVault la tenga entera (`espera_descubrimiento_s` entre vueltas, hasta `espera_maxima_s`). Encontrarla da la subida por hecha. Una aceptación sin descubrimiento no autoriza reenvío automático. |
+| Revisar | Identifica la carga por nombre, cantidad y contenido, esperando a que AirVault la tenga entera (`espera_descubrimiento_s` entre vueltas, hasta `espera_maxima_s`). Encontrarla da la subida por hecha. Si la cola entera no la tiene y venció su plazo (`espera_para_darla_por_perdida`), queda como no encontrada y se retoma como se explica abajo. |
 | Planear | Mapea páginas y campos; comprueba obligatorios, duplicados, valores remotos y matrícula del libro. Una diferencia de cantidad bloquea el batch. |
 | Indexar | Escribe las páginas permitidas, relee los valores y actualiza el manifiesto. Conserva páginas válidas, omite conflictos y retira separadores del flujo normal. |
 | Completar | Completa solo batches válidos para Web Search. **REVISAR** conserva separadores y no se publica automáticamente. |
@@ -354,11 +354,16 @@ stateDiagram-v2
     state "Completado en Web Search" as Completado
     state "Revisión humana" as Humana
     state "Bloqueado" as Bloqueado
+    state "No encontrado en AirVault" as Ausente
 
     [*] --> Preparado: preparar (CSV, PDF, _paginas.json)
     Preparado --> Subido: subir por Quick Upload
     Subido --> Descubierto: descubrir por nombre, cantidad y contenido
     Subido --> Bloqueado: posible duplicado con la casilla marcada
+    Subido --> Ausente: la cola no la tiene y venció su plazo
+    Ausente --> Completado: sus bitácoras ya están en Web Search
+    Ausente --> Subido: Web Search no las tiene, se reenvía (hasta dos veces)
+    Ausente --> Bloqueado: tuvo ID, o agotó los reenvíos
     Descubierto --> Planeado: planificar con mapping y guards
     Planeado --> Bloqueado: cantidad distinta o libro en conflicto
     Planeado --> Indexado: indexar, releer y verificar
@@ -374,6 +379,12 @@ Si una página remota válida asigna otra aeronave al mismo libro, la escritura 
 En **REVISAR** se envían los campos disponibles y se omiten obligatorios sin lectura; no se mandan explícitamente vacíos para forzar el guardado. Se confirma cada página por relectura. Una incidencia puede mantener `Need Correction` aunque el guardado haya terminado; una página completa sin incidencia independiente puede quedar `Valid`. Si el servidor rechaza campos omitidos, el fallo sigue pendiente. La aceptación depende de la configuración real de AirVault y debe comprobarse en una carga operativa.
 
 Las causas viajan en el índice JSON y el manifiesto. Para faltas confirmadas se usa `AUDIT IN PROGRESS` y se selecciona un solo `ECN Reason`, respetando uno existente. La prioridad es capitán, piloto y técnico; para técnico, firma antes que licencia. No se escriben el segundo ni el tercer ECN Reason. El catálogo y la conversión están en `app/airvault/ecn.py`.
+
+Una carga que Quick Upload aceptó y AirVault no publicó no se queda esperando una orden. `_estado_de` la deja en `NO_ENCONTRADO` cuando la búsqueda amplia recorre la cola entera sin hallarla y ya pasó el plazo de publicación de un archivo de su tamaño. Si nunca llegó a tener ID, `partes_por_recuperar` la entrega a la ventana, que la retoma al final de la cadena (`_recuperar_perdidos`): primero busca sus bitácoras en Web Search, porque completar un batch también lo saca de la cola. Encontradas, el batch queda confirmado; ausentes, vuelve a Quick Upload por el camino de `recuperar_ausentes`, que mira la cola una vez más antes de enviar; sin respuesta, se pregunta de nuevo cada `MINUTOS_ENTRE_CHEQUEOS_DE_PERDIDOS`. Una ausencia ya comprobada vale `VIGENCIA_DE_AUSENCIA_S` sin volver a preguntar. No se retoman solos el batch que tuvo ID y dejó de estar en la cola (lo completó o lo borró alguien), el cancelado ni el de una mezcla pendiente, y tras `REENVIOS_AUTOMATICOS_MAXIMOS` reenvíos la decisión pasa a una persona.
+
+Para decidirlo el manifiesto lleva un `historial` de eventos (`Evento`: momento, paso, resultado y detalle) que sobrevive a reiniciar la subida, que es lo que borra las etapas: cada `subida` y cómo terminó (`aceptada`, `sin_respuesta`, `rechazada` o `interrumpida`), la `deteccion` del batch (`encontrado` o `no_encontrado`, una sola vez) y cada `reenvio` (`automatico` o `manual`). El tope cuenta solo los reenvíos automáticos; los que alguien ordena no lo gastan.
+
+«Empezar» pone en proceso todos los batches de la cola que no estén terminados (`_pendientes_de_la_cola`). Sin ejecución elegida parte de sus manifiestos con `_continuar_pendiente`: revisar, subir lo pendiente e indexar no exigen elegir una ejecución; solo lo exige preparar una entrega nueva. Un posible duplicado sin autorizar conserva su marca y no detiene a los demás.
 
 El manifiesto permite reanudar sin repetir guardados verificados. Reiniciar un paso modifica seguimiento local; eliminar un batch es una operación remota distinta. Las bajas conservan estado local para que la cola no reconstruya automáticamente lo eliminado.
 
