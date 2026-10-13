@@ -48,6 +48,28 @@ class Etapa(BaseModel):
         self.actualizada = datetime.now().isoformat(timespec="microseconds")
 
 
+class Evento(BaseModel):
+    """Algo que el programa hizo con el batch, o que AirVault le contesto.
+
+    Las etapas dicen en que va el batch **ahora**; el historial dice como
+    llego ahi. Es lo que se pierde cuando una carga se reinicia para volver
+    a mandarla: cuantas veces se envio, cuantas se dio por perdida y quien
+    decidio repetirla. Sin esa memoria el programa no puede distinguir la
+    primera vez que AirVault no publica un archivo de la tercera.
+    """
+
+    momento: str = ""
+    # ``subida``, ``deteccion`` o ``reenvio``.
+    paso: str = ""
+    resultado: str = ""
+    detalle: str = ""
+
+
+# Eventos que se conservan por batch. Un batch normal deja tres o cuatro;
+# el tope solo acota al que se reintenta durante dias.
+MAXIMO_HISTORIAL = 60
+
+
 class Registro(BaseModel):
     """Una bitacora: de donde salio, que se le va a escribir y como quedo."""
 
@@ -209,6 +231,10 @@ class Manifiesto(BaseModel):
     audit_status_discrepancia: str = "AUDIT IN PROGRESS"
 
     etapas: Dict[str, Etapa] = Field(default_factory=dict)
+    # Lo que se hizo con la carga, en orden. Sobrevive a reiniciar la subida,
+    # que borra las etapas: de aqui sale cuantas veces se envio este archivo
+    # y cuantas lo reenvio el programa por su cuenta.
+    historial: List[Evento] = Field(default_factory=list)
     registros: List[Registro] = Field(default_factory=list)
 
     # Orden canonico de las etapas. Es una constante de clase, no un campo:
@@ -229,6 +255,21 @@ class Manifiesto(BaseModel):
         return etapa is not None and etapa.estado in (
             EstadoEtapa.HECHA, EstadoEtapa.OMITIDA
         )
+
+    def anotar(self, paso: str, resultado: str, detalle: str = "") -> None:
+        """Deja constancia de un hecho de la carga. No guarda el manifiesto."""
+        self.historial.append(Evento(
+            momento=datetime.now().isoformat(timespec="seconds"),
+            paso=paso, resultado=resultado, detalle=detalle,
+        ))
+        del self.historial[:-MAXIMO_HISTORIAL]
+
+    def eventos(self, paso: str, resultado: str = "") -> List[Evento]:
+        """Los hechos anotados de ese paso, y de ese resultado si se pide."""
+        return [
+            evento for evento in self.historial
+            if evento.paso == paso and (not resultado or evento.resultado == resultado)
+        ]
 
     def etapas_previas(self, nombre: str) -> List[str]:
         """Etapas que deben estar hechas antes de correr ``nombre``."""

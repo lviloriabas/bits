@@ -2344,8 +2344,9 @@ def test_una_carga_vieja_que_no_esta_en_la_cola_se_da_por_perdida_enseguida(
     misma búsqueda dos veces más y esperar después media hora es tiempo
     perdido.
 
-    Darla por perdida es lo que avisa; mandarla otra vez sigue siendo una
-    orden a mano.
+    Darla por perdida la deja para retomarla sola, pero subir por el camino
+    de siempre sigue sin mandarla: antes hay que comprobar en Web Search que
+    sus bitacoras no esten publicadas, y eso lo encadena la ventana.
     """
     trabajo = _trabajos_principal_division_y_revisar(tmp_path)[1]
     subida = trabajo.manifiesto.etapa("subir")
@@ -2367,11 +2368,13 @@ def test_una_carga_vieja_que_no_esta_en_la_cola_se_da_por_perdida_enseguida(
 
     from app.airvault.flujo import NO_ENCONTRADO
     assert estado.estado == NO_ENCONTRADO
-    assert "resubirla" in estado.detalle
+    assert "se vuelve a subir" in estado.detalle
     assert trabajo.manifiesto.no_encontrado_desde
     assert trabajo.manifiesto.busquedas_amplias_sin_hallar == 1
     assert subida_perdida(estado)
     assert partes_por_subir([estado]) == []
+    from app.airvault.flujo import partes_por_recuperar
+    assert partes_por_recuperar([estado]) == [trabajo]
 
     subir_partes([trabajo], SesionFalsa(), cliente=cliente)
     assert subidas == []

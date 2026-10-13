@@ -135,3 +135,61 @@ def test_los_batches_que_se_leen_en_web_search_tambien_giran(app, tmp_path, monk
     assert ventana.lotes.item(2).data(ROL_EN_PROCESO) == color_indexando()
     ventana._filas_websearch_activas.clear()
     ventana.close()
+
+
+# ── lo que entra al pulsar «Empezar» ────────────────────────────────
+
+def test_empezar_se_enciende_con_lo_que_la_cola_tiene_sin_terminar(app, tmp_path):
+    """Sin elegir ejecucion, la cola ya dice que batches faltan."""
+    ventana = cargada(app, tmp_path)
+    assert not ventana._corrida and not ventana._listo_para_subir
+    assert [parte.nombre for parte in ventana._pendientes_de_la_cola()] == ["pendiente"]
+    assert ventana.boton_proceso.isEnabled()
+
+    # Con «Completar batch», el indexado tambien tiene un paso por dar.
+    ventana.completar_check.setChecked(True)
+    assert [p.nombre for p in ventana._pendientes_de_la_cola()] == ["pendiente", "indexado"]
+
+    # Lo omitido no entra en ningun proceso y tampoco enciende el boton.
+    ventana.completar_check.setChecked(False)
+    pendiente = ventana._estados[0]
+    pendiente.trabajo.manifiesto.cancelado = True
+    from app.airvault.flujo import CANCELADO, EstadoParte
+    ventana._estados[0] = EstadoParte(pendiente.trabajo, CANCELADO)
+    ventana._pintar_lotes()
+    assert ventana._pendientes_de_la_cola() == []
+    assert not ventana.boton_proceso.isEnabled()
+    ventana.close()
+
+
+def test_sin_ejecucion_elegida_empezar_retoma_la_cola(app, tmp_path, monkeypatch):
+    """No hay entrega que preparar: se parte de los manifiestos."""
+    ventana = cargada(app, tmp_path)
+    pasos = []
+    monkeypatch.setattr(ventana, "_continuar_pendiente", lambda: pasos.append("cola"))
+    monkeypatch.setattr(ventana, "_subir", lambda *a, **k: pasos.append("subir"))
+
+    ventana.boton_proceso.click()
+
+    assert pasos == ["cola"]
+    ventana.close()
+
+
+def test_revisar_la_cola_no_exige_una_ejecucion(app, tmp_path, monkeypatch):
+    ventana = cargada(app, tmp_path)
+    lanzados = []
+    monkeypatch.setattr(ventana, "_lanzar", lambda modo, estado: lanzados.append((modo, dict(estado))))
+
+    ventana._comprobar()
+
+    (modo, estado), = lanzados
+    assert modo == "comprobar"
+    assert estado["trabajos"] == ventana._trabajos
+    assert "csv" not in estado and estado["raiz"] == tmp_path
+
+    # Preparar una entrega nueva si la necesita, y lo dice.
+    lanzados.clear()
+    ventana._subir()
+    assert lanzados == []
+    assert "Falta elegir la ejecución" in ventana.resumen.text()
+    ventana.close()

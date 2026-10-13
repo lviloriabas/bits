@@ -1275,8 +1275,16 @@ class Trabajo:
             self.manifiesto.duplicado_exacto = True
             marcar_posible_duplicado(self, str(exc))
             raise ErrorDeCorrida(str(exc)) from exc
+        except Exception as exc:
+            # La etapa sigue «en curso»: los trozos pudieron llegar. Queda
+            # anotado que este envio se corto, para que la busqueda que
+            # viene despues sepa de donde parte.
+            self.manifiesto.anotar("subida", "interrumpida", str(exc))
+            self.guardar()
+            raise
         if not resultado.ok:
             self.manifiesto.etapa("subir").marcar(EstadoEtapa.ERROR, resultado.detalle)
+            self.manifiesto.anotar("subida", "rechazada", resultado.detalle)
             self.guardar()
             raise ErrorDeCorrida(
                 f"No se pudo subir {archivo.name}: {resultado.detalle}"
@@ -1292,6 +1300,7 @@ class Trabajo:
                 f"{archivo.name}: FinishUpload no contesto; se confirma en "
                 "la cola de AirVault",
             )
+            self.manifiesto.anotar("subida", "sin_respuesta", archivo.name)
             self.manifiesto.resubir_por_mezcla = False
             self._duplicado_permitido = False
             self.guardar()
@@ -1304,6 +1313,7 @@ class Trabajo:
                 )
             return
         self.manifiesto.etapa("subir").marcar(EstadoEtapa.HECHA, archivo.name)
+        self.manifiesto.anotar("subida", "aceptada", archivo.name)
         self.manifiesto.resubir_por_mezcla = False
         self._duplicado_permitido = False
         self.guardar()
@@ -1461,8 +1471,7 @@ class Trabajo:
         )
         if not posibles:
             if limite_s is not None and limite >= presupuesto and _subida_rastreable(self):
-                self.manifiesto.no_encontrado_desde = datetime.now().isoformat(timespec="seconds")
-                self.guardar()
+                _dar_por_no_encontrada(self)
             raise LoteNoEncontrado(
                 f"No hay ningun batch llamado {nombre!r} en AirVault"
             )
@@ -1537,6 +1546,11 @@ class Trabajo:
         # El ID solo queda ligado al trabajo después de que AirVault confirma
         # el título. Guardarlo antes permitía continuar e indexar aunque el
         # batch siguiera indistinguible como ``Empty-Batch``.
+        if str(self.manifiesto.batch_id or "").upper() != str(lote.batch_id).upper():
+            self.manifiesto.anotar(
+                "deteccion", "encontrado",
+                f"{lote.batch_id} ({lote.paginas} paginas)",
+            )
         self.manifiesto.batch_id = lote.batch_id
         self.manifiesto.no_encontrado_desde = ""
         self.manifiesto.intentos_identificacion = 0
@@ -4294,7 +4308,7 @@ def estado_local(trabajo: "Trabajo") -> EstadoParte:
             trabajo, POSIBLE_DUPLICADO, manifiesto.posible_duplicado
         )
     if getattr(manifiesto, "no_encontrado_desde", "") and not manifiesto.batch_id:
-        return EstadoParte(trabajo, NO_ENCONTRADO, "AirVault no publicó la carga dentro del plazo. Puede reenviarla desde sus acciones.")
+        return EstadoParte(trabajo, NO_ENCONTRADO, detalle_de_no_encontrada(trabajo))
     if not manifiesto.etapa_hecha("subir"):
         subir = manifiesto.etapas.get("subir")
         detalle = (
@@ -5152,6 +5166,120 @@ def _carga_vieja_sin_publicar(trabajo: "Trabajo") -> bool:
     return edad >= espera_para_darla_por_perdida(trabajo)
 
 
+def _dar_por_no_encontrada(trabajo: "Trabajo") -> None:
+    """Deja escrito que AirVault no publico esta carga dentro de su plazo.
+
+    La marca es la de la primera vez: revisar otra vez la cola y seguir sin
+    hallarla no la renueva ni repite el hecho en el historial.
+    """
+    manifiesto = trabajo.manifiesto
+    if manifiesto.no_encontrado_desde:
+        return
+    manifiesto.no_encontrado_desde = datetime.now().isoformat(timespec="seconds")
+    manifiesto.anotar(
+        "deteccion", "no_encontrado",
+        "la cola de AirVault no la tiene con ningun nombre y vencio su plazo",
+    )
+    trabajo.guardar()
+
+
+# Veces que el programa vuelve a mandar por su cuenta un archivo que AirVault
+# acepto y no publico. Dos intentos cubren el tropiezo de una carga; a la
+# tercera ya no es mala suerte, y repetir el mismo PDF sin que nadie mire es
+# como se llena la cola de copias el dia que AirVault las publica todas.
+REENVIOS_AUTOMATICOS_MAXIMOS = 2
+
+# Cuanto vale la respuesta de Web Search «no esta publicado» para reenviar
+# sin volver a preguntar. Pasado ese rato alguien pudo completar el batch a
+# mano, que es justo lo que saca una carga de la cola sin que se haya perdido.
+VIGENCIA_DE_AUSENCIA_S = 3600.0
+
+
+def reenvios_automaticos(trabajo: "Trabajo") -> int:
+    """Veces que el programa reenvio este archivo sin que nadie lo pidiera."""
+    return len(trabajo.manifiesto.eventos("reenvio", "automatico"))
+
+
+def anotar_reenvio(trabajo: "Trabajo", automatico: bool, motivo: str = "") -> None:
+    """Deja constancia de que el archivo vuelve a Quick Upload y por que."""
+    trabajo.manifiesto.anotar(
+        "reenvio", "automatico" if automatico else "manual", motivo
+    )
+    trabajo.guardar()
+
+
+def se_reenvia_sola(parte: EstadoParte) -> bool:
+    """Si una carga que AirVault no publico puede volver sola a Quick Upload.
+
+    Solo la que **nunca** llego a tener batch: Quick Upload la acepto, la
+    cola entera se recorrio sin hallarla y vencio el plazo en que AirVault
+    publica un archivo de su tamano. Un batch que si aparecio y despues
+    dejo de estar en la cola no entra: lo completo o lo borro alguien, y
+    eso se decide mirando AirVault. Tampoco el cancelado, el marcado como
+    duplicado ni el que ya se reenvio las veces que tocaban.
+
+    Decir que si no la manda: antes hay que comprobar en Web Search que sus
+    bitacoras no esten publicadas (ver :func:`ausencia_vigente`).
+    """
+    trabajo = parte.trabajo
+    manifiesto = trabajo.manifiesto
+    return bool(
+        parte.estado == NO_ENCONTRADO
+        and not manifiesto.cancelado
+        and not manifiesto.batch_id
+        and manifiesto.no_encontrado_desde
+        and not manifiesto.mezcla_pendiente
+        and reenvios_automaticos(trabajo) < REENVIOS_AUTOMATICOS_MAXIMOS
+    )
+
+
+def partes_por_recuperar(estados: Sequence[EstadoParte]) -> List["Trabajo"]:
+    """Cargas no publicadas que el programa vuelve a mandar sin pedirlo.
+
+    Es la pareja de :func:`partes_por_subir`: aquella responde por lo que
+    nunca salio hacia AirVault y esta por lo que salio y no llego.
+    """
+    return [parte.trabajo for parte in estados if se_reenvia_sola(parte)]
+
+
+def ausencia_vigente(trabajo: "Trabajo", ahora: Optional[datetime] = None) -> bool:
+    """Si Web Search ya contesto, hace poco, que este batch no esta publicado.
+
+    La respuesta se borra sola cuando el archivo se vuelve a subir, asi que
+    una ausencia guardada siempre habla de la ultima carga. Lo que falta
+    comprobar es que sea reciente.
+    """
+    manifiesto = trabajo.manifiesto
+    if manifiesto.websearch_resultado != "ausente":
+        return False
+    revision = _momento(manifiesto.websearch_revision)
+    if revision is None:
+        return False
+    presente = ahora or (
+        datetime.now(revision.tzinfo) if revision.tzinfo else datetime.now()
+    )
+    if not _mismo_reloj(presente, revision):
+        return False
+    return 0 <= (presente - revision).total_seconds() <= VIGENCIA_DE_AUSENCIA_S
+
+
+def detalle_de_no_encontrada(trabajo: "Trabajo") -> str:
+    """Lo que la cola dice de una carga que AirVault no publico."""
+    base = "AirVault no publicó esta carga dentro del plazo."
+    hechos = reenvios_automaticos(trabajo)
+    if trabajo.manifiesto.batch_id or hechos >= REENVIOS_AUTOMATICOS_MAXIMOS:
+        veces = (
+            f" Ya se volvió a subir {hechos} "
+            f"{'vez' if hechos == 1 else 'veces'} sin que apareciera."
+            if hechos else ""
+        )
+        return f"{base}{veces} Revise AirVault y, si no está, súbala desde sus acciones."
+    return (
+        f"{base} Se comprueba en Web Search y, si tampoco está publicada, "
+        "se vuelve a subir."
+    )
+
+
 def _registrar_busqueda_amplia_fallida(trabajo: "Trabajo") -> EstadoParte:
     """Anota que la cola entera no tenia esta carga y avisa de que falta."""
     manifiesto = trabajo.manifiesto
@@ -5165,9 +5293,8 @@ def _registrar_busqueda_amplia_fallida(trabajo: "Trabajo") -> EstadoParte:
         )
     trabajo.guardar()
     if _carga_vieja_sin_publicar(trabajo):
-        manifiesto.no_encontrado_desde = datetime.now().isoformat(timespec="seconds")
-        trabajo.guardar()
-        return EstadoParte(trabajo, NO_ENCONTRADO, "AirVault no publicó esta carga dentro del plazo. Se conserva para resubirla a mano.")
+        _dar_por_no_encontrada(trabajo)
+        return EstadoParte(trabajo, NO_ENCONTRADO, detalle_de_no_encontrada(trabajo))
     return EstadoParte(
         trabajo,
         BUSCANDO,

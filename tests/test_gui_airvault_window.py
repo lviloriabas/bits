@@ -2921,15 +2921,20 @@ def test_volver_a_pulsar_subir_autoriza_los_posibles_duplicados(
     fila.trabajo.manifiesto.posible_duplicado = "ya se mandaron"
     ventana._estados = [fila]
     ventana._trabajos = [fila.trabajo]
-    autorizadas = []
+    autorizadas, seguidos = [], []
     monkeypatch.setattr(
         ventana, "_quitar_sospecha",
         lambda partes: autorizadas.extend(partes),
+    )
+    monkeypatch.setattr(
+        ventana, "_continuar_pendiente", lambda: seguidos.append(True)
     )
 
     ventana._subir_a_mano()
 
     assert autorizadas == [fila]
+    # La pregunta no detiene lo demas: el resto de la cola sigue su proceso.
+    assert seguidos == [True]
 
 
 
@@ -2956,10 +2961,14 @@ def test_reenvio_cancelado_no_autoriza_ni_encola(ventana, monkeypatch):
         return QMessageBox.StandardButton.No
     monkeypatch.setattr(QMessageBox, "warning", advertencia)
     monkeypatch.setattr(ventana, "_subir_estas", lambda *a, **k: llamadas.append(1))
+    seguidos = []
+    monkeypatch.setattr(ventana, "_continuar_pendiente", lambda: seguidos.append(True))
     ventana._subir_a_mano()
     assert llamadas == []
     assert fila.trabajo.manifiesto.posible_duplicado
     assert not getattr(fila.trabajo, "_duplicado_permitido", False)
+    # Decir que no deja la duda puesta en ese batch, sin frenar a los demas.
+    assert seguidos == [True]
 
 
 
