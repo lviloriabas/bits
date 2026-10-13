@@ -1272,13 +1272,23 @@ class TrabajoAirVaultWorker(QThread):
                 for trabajo in autorizados:
                     trabajo._duplicado_permitido = False
         if fallos:
+            # Los motivos ya salen redactados para quien los lee: la ventana
+            # los anota tal cual en vez de reducirlos a «no se pudo subir».
             self.subido.emit(dict(trabajos=pendientes, cliente=cliente,
-                                  sesion=self.estado.get("sesion"), fallos=fallos))
+                                  sesion=self.estado.get("sesion"), fallos=fallos,
+                                  motivos_redactados=True))
 
     def _revisar_reenvios(self, trabajos, cliente):
-        """Solo permite repetir un PDF si ninguna de sus bitacoras esta publicada."""
+        """Solo permite repetir un PDF si ninguna de sus bitacoras esta publicada.
+
+        Se pregunta por todas las que tienen un número que se pueda buscar.
+        Las que no lo tienen (en REVISAR siempre hay alguna: por eso están
+        ahí) no se pueden consultar y no frenan el reenvío: exigirlas dejaba
+        cada REVISAR ausente sin volver a subirse nunca.
+        """
         from contextlib import ExitStack
-        from app.airvault.confirmacion import huella_de_numeros, plazo_de_batch, verificar_batch
+        from app.airvault.confirmacion import (huella_de_numeros, numeros_de_batch,
+                                               plazo_de_batch, verificar_batch)
         from app.airvault.flujo import (Trabajo, autorizar_posible_duplicado,
                                        marcar_posible_duplicado, ya_esta_en_airvault)
         from app.airvault.session import ErrorDeSesion, SesionAirVault
@@ -1293,6 +1303,12 @@ class TrabajoAirVaultWorker(QThread):
                 try:
                     if ya_esta_en_airvault(trabajo, cliente) is not None:
                         autorizados.append(trabajo)
+                        continue
+                    buscables = numeros_de_batch(trabajo.manifiesto)
+                    if not buscables:
+                        fallos.append((trabajo.manifiesto.nombre_batch,
+                                       "Ninguna bitácora tiene un número que se pueda buscar en Web Search. "
+                                       "Revise el batch en AirVault antes de volver a subirlo."))
                         continue
                     if lector is None:
                         sesion = self.estado.get("sesion")
@@ -1315,9 +1331,13 @@ class TrabajoAirVaultWorker(QThread):
                         if lector is None:
                             raise ErrorDeSesion("Falta acceso a Web Search para confirmar el reenvío.")
                     presupuesto = plazo_de_batch(len(trabajo.manifiesto.bitacoras()))
+                    # Lo ya contestado no se vuelve a preguntar si hay que
+                    # renovar el acceso a mitad del batch.
+                    leidas: dict = {}
                     try:
                         resultado = verificar_batch(lector, trabajo, self._avisar,
-                            presupuesto_s=presupuesto, cancelado=self.hay_que_parar, revisar_todas=True)
+                            presupuesto_s=presupuesto, cancelado=self.hay_que_parar, revisar_todas=True,
+                            consultas=leidas)
                     except ErrorDeSesion:
                         if acceso is None:
                             raise
@@ -1325,11 +1345,12 @@ class TrabajoAirVaultWorker(QThread):
                         acceso.renovar(lector.generacion)
                         lector = acceso.crear_lector()
                         resultado = verificar_batch(lector, trabajo, self._avisar,
-                            presupuesto_s=presupuesto, cancelado=self.hay_que_parar, revisar_todas=True)
+                            presupuesto_s=presupuesto, cancelado=self.hay_que_parar, revisar_todas=True,
+                            consultas=leidas)
                     if not resultado.consulta_completa:
                         raise ErrorDeSesion(resultado.detalle)
-                    if len(resultado.muestra) != len({str(r.log_number).strip() for r in trabajo.manifiesto.bitacoras()}):
-                        raise ErrorDeSesion("Faltan números de bitácora válidos para confirmar el reenvío.")
+                    if set(resultado.muestra) != set(buscables):
+                        raise ErrorDeSesion("Web Search no revisó todas las bitácoras del batch.")
                     if resultado.encontradas:
                         motivo = (f"AirVault tiene {resultado.encontradas} de {resultado.esperadas} "
                                   "bitácoras publicadas. Se conserva el batch para revisar las faltantes.")
@@ -1346,6 +1367,11 @@ class TrabajoAirVaultWorker(QThread):
                 except (SesionCancelada, TrabajoCancelado):
                     raise
                 except Exception as exc:
+                    # El motivo completo queda en el registro: en la ventana
+                    # solo cabe su versión corta y sin él no se sabía por qué
+                    # un batch ausente seguía sin subirse.
+                    logger.warning("No se confirmó el reenvío del batch {}: {}",
+                                   trabajo.manifiesto.nombre_batch, exc)
                     fallos.append((trabajo.manifiesto.nombre_batch,
                                    mensaje_error(exc, "No se pudo confirmar el reenvío en AirVault.")))
         return autorizados, fallos
@@ -7403,8 +7429,10 @@ class AirVaultWindow(QDialog):
         # El motivo de cada carga que no salió. Antes solo quedaba en el
         # archivo de registro, así que la ventana decía «subida terminada»
         # de archivos que nunca se enviaron y nadie sabía por qué.
+        redactados = datos.get("motivos_redactados")
         for nombre, detalle in fallos:
-            self._anotar(f"«{nombre}»: {mensaje_error(detalle, 'No se pudo subir. Vuelva a intentarlo.')}")
+            motivo = detalle if redactados else mensaje_error(detalle, "No se pudo subir. Vuelva a intentarlo.")
+            self._anotar(f"«{nombre}»: {motivo}")
         for nombre, detalle in datos.get("fallos_indexado") or []:
             self._anotar(f"«{nombre}»: {mensaje_error(detalle, 'No se pudo indexar. Vuelva a revisar en AirVault.')}")
         # «Subir» no confia en la marca local: en cada clic consulta la cola

@@ -925,7 +925,9 @@ class Trabajo:
 
     @classmethod
     def cargar(cls, config: AirVaultConfig, carpeta: Path | str) -> "Trabajo":
-        return cls(config, Path(carpeta), manifiestos.cargar(carpeta))
+        manifiesto = manifiestos.cargar(carpeta)
+        _ubicar_origenes(Path(carpeta), manifiesto)
+        return cls(config, Path(carpeta), manifiesto)
 
     @classmethod
     def abrir_o_preparar(
@@ -4021,6 +4023,50 @@ def cargar_partes(
         # Una preparacion cortada no se presenta como una entrega completa.
         return []
     return list(automaticos) + list(revisar)
+
+
+def _ubicar_origenes(carpeta: Path, manifiesto: Manifiesto) -> None:
+    """Apunta el manifiesto al CSV y al PDF de la carpeta donde vive ahora.
+
+    El manifiesto guarda rutas absolutas y la carpeta portable se copia
+    entera de una PC a otra. Con las rutas de la PC anterior el archivo
+    «no estaba» aunque viajara al lado: el batch desaparecia de los
+    pendientes, no se podia volver a subir y la proteccion contra subir dos
+    veces el mismo PDF se quedaba sin nada que comparar.
+
+    Solo se corrige lo que ya no esta donde dice el manifiesto, y solo hacia
+    el archivo del mismo nombre dentro de la misma ejecucion. El cambio
+    queda en memoria: se escribe cuando el trabajo se guarde por su cuenta,
+    para que cargar un manifiesto no pise lo que otro hilo acaba de anotar.
+    """
+    entrega = registro_entrega.raiz_de_registro(carpeta)
+    salida = entrega.parent.parent
+    csv = PureWindowsPath(manifiesto.csv_origen or "")
+    pdf = PureWindowsPath(manifiesto.pdf_origen or "")
+    # ``<ejecucion>/datos/x.CSV``: el nombre de la ejecucion es lo estable.
+    corridas = [entrega.name]
+    if csv.parent.name.casefold() == "datos" and csv.parent.parent.name:
+        corridas.insert(0, csv.parent.parent.name)
+
+    def actual(guardada: PureWindowsPath, candidatas: Sequence[Path]) -> str:
+        if not guardada.name or Path(guardada).is_file():
+            return ""
+        return next(
+            (str(ruta.resolve()) for ruta in candidatas if ruta.is_file()), ""
+        )
+
+    csv_actual = actual(
+        csv, [salida / corrida / "datos" / csv.name for corrida in corridas]
+    )
+    pdf_actual = actual(
+        pdf,
+        [entrega / "cargas" / pdf.name]
+        + [salida / corrida / pdf.name for corrida in corridas],
+    )
+    if csv_actual:
+        manifiesto.csv_origen = csv_actual
+    if pdf_actual:
+        manifiesto.pdf_origen = pdf_actual
 
 
 def _reubicar_trabajo(
