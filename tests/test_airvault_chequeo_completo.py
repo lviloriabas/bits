@@ -1,5 +1,6 @@
 """Audita cierres locales y recupera solo ausencias leidas sin errores."""
 
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -122,6 +123,12 @@ def test_un_batch_confirmado_no_se_vuelve_a_consultar(app, tmp_path, monkeypatch
     ventana = AirVaultWindow(tmp_path)
     ventana._trabajos = [t]
     ventana._estados = [estado_local(t)]
+    ventana._pintar_lotes()
+    # La tarjeta dice la confirmacion sola, y su ayuda una sola vez.
+    assert ventana.lotes.item(0, 3).text() == "Confirmado en Web Search"
+    ayuda = ventana.lotes.item(0).toolTip()
+    assert ayuda.count("Web Search") == 1
+    assert re.search(r"Confirmado el \d\d/\d\d/\d{4} a las \d\d:\d\d\.$", ayuda)
     ventana._buscar_websearch()
     assert ventana._worker_websearch is None
     assert "ya están confirmados" in ventana.resumen.text()
@@ -156,7 +163,7 @@ def test_la_resubida_espera_a_que_termine_el_worker(app, tmp_path, monkeypatch):
     monkeypatch.setattr(ventana, "_encolar", lambda modo, trabajos, _texto: encoladas.append((modo, trabajos)))
     ventana._al_buscar_websearch(avisos[0])
     assert not encoladas
-    assert "revisado en AirVault" in ventana.lotes.item(0, 3).text()
+    assert ventana.lotes.item(0, 3).text() == "No encontrado en AirVault"
     ventana._al_buscar_websearch(avisos[-1])
     assert not encoladas
     worker.corriendo = False

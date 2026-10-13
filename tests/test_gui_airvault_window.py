@@ -908,7 +908,9 @@ def test_la_tabla_dice_listo_al_encontrar_el_batch(ventana):
 
     celda = ventana.lotes.item(0, 3)
     assert celda.text() == "Listo para indexar"
-    assert celda.toolTip() == "Listo para indexar: 5 paginas"
+    # La ayuda no repite el rotulo ni las paginas: la tarjeta ya los dice.
+    assert celda.toolTip() == ""
+    assert ventana.lotes.item(0).toolTip().startswith("Pendiente: indexar")
 
 
 def test_cada_click_en_subir_confirma_los_batches_en_airvault(
@@ -2219,7 +2221,7 @@ def test_un_batch_que_cerro_el_programa_se_pinta_como_completado(ventana):
     assert fila.se_acabo
     assert not ventana._falta_esperar()
     assert ventana.lotes.item(0, 3).text() == "Completado"
-    assert "lo cerro el programa" in ventana.lotes.item(0, 3).toolTip()
+    assert ventana.lotes.item(0, 3).toolTip() == "Lo cerro el programa"
     assert ventana.lotes.item(0, 0).foreground().color() == QColor(color_indexado())
 
 

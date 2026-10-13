@@ -5813,6 +5813,50 @@ class AirVaultWindow(QDialog):
             trozos.append("Hecho: " + ", ".join(hechos) + ".")
         return " ".join(trozos)
 
+    def _ayuda_de_estado(self, parte, confirmado: str, revision: str) -> str:
+        """El detalle del estado para la ayuda de la tarjeta.
+
+        Solo lo que la tarjeta no enseña: ni el nombre, ni el rótulo del
+        estado, ni las páginas. La confirmación en Web Search se dice una
+        vez, con su muestra y su fecha.
+        """
+        from datetime import datetime
+
+        from app.airvault.flujo import (DESCUADRADO, INCOMPLETO, NO_ENCONTRADO,
+                                        POSIBLE_DUPLICADO, SIN_SUBIR, TOMADO)
+
+        if revision == "error" or parte.estado in (
+            DESCUADRADO, INCOMPLETO, NO_ENCONTRADO, POSIBLE_DUPLICADO, SIN_SUBIR, TOMADO,
+        ):
+            return ""
+        manifiesto = parte.trabajo.manifiesto
+        detalle = parte.detalle.strip()
+        if detalle.casefold() == parte.titulo.casefold():
+            detalle = ""
+        elif detalle.casefold().startswith(parte.titulo.casefold() + ";"):
+            detalle = detalle[len(parte.titulo) + 1:].strip()
+        esperadas = len(manifiesto.registros)
+        if detalle.casefold() in (f"{esperadas} paginas", f"{esperadas} páginas"):
+            detalle = ""
+        if confirmado and "web search" in detalle.casefold():
+            # La confirmación lo dice mejor, con sus cifras.
+            detalle = ""
+        lineas = [detalle[:1].upper() + detalle[1:]]
+        if confirmado or revision:
+            lineas.append(manifiesto.websearch_detalle.strip())
+        if confirmado:
+            try:
+                momento = datetime.fromisoformat(confirmado)
+            except ValueError:
+                pass
+            else:
+                lineas.append(f"Confirmado el {momento:%d/%m/%Y} a las {momento:%H:%M}.")
+        unicas: list[str] = []
+        for linea in lineas:
+            if linea and linea.casefold() not in (u.casefold() for u in unicas):
+                unicas.append(linea)
+        return "\n".join(unicas)
+
     def _anotar_plan(self, completo: bool = False) -> None:
         """Anota en el registro los pasos de cada batch de la cola.
 
@@ -5891,14 +5935,17 @@ class AirVaultWindow(QDialog):
             # La celda dice el estado en dos o tres palabras; el detalle
             # (cuántas páginas, por qué se paró) queda al posar el puntero.
             estado = TEXTO_INDEXANDO if indexando else parte.titulo
-            from app.airvault.flujo import websearch_confirmacion_valida
+            from app.airvault.flujo import (AUTOCOMPLETADO, CANCELADO, COMPLETADO, NOMBRE_ESTADO_PARTE,
+                                            PUBLICADO, websearch_confirmacion_valida)
             confirmado = parte.trabajo.manifiesto.websearch_confirmado if websearch_confirmacion_valida(parte.trabajo.manifiesto) else ""
-            if confirmado and parte.titulo != "Confirmado en Web Search":
+            # La confirmación es el último paso de un batch cerrado: ocupa el
+            # rótulo entero en vez de colgarse detrás de «Completado».
+            if confirmado and not indexando and parte.estado in (COMPLETADO, AUTOCOMPLETADO, PUBLICADO):
+                estado = NOMBRE_ESTADO_PARTE[PUBLICADO]
+            elif confirmado:
                 estado += ", confirmado en Web Search"
             revision = getattr(parte.trabajo.manifiesto, "websearch_resultado", "")
-            if revision in ("encontrado", "ausente", "en_cola"):
-                estado += ", revisado en AirVault"
-            elif revision == "error":
+            if revision == "error":
                 estado += ", chequeo pendiente"
             celdas = (parte.batch_id, nombre, str(esperadas), estado)
             papel = papel_de_estado(
@@ -5919,20 +5966,7 @@ class AirVaultWindow(QDialog):
                         | Qt.AlignmentFlag.AlignVCenter
                     )
                 if columna == 3:
-                    from app.airvault.flujo import DESCUADRADO, INCOMPLETO, NO_ENCONTRADO, POSIBLE_DUPLICADO, SIN_SUBIR, TOMADO
-                    detalle = parte.detalle.strip()
-                    if detalle.casefold() == parte.titulo.casefold():
-                        detalle = ""
-                    elif detalle.casefold().startswith(parte.titulo.casefold() + ";"):
-                        detalle = detalle[len(parte.titulo) + 1:].strip()
-                    error = parte.estado in (DESCUADRADO, INCOMPLETO, NO_ENCONTRADO, POSIBLE_DUPLICADO, SIN_SUBIR, TOMADO) or revision == "error"
-                    if not error:
-                        item.setToolTip(f"{parte.titulo}: {detalle}" if detalle else parte.titulo)
-                    if confirmado and not error:
-                        item.setToolTip(item.toolTip() + "\nConfirmado en Web Search: " + confirmado
-                                        + "\n" + parte.trabajo.manifiesto.websearch_detalle)
-                    elif revision and not error:
-                        item.setToolTip(item.toolTip() + "\n" + parte.trabajo.manifiesto.websearch_detalle)
+                    item.setToolTip(self._ayuda_de_estado(parte, confirmado, revision))
                 if papel:
                     pintar_celda_del_tema(item, papel)
                 tabla.setItem(fila, columna, item)
@@ -5940,8 +5974,11 @@ class AirVaultWindow(QDialog):
             clave = str(parte.trabajo.carpeta)
             tabla.numerar(fila, self._numero_de(parte.trabajo))
             # Qué tiene hecho y qué le falta, al posar el puntero: lo mismo
-            # que dice la lista de pasos del registro.
-            tarjeta.setToolTip(tarjeta.toolTip().rstrip() + "\n" + self._resumen_de_pasos(parte))
+            # que dice la lista de pasos del registro. De un batch terminado
+            # o cancelado la tarjeta ya lo dice todo y no se repite.
+            pasos = self._resumen_de_pasos(parte)
+            if parte.estado != CANCELADO and not pasos.startswith("Terminado"):
+                tarjeta.setToolTip((tarjeta.toolTip() + "\n" + pasos).strip())
             tarjeta.setData(Qt.ItemDataRole.UserRole, clave)
             tarjeta.setSelected(clave in seleccionadas)
             if clave == actual:

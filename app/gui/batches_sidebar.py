@@ -148,14 +148,13 @@ class BatchesSidebar(QListWidget):
             f"{paginas.text()} páginas" + identidad
             + f"\n{estado.text()}"
         )
-        tarjeta.setToolTip(nombre.text() + "\n" + estado.toolTip())
+        # La ayuda no repite el nombre ni el estado: ya estan en la tarjeta.
+        tarjeta.setToolTip(estado.toolTip())
         tarjeta.setForeground(estado.foreground())
 
     def numerar(self, row, numero):
-        """Pone el numero del batch en su columna y en la ayuda de la tarjeta."""
-        tarjeta = super().item(row)
-        tarjeta.setData(ROL_NUMERO, int(numero))
-        tarjeta.setToolTip(f"Batch {numero}: " + tarjeta.toolTip())
+        """Pone el numero del batch en su columna de la tarjeta."""
+        super().item(row).setData(ROL_NUMERO, int(numero))
 
     def sizeHintForColumn(self, column):
         return self.minimumWidth()

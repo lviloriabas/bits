@@ -30,7 +30,11 @@ def test_cada_batch_conserva_su_numero_aunque_cambien_los_filtros(app, tmp_path)
         ("uno", COMPLETADO), ("dos", SIN_SUBIR), ("tres", INDEXADO), ("cuatro", SIN_SUBIR),
     ])
     assert [ventana.lotes.item(f).data(ROL_NUMERO) for f in range(4)] == [1, 2, 3, 4]
-    assert ventana.lotes.item(1).toolTip().startswith("Batch 2: dos")
+    # El numero y el nombre van en la tarjeta: su ayuda no los repite.
+    assert ventana.lotes.item(1).toolTip().startswith("Pendiente: subir")
+    assert "dos" not in ventana.lotes.item(1).toolTip()
+    # De un batch terminado no queda nada que agregar.
+    assert "Terminado" not in ventana.lotes.item(0).toolTip()
     ventana.ocultar_completados_check.setChecked(True)
     ventana.ocultar_indexados_check.setChecked(True)
     assert [ventana.lotes.item(f).data(ROL_NUMERO) for f in range(ventana.lotes.count())] == [2, 4]
