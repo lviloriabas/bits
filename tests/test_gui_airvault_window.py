@@ -2363,8 +2363,19 @@ def test_la_leyenda_explica_cada_estado_con_el_color_de_la_cola(ventana):
                                          leyenda_de_estados_html)
     from app.gui.tokens import link_text_color, paleta
 
-    rotulos = {rotulo for rotulo, _papel, _texto in leyenda_de_estados()}
-    assert rotulos == set(NOMBRE_ESTADO_PARTE.values()) | {"Indexando"}
+    filas = leyenda_de_estados()
+    rotulos = {rotulo for rotulo, _papel, _texto in filas}
+    assert rotulos == set(NOMBRE_ESTADO_PARTE.values()) | {
+        "Indexando", "Chequeo pendiente",
+    }
+    # «Indexado» va en los dos colores con que lo escribe la cola: el acento
+    # del batch normal y el ámbar del REVISAR.
+    assert [papel for rotulo, papel, _texto in filas if rotulo == "Indexado"] == [
+        "acento", "STATUS_WARNING",
+    ]
+    papeles = {rotulo: papel for rotulo, papel, _texto in filas}
+    assert papeles["Confirmado en Web Search"] == "STATUS_OK"
+    assert papeles["No encontrado en AirVault"] == "STATUS_ERROR"
 
     html = leyenda_de_estados_html()
     assert ventana.leyenda_estados.texto() == html
@@ -2372,8 +2383,21 @@ def test_la_leyenda_explica_cada_estado_con_el_color_de_la_cola(ventana):
     assert f"color: {tonos.STATUS_OK};" in html.split("Completado")[0]
     assert f"color: {tonos.TEXT_TERTIARY};" in html.split("Sin subir")[0]
     assert f"color: {link_text_color()};" in html.split("Indexando")[0]
+    assert f"color: {tonos.STATUS_WARNING};" in html.split("REVISAR")[0]
     assert "«Complete»" in html
+    assert "Web Index" in html
     assert "Terminado" not in html
+    assert "la cola de AirVault" not in html
+
+
+def test_el_confirmado_en_web_search_va_en_verde_aunque_no_lo_cerrara_el_programa(ventana):
+    """El mismo rótulo no sale en dos colores según quién cerró el batch."""
+    from app.airvault.flujo import PUBLICADO
+
+    ventana._estados = [parte(PUBLICADO)]
+    ventana._pintar_lotes()
+    assert ventana.lotes.item(0, 3).text() == "Confirmado en Web Search"
+    assert ventana.lotes.item(0).foreground().color() == QColor(color_indexado())
 
 
 def _acciones(ventana, *filas):

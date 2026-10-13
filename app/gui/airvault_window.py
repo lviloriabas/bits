@@ -104,6 +104,10 @@ def color_indexando() -> str:
 # fila seguía diciendo «Listo para indexar» mientras se le escribía.
 TEXTO_INDEXANDO = "Indexando"
 
+# Lo que la cola añade detrás del estado cuando la consulta a Web Search no
+# pudo contestar. Tampoco es un estado: el batch sigue donde estaba.
+TEXTO_CHEQUEO_PENDIENTE = "chequeo pendiente"
+
 
 def papel_de_estado(
     estado: str, indexando: bool = False, revisar: bool = False,
@@ -115,9 +119,12 @@ def papel_de_estado(
     """
     from app.airvault.flujo import (AUTOCOMPLETADO, CANCELADO, COMPLETADO,
                                     INCOMPLETO, INDEXADO, POSIBLE_DUPLICADO,
-                                    NO_ENCONTRADO, SIN_SUBIR)
+                                    NO_ENCONTRADO, PUBLICADO, SIN_SUBIR)
 
-    if estado in (COMPLETADO, AUTOCOMPLETADO):
+    # El confirmado en Web Search va en el mismo verde que el completado: la
+    # tarjeta de un batch cerrado y confirmado dice ese mismo rótulo, y en
+    # blanco parecía un batch a medio camino.
+    if estado in (COMPLETADO, AUTOCOMPLETADO, PUBLICADO):
         return "STATUS_OK"
     if estado == NO_ENCONTRADO:
         return "STATUS_ERROR"
@@ -139,54 +146,74 @@ def _color_de_papel(papel: str) -> str:
 
 
 def leyenda_de_estados() -> list[tuple[str, Optional[str], str]]:
-    """Cada rótulo de la columna Estado, su color y qué quiere decir.
+    """Cada rótulo de estado de la cola, su color y qué quiere decir.
 
     Va en el orden en que un batch los recorre, y los que se salen del
-    camino (descuadrado, tomado, duplicado, cancelado) al final.
+    camino (no encontrado, descuadrado, tomado, duplicado, cancelado) al
+    final. «Indexado» sale dos veces porque la cola lo escribe en dos
+    colores: en ámbar el de un batch REVISAR, que el programa no completa.
     """
     from app.airvault.flujo import (BUSCANDO, CANCELADO, COMPLETADO,
                                     DESCUADRADO, INCOMPLETO, INDEXADO, LISTO,
                                     NOMBRE_ESTADO_PARTE, POSIBLE_DUPLICADO,
                                     PROCESANDO, PUBLICADO, NO_ENCONTRADO, SIN_SUBIR, TOMADO)
 
+    # El estado, si la fila es la de un batch REVISAR y la explicación.
+    # ``None`` es «Indexando», que no se guarda en ningún manifiesto.
     explicaciones = (
-        (SIN_SUBIR, "El PDF todavía no se envió a AirVault."),
-        (BUSCANDO, "El PDF ya se envió. Se espera a que el programa lo "
-                   "detecte en la cola de AirVault."),
-        (PROCESANDO, "AirVault lo recibió y todavía está cargando sus "
-                     "páginas."),
-        (LISTO, "Está completo en AirVault; falta colocar la información "
-                "en las páginas."),
-        (None, "Se está colocando la información en las páginas."),
-        (INDEXADO, "En los batches normales, todas las páginas están en "
-                   "verde y falta cerrar con «Complete». REVISAR conserva "
-                   "el amarillo: sus datos están guardados y las "
-                   "incidencias quedan para revisión manual."),
-        (INCOMPLETO, "Quedan páginas en amarillo: se reintentan solas o se "
-                     "corrigen a mano."),
-        (COMPLETADO, "Se cerró con «Complete» y pasó a Web Search."),
-        (PUBLICADO, "Su publicación se confirmó en Web Search. "
-                     "No se vuelve a enviar."),
-        (NO_ENCONTRADO, "AirVault no publicó la carga al agotar la espera y la cola no la contiene. "
-                        "Se comprueba en Web Search y, si tampoco está publicada, se vuelve "
-                        "a subir sola. La que ya se resubió y vuelve a faltar queda para "
-                        "decidirlo a mano."),
-        (DESCUADRADO, "AirVault tiene otra cantidad de páginas. No se toca "
-                      "hasta revisarlo."),
-        (TOMADO, "Alguien lo tiene abierto en AirVault; se espera a que lo "
-                 "cierre."),
-        (POSIBLE_DUPLICADO, "Sus bitácoras parecen estar ya en AirVault. No "
-                            "se sube sin revisarlo."),
-        (CANCELADO, "Se sacó de la cola y no avanza hasta reanudarlo."),
+        (SIN_SUBIR, False, "Todavía no se envió a Quick Upload."),
+        (BUSCANDO, False, "Quick Upload lo aceptó. Falta que aparezca en "
+                          "Web Index."),
+        (PROCESANDO, False, "Ya aparece en Web Index, pero AirVault no "
+                            "terminó de cargar sus páginas o falta confirmar "
+                            "que es este batch."),
+        (LISTO, False, "Está entero en Web Index. Falta indexarlo."),
+        (None, False, "Se están escribiendo los datos en sus páginas."),
+        (INDEXADO, False, "Todas sus páginas están en verde. Falta "
+                          "completarlo."),
+        (INDEXADO, True, "En un batch REVISAR: se guardaron los datos "
+                         "disponibles y sus páginas siguen en amarillo. "
+                         "Queda para la revisión manual en AirVault; el "
+                         "programa no lo completa."),
+        (INCOMPLETO, False, "Quedan páginas en amarillo: se reintentan "
+                            "solas o se corrigen a mano."),
+        (COMPLETADO, False, "Se cerró con «Complete». Falta confirmar su "
+                            "publicación en Web Search."),
+        (PUBLICADO, False, "Sus bitácoras ya aparecen en Web Search. Está "
+                           "terminado y no se vuelve a subir."),
+        (NO_ENCONTRADO, False, "No está en Web Index y venció el plazo para "
+                               "que AirVault lo publicara. Se busca en Web "
+                               "Search: si está, queda confirmado; si no, "
+                               "se vuelve a subir solo. El que ya se volvió "
+                               "a subir y sigue sin aparecer queda para "
+                               "decidir a mano."),
+        (DESCUADRADO, False, "El batch de Web Index tiene otra cantidad de "
+                             "páginas u otro contenido. No se indexa ni se "
+                             "vuelve a subir hasta revisarlo a mano."),
+        (TOMADO, False, "Alguien lo tiene abierto en Web Index. Se espera a "
+                        "que lo cierre."),
+        (POSIBLE_DUPLICADO, False, "Sus bitácoras parecen estar ya en "
+                                   "AirVault. No se sube hasta decidirlo a "
+                                   "mano."),
+        (CANCELADO, False, "Se sacó de la cola. No entra en ningún proceso "
+                           "hasta reanudarlo."),
     )
-    return [
+    leyenda = [
         (
             TEXTO_INDEXANDO if estado is None else NOMBRE_ESTADO_PARTE[estado],
-            papel_de_estado(estado or "", indexando=estado is None),
+            papel_de_estado(
+                estado or "", indexando=estado is None, revisar=revisar,
+            ),
             explicacion,
         )
-        for estado, explicacion in explicaciones
+        for estado, revisar, explicacion in explicaciones
     ]
+    leyenda.append((
+        TEXTO_CHEQUEO_PENDIENTE.capitalize(), None,
+        "Va detrás de otro estado: la consulta a Web Search no se pudo "
+        "terminar y falta repetirla.",
+    ))
+    return leyenda
 
 
 def leyenda_de_estados_html() -> str:
@@ -2944,7 +2971,7 @@ class AirVaultWindow(QDialog):
         fila = QGridLayout()
         fila.setSpacing(SPACE_S)
         fila.addWidget(self._titulo("Batches de AirVault"), 0, 0, 1, 3)
-        # Qué quiere decir cada estado de la columna, con su color. Pegado
+        # Qué quiere decir cada estado de las tarjetas, con su color. Pegado
         # al título de la cola porque es de ella de lo que habla.
         self.leyenda_estados = IconoAyuda(
             leyenda_de_estados_html, "Qué significa cada estado"
@@ -6244,7 +6271,7 @@ class AirVaultWindow(QDialog):
                 estado += ", confirmado en Web Search"
             revision = getattr(parte.trabajo.manifiesto, "websearch_resultado", "")
             if revision == "error":
-                estado += ", chequeo pendiente"
+                estado += f", {TEXTO_CHEQUEO_PENDIENTE}"
             celdas = (parte.batch_id, nombre, str(esperadas), estado)
             papel = papel_de_estado(
                 parte.estado, indexando, revisar=parte.trabajo.manifiesto.solo_subir,
