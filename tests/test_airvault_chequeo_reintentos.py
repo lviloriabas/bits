@@ -472,8 +472,8 @@ def test_lo_ausente_se_recupera_ya_y_lo_que_no_se_leyo_se_repite(ventana, tmp_pa
     assert list(ventana._chequeo_por_repetir.values()) == [sin_leer]
     assert ventana._reintentando_chequeo()
     texto = _bitacora(ventana)
-    assert "Batch «DP | ENTREGA»: sin terminar; se retoma al final" in texto
-    assert ("Batch «DP | ENTREGA»: no está publicado, 0 de 7 bitácoras encontradas; "
+    assert "Batch 2 «DP | ENTREGA»: sin terminar; se retoma al final" in texto
+    assert ("Batch 1 «DP | ENTREGA»: no está publicado, 0 de 7 bitácoras encontradas; "
             "queda pendiente de subir") in texto
     assert "Web Search: chequeo terminado, 2 de 2 batches revisados" in texto
     assert "0 confirmados, 1 sin publicar y 1 sin verificar" in texto
@@ -494,7 +494,7 @@ def test_un_chequeo_limpio_no_deja_nada_esperando(ventana, tmp_path, monkeypatch
     _terminar(ventana)
     assert not ventana._reintentando_chequeo()
     assert ventana._intentos_de_chequeo == 0
-    assert "Batch «DP | ENTREGA»: confirmado, 7 de 7 bitácoras encontradas" in _bitacora(ventana)
+    assert "Batch 1 «DP | ENTREGA»: confirmado, 7 de 7 bitácoras encontradas" in _bitacora(ventana)
 
 
 def _lista(ventana, tmp_path):
@@ -526,8 +526,8 @@ def test_cada_batch_tiene_su_linea_y_avanza_en_su_sitio(ventana, tmp_path):
     # Ninguna linea nueva: cada batch mueve la suya.
     assert ventana.bitacora.count() == antes + 2
     lineas = _lineas(ventana)
-    assert lineas[-3].endswith("Batch «Entrega -1»: revisando, 3 de 7 bitácoras")
-    assert lineas[-2].endswith("Batch «Entrega -2»: revisando, 5 de 7 bitácoras")
+    assert lineas[-3].endswith("Batch 1 «Entrega -1»: revisando, 3 de 7 bitácoras")
+    assert lineas[-2].endswith("Batch 2 «Entrega -2»: revisando, 5 de 7 bitácoras")
     # Debajo queda el resumen, que no cambia de batch.
     assert "0 de 2 batches" in lineas[-1]
     assert "Entrega" not in lineas[-1]
@@ -546,7 +546,7 @@ def test_al_terminar_un_batch_su_linea_se_queda_con_el_resultado(ventana, tmp_pa
     ventana._al_buscar_websearch({"resultados": [(uno, True)], "revisados": 1, "total": 2})
     fila = ventana._filas_websearch[str(uno.carpeta)]
     assert ventana.bitacora.count() == cuantas
-    assert fila.text().endswith("Batch «Entrega -1»: confirmado, 7 de 7 bitácoras encontradas")
+    assert fila.text().endswith("Batch 1 «Entrega -1»: confirmado, 7 de 7 bitácoras encontradas")
     assert fila.icon().isNull()
     assert str(uno.carpeta) not in ventana._filas_websearch_activas
     # El otro sigue leyendose en su linea.
@@ -564,15 +564,15 @@ def test_el_batch_que_se_queda_corto_dice_cuanto_llevaba_y_se_retoma_en_su_linea
                                   "revisados": 0, "total": 2})
     fila = ventana._filas_websearch[str(dos.carpeta)]
     assert fila.text().endswith(
-        "Batch «Entrega -2»: sin terminar, 22 de 25 bitácoras leídas; se retoma al final")
+        "Batch 2 «Entrega -2»: sin terminar, 22 de 25 bitácoras leídas; se retoma al final")
     assert fila.icon().isNull()
     cuantas = ventana.bitacora.count()
     avance(dos, 23, 25)
     assert ventana.bitacora.count() == cuantas
-    assert fila.text().endswith("Batch «Entrega -2»: revisando, 23 de 25 bitácoras")
+    assert fila.text().endswith("Batch 2 «Entrega -2»: revisando, 23 de 25 bitácoras")
     dos.manifiesto.websearch_detalle = MOTIVOS["carga"]
     ventana._al_buscar_websearch({"resultados": [(dos, False)], "revisados": 1, "total": 2})
-    assert fila.text().endswith("Batch «Entrega -2»: sin verificar. " + MOTIVOS["carga"])
+    assert fila.text().endswith("Batch 2 «Entrega -2»: sin verificar. " + MOTIVOS["carga"])
 
 
 def test_un_batch_publicado_a_medias_no_se_anuncia_como_ausente(ventana, tmp_path):
@@ -585,7 +585,7 @@ def test_un_batch_publicado_a_medias_no_se_anuncia_como_ausente(ventana, tmp_pat
     ventana._al_buscar_websearch({"resultados": [(uno, False)], "revisados": 1, "total": 2})
     fila = ventana._filas_websearch[str(uno.carpeta)]
     assert fila.text().endswith(
-        "Batch «Entrega -1»: incompleto en Web Search, 6 de 7 bitácoras encontradas; "
+        "Batch 1 «Entrega -1»: incompleto en Web Search, 6 de 7 bitácoras encontradas; "
         "se revisa entero antes de volver a subir")
 
 
@@ -595,7 +595,7 @@ def test_al_cortarse_el_chequeo_ninguna_linea_se_queda_girando(ventana, tmp_path
     ventana._cancelar()
     _terminar(ventana)
     fila = ventana._filas_websearch[str(uno.carpeta)]
-    assert fila.text().endswith("Batch «Entrega -1»: lectura sin terminar, 3 de 7 bitácoras leídas")
+    assert fila.text().endswith("Batch 1 «Entrega -1»: lectura sin terminar, 3 de 7 bitácoras leídas")
     assert fila.icon().isNull()
     assert not ventana._filas_websearch_activas
 
@@ -617,7 +617,7 @@ def test_cada_chequeo_empieza_su_lista_y_conserva_la_anterior(ventana, tmp_path)
     nueva = ventana._filas_websearch[str(uno.carpeta)]
     assert nueva is not anterior
     assert anterior.text().endswith("confirmado, 7 de 7 bitácoras encontradas")
-    assert nueva.text().endswith("Batch «Entrega -1»: revisando, 1 de 7 bitácoras")
+    assert nueva.text().endswith("Batch 1 «Entrega -1»: revisando, 1 de 7 bitácoras")
 
 
 @pytest.mark.parametrize("accion", ["pausar", "cancelar", "cerrar"])
@@ -713,7 +713,7 @@ def test_la_hora_de_la_linea_no_avanza_mientras_el_batch_se_lee(ventana, tmp_pat
     de_uno = next(linea for linea in _lineas(ventana) if "Entrega -1" in linea)
     de_dos = next(linea for linea in _lineas(ventana) if "Entrega -2" in linea)
     # La hora es la de cuando cada batch empezo a leerse; la cuenta si avanza.
-    assert de_uno == "19:59:01  Batch «Entrega -1»: revisando, 3 de 7 bitácoras"
+    assert de_uno == "19:59:01  Batch 1 «Entrega -1»: revisando, 3 de 7 bitácoras"
     assert de_dos.startswith("19:59:02  ")
     # Al quedar con su resultado lleva la hora en que termino.
     ventana._fila_websearch(str(uno.carpeta), "Batch «Entrega -1»: confirmado", False)

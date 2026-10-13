@@ -1472,19 +1472,11 @@ class Trabajo:
         vueltas = max(1, int(-(-limite // espera)) + 1)
         lotes_actuales: List[ResumenLote] = []
         for vuelta in range(1, vueltas + 1):
-            for clave in [c for c, valor in nombres_embebidos.items() if not valor]:
-                del nombres_embebidos[clave]
-            lotes_actuales = list(cliente.listar_lotes())
-            lote = _lote_por_identidad_y_contenido(
-                self,
-                cliente,
-                lotes_actuales,
-                avisar=avisar,
-                cache=nombres_embebidos,
-                excluir_ids=set(excluir),
+            batch_id, lotes_actuales = self.mirar_la_cola(
+                cliente, avisar, nombres_embebidos, excluir
             )
-            if lote is not None:
-                return self.anotar_lote(cliente, lote, avisar)
+            if batch_id:
+                return batch_id
             transcurrido = max(time.monotonic() - inicio, (vuelta - 1) * espera)
             if vuelta == vueltas or transcurrido >= limite:
                 break
@@ -1502,6 +1494,55 @@ class Trabajo:
                     0,
                 )
             dormir(min(espera, max(0.0, limite - transcurrido)))
+        self.cerrar_espera(
+            lotes_actuales, ya_era_vieja,
+            limite_s is not None and limite >= presupuesto,
+        )
+
+    def mirar_la_cola(
+        self,
+        cliente,
+        avisar: Optional[Aviso] = None,
+        cache: Optional[dict[str, str]] = None,
+        excluir: Collection[str] = (),
+    ) -> Tuple[str, List[ResumenLote]]:
+        """Una sola mirada a la cola: el ID si la carga ya se puede confirmar.
+
+        Devuelve tambien la cola leida, que es con lo que se dice despues
+        cuanto lleva armado AirVault o por que no se pudo confirmar. Es el
+        paso que repite :meth:`_esperar_confirmacion`, y el que usa la
+        espera conjunta de varias cargas para mirarlas todas en cada vuelta.
+        """
+        nombres_embebidos = cache if cache is not None else {}
+        for clave in [c for c, valor in nombres_embebidos.items() if not valor]:
+            del nombres_embebidos[clave]
+        lotes_actuales = list(cliente.listar_lotes())
+        lote = _lote_por_identidad_y_contenido(
+            self,
+            cliente,
+            lotes_actuales,
+            avisar=avisar,
+            cache=nombres_embebidos,
+            excluir_ids=set(excluir),
+        )
+        if lote is None:
+            return "", lotes_actuales
+        return self.anotar_lote(cliente, lote, avisar), lotes_actuales
+
+    def cerrar_espera(
+        self,
+        lotes_actuales: Sequence[ResumenLote],
+        ya_era_vieja: bool,
+        plazo_vencido: bool,
+    ) -> None:
+        """Termina una espera sin confirmar la carga; siempre levanta.
+
+        ``LoteNoEncontrado`` cuando la cola no tiene nada que pueda ser esta
+        carga, y entonces, con el plazo de publicacion vencido, queda
+        anotada como no encontrada. ``ErrorDeCorrida`` cuando hay algun
+        batch que podria serlo y todavia no se puede confirmar.
+        """
+        nombre = self.manifiesto.nombre_batch
         # Un batch sin titulo solo puede ser esta carga mientras AirVault la
         # arma. Si el plazo ya estaba vencido al empezar a mirar, es de otro
         # y no la deja «en camino» frenando las cargas siguientes.
@@ -1515,7 +1556,7 @@ class Trabajo:
             ]
         )
         if not posibles:
-            if limite_s is not None and limite >= presupuesto and _subida_rastreable(self):
+            if plazo_vencido and _subida_rastreable(self):
                 _dar_por_no_encontrada(self)
             raise LoteNoEncontrado(
                 f"No hay ningun batch llamado {nombre!r} en AirVault"
@@ -3110,8 +3151,21 @@ def subir_partes(
     forzados: Collection[str] = (),
     buscador: Optional[websearch.Buscador] = None,
     ya_confirmados: Sequence["Trabajo"] = (),
+    al_clasificar: Optional[Callable[[Sequence[EstadoParte]], None]] = None,
+    tambien_confirmar: Sequence["Trabajo"] = (),
 ) -> List[Tuple["Trabajo", str]]:
     """Confirma todos los batches y sube solamente los que falten.
+
+    Lo primero es saber donde esta cada batch, de una vez y antes de
+    esperar o subir nada: la cola de Web Index se consulta para todos y el
+    resultado se entrega entero a ``al_clasificar`` (ver
+    :func:`clasificar_partes`). Asi quien mira sabe desde el principio
+    cuales se suben, cuales esperan a AirVault, cuales estan ya en Web
+    Index o en Web Search y cuales no aparecen, y lo que no depende de una
+    carga (indexar, comprobar en Web Search) empieza sin esperarla.
+    ``tambien_confirmar`` son batches de la ejecucion que no vienen en
+    ``trabajos`` y entran en esa misma confirmacion; no se suben ni se
+    indexan por estar ahi.
 
     Con cliente se buscan tambien el batch sin sufijo y los de REVISAR. Los
     encontrados conservan o recuperan su ID. Si Quick Upload ya confirmo un
@@ -3261,6 +3315,16 @@ def subir_partes(
             and _subida_rastreable(trabajo)
         ]
         a_revisar = a_confirmar + en_vuelo_fuera
+        ya_incluidos = {str(trabajo.carpeta) for trabajo in a_revisar}
+        solo_clasificar = [
+            trabajo for trabajo in tambien_confirmar
+            if str(trabajo.carpeta) not in ya_incluidos
+            and str(trabajo.carpeta) not in claves_forzadas
+        ]
+        claves_solo_clasificar = {
+            str(trabajo.carpeta) for trabajo in solo_clasificar
+        }
+        a_revisar = a_revisar + solo_clasificar
         estados = (
             detectar_indexados(
                 comprobar_partes(a_revisar, cliente, avisar=avisar),
@@ -3275,6 +3339,19 @@ def subir_partes(
 
             if recuperar_mezclas(a_revisar, cliente, avisar):
                 estados = comprobar_partes(a_revisar, cliente, avisar=avisar)
+        # La foto entera sale ya, antes de esperar a ninguna carga: es lo
+        # que deja pintar la cola con lo que AirVault acaba de contestar y
+        # empezar a buscar en Web Search lo que la cola no tiene.
+        if al_clasificar is not None and estados:
+            al_clasificar(list(estados))
+        elif avisar is not None and estados:
+            avisar(resumen_de_clasificacion(estados), 0, 0)
+        # Lo que solo vino a confirmarse no se sube ni entra en la cola del
+        # indexado de esta tanda: lo retoma la revision con su propio paso.
+        estados = [
+            parte for parte in estados
+            if str(parte.trabajo.carpeta) not in claves_solo_clasificar
+        ]
         claves_por_subir = claves_forzadas | {
             str(parte.trabajo.carpeta)
             for parte in estados
@@ -3614,18 +3691,23 @@ def _esperar_cargas_en_vuelo(
     publicar: Callable[["Trabajo"], None],
     cache: dict[str, str],
 ) -> str:
-    """Espera a que se confirme la carga anterior antes de mandar otra.
+    """Espera a que se confirmen las cargas anteriores antes de mandar otra.
 
     AirVault junta las cargas que llegan mientras otra sigue en vuelo, asi
-    que no se sube nada con una sin confirmar. Antes eso era rendirse: la
-    subida volvia sin mandar los archivos que faltaban y habia que esperar
-    a otra vuelta del reloj, o a otro clic. Ahora se espera a que AirVault
-    la tenga entera, igual que tras subirla, se indexa y se sigue.
+    que no se sube nada con una sin confirmar. Lo unico que esa espera
+    impide es subir: mientras dura se sigue mirando la cola y se indexa lo
+    que ya este confirmado (es lo que hace ``dormir``).
+
+    Las cargas en vuelo se miran todas en cada vuelta, no una detras de
+    otra. Esperar a la primera hasta agotar su plazo dejaba sin confirmar a
+    la segunda, que podia llevar media hora en la cola, y con ella sin
+    indexar. Ahora la que aparece se confirma y se indexa en esa misma
+    vuelta, y cada una conserva su propio plazo.
 
     Una carga que ya se da por perdida (ver :func:`subida_perdida`) no esta
     en vuelo y no detiene nada: se avisa de ella y la vuelve a mandar quien
     mire Web Index. Un batch descuadrado si detiene: no se arregla
-    esperando.
+    esperando. Aun asi las demas se siguen confirmando antes de volver.
 
     Devuelve el motivo por el que no se puede subir todavia, o cadena vacia.
     """
@@ -3647,52 +3729,123 @@ def _esperar_cargas_en_vuelo(
         str(trabajo.manifiesto.batch_id).strip().upper()
         for trabajo in ejecucion if trabajo.manifiesto.batch_id
     }
+    bloqueo = ""
     for parte in en_vuelo:
-        trabajo = parte.trabajo
-        cabeza = _prefijo(trabajo)
-        if parte.estado == DESCUADRADO:
-            return (
+        if parte.estado != DESCUADRADO:
+            continue
+        if not bloqueo:
+            bloqueo = (
                 "No se inicia otra carga hasta resolver la anterior: "
                 f"{parte.nombre} ({parte.detalle})"
             )
         if avisar is not None:
             avisar(
-                f"{cabeza}Esperando a que AirVault detecte esta carga antes "
-                "de subir la siguiente",
+                f"{_prefijo(parte.trabajo)}Sus páginas no coinciden; no se "
+                "sube ninguna otra carga hasta resolverlo",
                 0,
                 0,
             )
+    pendientes = [parte for parte in en_vuelo if parte.estado != DESCUADRADO]
+    if not pendientes:
+        return bloqueo
+    if avisar is not None:
+        if len(pendientes) == 1:
+            avisar(
+                f"{_prefijo(pendientes[0].trabajo)}Esperando a que AirVault "
+                "detecte esta carga antes de subir la siguiente",
+                0,
+                0,
+            )
+        else:
+            avisar(
+                f"Esperando a que AirVault detecte {len(pendientes)} cargas "
+                "antes de subir la siguiente; se miran todas en cada vuelta",
+                0,
+                0,
+            )
+    # El plazo de cada una se fija al empezar: es lo que le queda para
+    # publicarse, y vencerlo sin candidatos es lo que la da por perdida.
+    plazos: dict[str, Tuple[float, bool, bool]] = {}
+    for parte in pendientes:
+        trabajo = parte.trabajo
+        limite = limite_para_publicacion(trabajo)
+        presupuesto = max(
+            0.0,
+            espera_para_darla_por_perdida(trabajo)
+            - (edad_de_la_carga(trabajo) or 0.0),
+        )
+        plazos[str(trabajo.carpeta)] = (
+            limite, limite >= presupuesto, _carga_vieja_sin_publicar(trabajo),
+        )
+    espera = max(
+        1.0,
+        min(
+            float(parte.trabajo.config.espera_descubrimiento_s or 0)
+            for parte in pendientes
+        ),
+    )
+    inicio = time.monotonic()
+    vuelta = 0
+    while pendientes:
+        vuelta += 1
+        # Las vueltas acotan la espera aunque ``dormir`` no duerma, que es
+        # como la ejercitan las pruebas.
+        transcurrido = max(time.monotonic() - inicio, (vuelta - 1) * espera)
+        siguen: List[EstadoParte] = []
+        for parte in pendientes:
+            trabajo = parte.trabajo
+            cabeza = _prefijo(trabajo)
+            limite, vencido, ya_era_vieja = plazos[str(trabajo.carpeta)]
 
-        def propio(texto: str, hechas: int, total: int, cabeza: str = cabeza) -> None:
-            if avisar is not None:
-                avisar(f"{cabeza}{texto}", hechas, total)
+            def propio(texto: str, hechas: int, total: int, cabeza: str = cabeza) -> None:
+                if avisar is not None:
+                    avisar(f"{cabeza}{texto}", hechas, total)
 
-        try:
-            trabajo.descubrir(
-                cliente,
-                esperar=True,
-                dormir=dormir,
-                avisar=propio if avisar else None,
-                cache=cache,
-                excluir=ocupados,
-                limite_s=limite_para_publicacion(trabajo),
-            )
-        except Exception as exc:  # noqa: BLE001 - se informa y se espera
-            if trabajo.manifiesto.no_encontrado_desde:
-                if avisar:
-                    avisar(f"{cabeza}No encontrado tras agotar la espera; se continúa con las cargas siguientes", 0, 0)
-                continue
-            logger.info(
-                "La carga {} sigue sin confirmar: {}",
-                trabajo.manifiesto.nombre_batch, exc,
-            )
-            return (
-                "No se inicia otra carga hasta confirmar la anterior: "
-                f"{parte.nombre}"
-            )
-        ocupados.add(str(trabajo.manifiesto.batch_id).strip().upper())
-        publicar(trabajo)
-    return ""
+            try:
+                batch_id, lotes_actuales = trabajo.mirar_la_cola(
+                    cliente, propio if avisar else None, cache, ocupados
+                )
+                if batch_id:
+                    ocupados.add(str(batch_id).strip().upper())
+                    publicar(trabajo)
+                    continue
+                if transcurrido < limite:
+                    if avisar is not None:
+                        en_camino = trabajo._carga_en_camino(lotes_actuales)
+                        avisar(
+                            f"{cabeza}{en_camino[:1].upper()}{en_camino[1:]}; "
+                            f"se vuelve a mirar en {espera:.0f} s",
+                            0,
+                            0,
+                        )
+                    siguen.append(parte)
+                    continue
+                trabajo.cerrar_espera(lotes_actuales, ya_era_vieja, vencido)
+            except Exception as exc:  # noqa: BLE001 - se informa y se espera
+                if trabajo.manifiesto.no_encontrado_desde:
+                    if avisar:
+                        avisar(f"{cabeza}No encontrado tras agotar la espera; se continúa con las cargas siguientes", 0, 0)
+                    continue
+                logger.info(
+                    "La carga {} sigue sin confirmar: {}",
+                    trabajo.manifiesto.nombre_batch, exc,
+                )
+                if not bloqueo:
+                    bloqueo = (
+                        "No se inicia otra carga hasta confirmar la anterior: "
+                        f"{parte.nombre}"
+                    )
+                if not isinstance(exc, (ErrorDeCorrida, LoteNoEncontrado, LoteAmbiguo)):
+                    # Sin red o sin sesion, las demas fallarian igual.
+                    return bloqueo
+        pendientes = siguen
+        if not pendientes:
+            break
+        falta = min(
+            plazos[str(parte.trabajo.carpeta)][0] for parte in pendientes
+        ) - transcurrido
+        dormir(min(espera, max(0.0, falta)))
+    return bloqueo
 
 
 def ya_esta_en_airvault(trabajo: "Trabajo", cliente):
@@ -5530,6 +5683,27 @@ def reenvios_automaticos(trabajo: "Trabajo") -> int:
     return len(trabajo.manifiesto.eventos("reenvio", "automatico"))
 
 
+def reenvios_hechos(trabajo: "Trabajo") -> int:
+    """Veces que este archivo volvio a Quick Upload, lo pidiera quien lo pidiera."""
+    return len(trabajo.manifiesto.eventos("reenvio"))
+
+
+def _reenvio_sin_orden(trabajo: "Trabajo") -> bool:
+    """Si el historial deja que el programa vuelva a mandar este archivo.
+
+    Sin registro de haberlo resubido, si: es la primera vez que falta, haya
+    tenido batch o no. Con registro, solo la carga que nunca llego a tener
+    batch y mientras no agote :data:`REENVIOS_AUTOMATICOS_MAXIMOS`; la que
+    ya se resubio, aparecio y volvio a faltar la decide una persona.
+    """
+    if not reenvios_hechos(trabajo):
+        return True
+    return bool(
+        not trabajo.manifiesto.batch_id
+        and reenvios_automaticos(trabajo) < REENVIOS_AUTOMATICOS_MAXIMOS
+    )
+
+
 def anotar_reenvio(trabajo: "Trabajo", automatico: bool, motivo: str = "") -> None:
     """Deja constancia de que el archivo vuelve a Quick Upload y por que."""
     trabajo.manifiesto.anotar(
@@ -5541,12 +5715,13 @@ def anotar_reenvio(trabajo: "Trabajo", automatico: bool, motivo: str = "") -> No
 def se_reenvia_sola(parte: EstadoParte) -> bool:
     """Si una carga que AirVault no publico puede volver sola a Quick Upload.
 
-    Solo la que **nunca** llego a tener batch: Quick Upload la acepto, la
-    cola entera se recorrio sin hallarla y vencio el plazo en que AirVault
-    publica un archivo de su tamano. Un batch que si aparecio y despues
-    dejo de estar en la cola no entra: lo completo o lo borro alguien, y
-    eso se decide mirando AirVault. Tampoco el cancelado, el marcado como
-    duplicado ni el que ya se reenvio las veces que tocaban.
+    Quick Upload la acepto, la cola entera se recorrio sin hallarla y
+    vencio el plazo en que AirVault publica un archivo de su tamano. Sin
+    registro de haberla resubido vuelve sola, haya tenido batch o no: si
+    alguien la completo a mano la encuentra Web Search, y si no esta ni en
+    la cola ni publicada, falta. Con registro decide el historial (ver
+    :func:`_reenvio_sin_orden`). No entran el cancelado ni el de una mezcla
+    pendiente.
 
     Decir que si no la manda: antes hay que comprobar en Web Search que sus
     bitacoras no esten publicadas (ver :func:`ausencia_vigente`).
@@ -5556,10 +5731,9 @@ def se_reenvia_sola(parte: EstadoParte) -> bool:
     return bool(
         parte.estado == NO_ENCONTRADO
         and not manifiesto.cancelado
-        and not manifiesto.batch_id
         and manifiesto.no_encontrado_desde
         and not manifiesto.mezcla_pendiente
-        and reenvios_automaticos(trabajo) < REENVIOS_AUTOMATICOS_MAXIMOS
+        and _reenvio_sin_orden(trabajo)
     )
 
 
@@ -5570,6 +5744,117 @@ def partes_por_recuperar(estados: Sequence[EstadoParte]) -> List["Trabajo"]:
     nunca salio hacia AirVault y esta por lo que salio y no llego.
     """
     return [parte.trabajo for parte in estados if se_reenvia_sola(parte)]
+
+
+# Donde queda cada batch tras confirmar la cola, que es lo que decide que se
+# hace con el. Van en el orden en que se leen en la ventana.
+A_SUBIR = "a_subir"
+EN_ESPERA = "en_espera"
+EN_WEB_INDEX = "en_web_index"
+EN_WEB_SEARCH = "en_web_search"
+SIN_UBICAR = "sin_ubicar"
+A_RESUBIR = "a_resubir"
+A_MANO = "a_mano"
+DESTINOS = (
+    A_SUBIR, EN_ESPERA, EN_WEB_INDEX, EN_WEB_SEARCH, SIN_UBICAR, A_RESUBIR,
+    A_MANO,
+)
+
+
+def destino_de(parte: EstadoParte) -> str:
+    """Que toca hacer con un batch segun donde lo dejo la confirmacion.
+
+    - ``A_SUBIR``: nunca salio hacia AirVault.
+    - ``EN_ESPERA``: Quick Upload lo acepto y AirVault todavia lo arma.
+    - ``EN_WEB_INDEX``: esta en la cola; se indexa y se completa.
+    - ``EN_WEB_SEARCH``: completado o con su publicacion confirmada.
+    - ``SIN_UBICAR``: la cola no lo tiene y vencio su plazo; falta buscar
+      sus bitacoras en Web Search para saber si esta publicado o falta.
+    - ``A_RESUBIR``: ni la cola ni Web Search lo tienen; vuelve a subirse.
+    - ``A_MANO``: lo decide una persona (paginas que no coinciden, posible
+      duplicado, una carga que ya se resubio y volvio a faltar).
+
+    Cadena vacia para lo cancelado, que no entra en ningun proceso.
+    """
+    trabajo = parte.trabajo
+    estado = parte.estado
+    if estado == CANCELADO:
+        return ""
+    if estado in (COMPLETADO, AUTOCOMPLETADO, PUBLICADO):
+        return EN_WEB_SEARCH
+    if estado in (LISTO, SOLO_REVISAR, INCOMPLETO, INDEXADO, TOMADO):
+        return EN_WEB_INDEX
+    if estado == SIN_SUBIR:
+        if (
+            duplicado_bloquea(trabajo)
+            or cargas_cortadas_seguidas(trabajo) >= CARGAS_CORTADAS_MAXIMAS
+        ):
+            return A_MANO
+        return A_SUBIR
+    if estado in (BUSCANDO, PROCESANDO):
+        return EN_ESPERA
+    if estado == NO_ENCONTRADO:
+        if trabajo.manifiesto.mezcla_pendiente:
+            return A_MANO
+        if not ausencia_vigente(trabajo):
+            return SIN_UBICAR
+        return A_RESUBIR if se_reenvia_sola(parte) else A_MANO
+    return A_MANO
+
+
+def clasificar_partes(
+    estados: Sequence[EstadoParte],
+) -> dict[str, List[EstadoParte]]:
+    """Reparte los batches por lo que toca hacer con cada uno.
+
+    Es la respuesta a «en que quedo la cola» despues de confirmarla entera:
+    un grupo por destino, en el orden de :data:`DESTINOS` y solo los que
+    tienen algun batch.
+    """
+    grupos: dict[str, List[EstadoParte]] = {destino: [] for destino in DESTINOS}
+    for parte in estados:
+        destino = destino_de(parte)
+        if destino:
+            grupos[destino].append(parte)
+    return {destino: partes for destino, partes in grupos.items() if partes}
+
+
+def partes_por_ubicar(estados: Sequence[EstadoParte]) -> List["Trabajo"]:
+    """Cargas que la cola no tiene y falta buscar en Web Search.
+
+    Todas las no encontradas, se puedan reenviar solas o no: saber que un
+    batch esta publicado lo da por terminado sin que nadie lo mire, y eso
+    no depende de quien lo vaya a resubir si falta.
+    """
+    return [
+        parte.trabajo for parte in estados
+        if parte.estado == NO_ENCONTRADO
+        and not parte.trabajo.manifiesto.cancelado
+        and not parte.trabajo.manifiesto.mezcla_pendiente
+    ]
+
+
+def resumen_de_clasificacion(estados: Sequence[EstadoParte]) -> str:
+    """La clasificacion en una linea: cuantos batches hay en cada destino."""
+    nombres = {
+        A_SUBIR: "por subir",
+        EN_ESPERA: "en espera de AirVault",
+        EN_WEB_INDEX: "en Web Index",
+        EN_WEB_SEARCH: "en Web Search o completados",
+        SIN_UBICAR: "fuera de Web Index, por buscar en Web Search",
+        A_RESUBIR: "por volver a subir",
+        A_MANO: "por decidir a mano",
+    }
+    grupos = clasificar_partes(estados)
+    total = sum(len(partes) for partes in grupos.values())
+    unidad = "batch" if total == 1 else "batches"
+    trozos = [
+        f"{len(partes)} {nombres[destino]}" for destino, partes in grupos.items()
+    ]
+    return (
+        f"Confirmación de {total} {unidad}: " + ", ".join(trozos)
+        if trozos else "Confirmación terminada: no hay batches en proceso"
+    )
 
 
 def ausencia_vigente(trabajo: "Trabajo", ahora: Optional[datetime] = None) -> bool:
@@ -5597,7 +5882,7 @@ def detalle_de_no_encontrada(trabajo: "Trabajo") -> str:
     """Lo que la cola dice de una carga que AirVault no publico."""
     base = "AirVault no publicó esta carga dentro del plazo."
     hechos = reenvios_automaticos(trabajo)
-    if trabajo.manifiesto.batch_id or hechos >= REENVIOS_AUTOMATICOS_MAXIMOS:
+    if not _reenvio_sin_orden(trabajo):
         veces = (
             f" Ya se volvió a subir {hechos} "
             f"{'vez' if hechos == 1 else 'veces'} sin que apareciera."

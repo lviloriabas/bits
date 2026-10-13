@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -168,7 +169,8 @@ def leyenda_de_estados() -> list[tuple[str, Optional[str], str]]:
                      "No se vuelve a enviar."),
         (NO_ENCONTRADO, "AirVault no publicó la carga al agotar la espera y la cola no la contiene. "
                         "Se comprueba en Web Search y, si tampoco está publicada, se vuelve "
-                        "a subir sola; tras dos reenvíos queda para decidirlo a mano."),
+                        "a subir sola. La que ya se resubió y vuelve a faltar queda para "
+                        "decidirlo a mano."),
         (DESCUADRADO, "AirVault tiene otra cantidad de páginas. No se toca "
                       "hasta revisarlo."),
         (TOMADO, "Alguien lo tiene abierto en AirVault; se espera a que lo "
@@ -784,6 +786,10 @@ class TrabajoAirVaultWorker(QThread):
     entrega_preparada = Signal(object)
     preparacion_fallida = Signal(str)
     batch_encontrado = Signal(object)
+    # Dónde quedó cada batch tras confirmar la cola entera, antes de esperar
+    # o subir nada. Es lo que deja pintar la cola de una vez y empezar a
+    # buscar en Web Search lo que Web Index no tiene.
+    clasificado = Signal(object)
     batch_indexado = Signal(object)
     batch_indexando = Signal(object, bool)
     subido = Signal(object)
@@ -1623,6 +1629,25 @@ class TrabajoAirVaultWorker(QThread):
                 and trabajo.manifiesto.batch_id
                 and estado_local(trabajo).estado in (BUSCANDO, SOLO_REVISAR)
             ]
+        # Al retomar la cola sin una revisión previa, los batches que no
+        # hay que subir se confirman en la misma pasada: así la cola entera
+        # queda clasificada antes de esperar a ninguna carga. Lo que arranca
+        # tras una revisión no lo repite, que la acaba de hacer.
+        tambien_confirmar = []
+        if estado.pop("confirmar_todo", False) and not estado.get("forzados"):
+            enviados = {str(trabajo.carpeta) for trabajo in por_subir}
+            tambien_confirmar = [
+                trabajo for trabajo in trabajos
+                if str(trabajo.carpeta) not in enviados
+                and _clave_estable(trabajo.carpeta) not in omitidos
+                and not trabajo.manifiesto.cancelado
+            ]
+
+        def al_clasificar(estados) -> None:
+            self.clasificado.emit({
+                "estados": list(estados), "trabajos": list(trabajos),
+            })
+
         # ``or []``: la suite sustituye subir_partes por dobles que no
         # devuelven nada, y esto no es motivo para tumbar una subida.
         fallos = subir_partes(
@@ -1634,6 +1659,8 @@ class TrabajoAirVaultWorker(QThread):
             forzados=estado.get("forzados") or (),
             buscador=estado.get("buscador"),
             ya_confirmados=ya_confirmados,
+            al_clasificar=al_clasificar,
+            tambien_confirmar=tambien_confirmar,
         ) or []
         self.subido.emit({
             "trabajos": estado["trabajos"], "cliente": cliente,
@@ -2394,6 +2421,10 @@ class AirVaultWindow(QDialog):
         # lo que queda anotado en su historial y lo que cuenta para el tope
         # de reenvíos automáticos.
         self._reenvios_automaticos: set[str] = set()
+        # Batches que el programa busca en Web Search porque la cola no los
+        # tiene, se puedan resubir solos o no. Que esa lectura falle no deja
+        # el proceso como fallido: siguen como no encontrados.
+        self._ubicando: set[str] = set()
 
         self.setWindowTitle("Indexar en AirVault")
         # Con botón de minimizar: escribir una ejecución entera tarda, y
@@ -3448,6 +3479,24 @@ class AirVaultWindow(QDialog):
             ]
             self._websearch_recuperados.update(str(t.carpeta) for t in ausentes)
             self._websearch_resubidas.clear()
+            if not pedido:
+                # Lo que el programa buscó por su cuenta solo vuelve a
+                # subirse solo si su historial lo permite; el resto se dice
+                # y queda para quien mire AirVault.
+                a_mano = [
+                    t for t in ausentes
+                    if str(t.carpeta) in self._ubicando and not self._se_resube_sola(t)
+                ]
+                ausentes = [t for t in ausentes if t not in a_mano]
+                if a_mano and not self._deteniendo:
+                    self._anotar(
+                        "No está en Web Index ni en Web Search y ya se había vuelto a subir; "
+                        "queda para decidir a mano con «Subir a AirVault ahora»:"
+                        if len(a_mano) == 1 else
+                        f"{len(a_mano)} batches no están en Web Index ni en Web Search y ya se "
+                        "habían vuelto a subir; quedan para decidir a mano con «Subir a AirVault ahora»:",
+                        [self._rotulo(t) for t in a_mano],
+                    )
             if (ausentes or self._revision_airvault_pendiente) and not self._websearch_proceso_activo:
                 self._websearch_inicio = set(self._websearch_revisados)
                 self._websearch_inicio_por_revisar.clear()
@@ -3540,7 +3589,9 @@ class AirVaultWindow(QDialog):
                 continue
             nombre = self._nombres_websearch.get(carpeta, "")
             self._fila_websearch(
-                carpeta, f"Batch «{nombre}»: lectura sin terminar{self._leidas(carpeta)}", False
+                carpeta,
+                self._con_numero(f"Batch «{nombre}»: lectura sin terminar{self._leidas(carpeta)}"),
+                False,
             )
         self._filas_websearch_activas.clear()
 
@@ -3563,14 +3614,16 @@ class AirVaultWindow(QDialog):
         self._nombres_websearch[carpeta] = str(datos.get("nombre", ""))
         cuenta = f", {min(hechas, total)} de {total} bitácoras" if total else ""
         self._fila_websearch(
-            carpeta, f"Batch «{datos.get('nombre', '')}»: revisando{cuenta}", True
+            carpeta,
+            self._con_numero(f"Batch «{datos.get('nombre', '')}»: revisando{cuenta}"),
+            True,
         )
 
     def _anotar_resultado_websearch(self, trabajo, confirmado: bool, datos: dict) -> None:
         """Deja en la línea del batch en qué quedó, con sus bitácoras."""
         manifiesto = trabajo.manifiesto
         carpeta = str(trabajo.carpeta)
-        nombre = f"Batch «{manifiesto.nombre_batch}»"
+        nombre = self._rotulo(trabajo)
         muestra = len(manifiesto.websearch_muestra or [])
         if datos.get("por_repetir"):
             self._fila_websearch(
@@ -4223,7 +4276,7 @@ class AirVaultWindow(QDialog):
         trabajos = [parte.trabajo for parte in partes]
         if not self._preguntar_por_amarillas(trabajos):
             return
-        nombres = ", ".join(parte.nombre for parte in partes)
+        nombres = ", ".join(self._rotulo(parte.trabajo) for parte in partes)
         self._encolar(
             "resubir",
             trabajos,
@@ -4244,7 +4297,7 @@ class AirVaultWindow(QDialog):
     def _comprobar_estas(self, partes) -> None:
         """Revisa una seleccion de la tabla como una accion de una sola vez."""
         trabajos = [parte.trabajo for parte in partes]
-        nombres = ", ".join(parte.nombre for parte in partes)
+        nombres = ", ".join(self._rotulo(parte.trabajo) for parte in partes)
         self._encolar(
             "comprobar",
             trabajos,
@@ -4330,7 +4383,7 @@ class AirVaultWindow(QDialog):
 
     def _indexar_estas(self, partes) -> None:
         """Escribe solo estos batches, con el plan que ya se calculó."""
-        nombres = ", ".join(parte.nombre for parte in partes)
+        nombres = ", ".join(self._rotulo(parte.trabajo) for parte in partes)
         self._encolar(
             "indexar",
             [parte.trabajo for parte in partes],
@@ -4339,7 +4392,7 @@ class AirVaultWindow(QDialog):
 
     def _completar_estas(self, partes) -> None:
         """Cierra solo estos batches, sin volver a escribir sus páginas."""
-        nombres = ", ".join(parte.nombre for parte in partes)
+        nombres = ", ".join(self._rotulo(parte.trabajo) for parte in partes)
         self._encolar(
             "completar",
             [parte.trabajo for parte in partes],
@@ -4383,7 +4436,7 @@ class AirVaultWindow(QDialog):
         self._pintar_lotes()
         self._ajustar_vigilancia()
         self._anotar(
-            f"{parte.nombre}: {'cancelado en' if cancelar else 'reanudado en'} "
+            f"{self._rotulo(parte.trabajo)}: {'cancelado en' if cancelar else 'reanudado en'} "
             "la cola"
         )
 
@@ -4602,7 +4655,7 @@ class AirVaultWindow(QDialog):
         self._actualizar_boton_eliminar_registros()
         for parte in idas:
             self._anotar(
-                f"{parte.nombre or '(sin nombre)'}: eliminado de la cola"
+                f"{self._rotulo(parte.trabajo)}: eliminado de la cola"
             )
 
     def _fila_vigilancia(self, fila: QGridLayout, inicio: int) -> None:
@@ -4911,8 +4964,12 @@ class AirVaultWindow(QDialog):
         # Lo primero que se lee es qué se le va a hacer a cada batch.
         self._anotar_plan(completo=True)
         self._anotar(
-            "Orden del proceso: primero se indexan y completan los batches "
-            "ya subidos; después se suben los pendientes, de uno en uno."
+            "Orden del proceso: primero se confirma dónde está cada batch "
+            "(Web Index, Web Search o sin subir); después se indexan y "
+            "completan los que ya están en Web Index y se suben los "
+            "pendientes de uno en uno. Mientras AirVault arma una carga se "
+            "sigue revisando e indexando; lo único que espera es la subida "
+            "siguiente."
         )
         if continuar:
             self._anotar("Continuando el proceso desde lo guardado")
@@ -5909,6 +5966,45 @@ class AirVaultWindow(QDialog):
         nombre = trabajo.manifiesto.nombre_batch or "(sin nombre)"
         return f"Batch {numero} «{nombre}»" if numero else f"Batch «{nombre}»"
 
+    def _con_numero(self, texto: str) -> str:
+        """Antepone a cada «nombre» de batch el número que tiene en la cola.
+
+        Los avisos nombran el batch entre comillas angulares y vienen de
+        muchos sitios, también del hilo, que no sabe de números. Aquí se le
+        pone a cada uno el suyo, que es con lo que se le busca en la barra
+        lateral. Un nombre que tengan dos batches se deja como está: no se
+        puede saber de cuál habla.
+        """
+        if "«" not in texto:
+            return texto
+        por_nombre: dict[str, list] = {}
+        for parte in getattr(self, "_estados", ()):
+            nombre = parte.trabajo.manifiesto.nombre_batch
+            if nombre:
+                por_nombre.setdefault(nombre, []).append(parte.trabajo)
+
+        def poner(hallado) -> str:
+            trabajos = por_nombre.get(hallado.group("nombre")) or ()
+            numero = self._numero_de(trabajos[0]) if len(trabajos) == 1 else 0
+            if not numero:
+                return hallado.group(0)
+            palabra = hallado.group("palabra") or (
+                "Batch" if hallado.start() == 0
+                or texto[:hallado.start()].rstrip().endswith((".", ":"))
+                else "batch"
+            )
+            return f"{palabra} {numero} «{hallado.group('nombre')}»"
+
+        return re.sub(
+            r"(?:(?P<palabra>[Bb]atch) (?:\d+ )?)?«(?P<nombre>[^»]*)»", poner, texto
+        )
+
+    def _se_resube_sola(self, trabajo) -> bool:
+        """Si el historial de ese batch deja que el programa lo vuelva a subir."""
+        from app.airvault.flujo import NO_ENCONTRADO, EstadoParte, se_reenvia_sola
+
+        return se_reenvia_sola(EstadoParte(trabajo, NO_ENCONTRADO))
+
     def _pasos_de(self, parte) -> tuple[list[str], list[str], list[str]]:
         """Los pasos de un batch: hechos, en proceso y pendientes, en su orden.
 
@@ -6545,13 +6641,16 @@ class AirVaultWindow(QDialog):
         puede retomar lo decide el flujo (`partes_por_recuperar`), que es
         quien conoce su historial y su tope de reenvíos.
         """
-        from app.airvault.flujo import partes_por_recuperar
+        from app.airvault.flujo import partes_por_ubicar
 
         if not self.auto_check.isChecked() and not self._cadena_manual:
             return []
         alcance = {str(parte.trabajo.carpeta) for parte in self._partes_del_alcance()}
+        # Todas las que la cola no tiene, también las que ya se resubieron:
+        # buscarlas en Web Search no escribe nada, y encontrarlas ahí las
+        # da por publicadas sin que nadie las mire.
         return [
-            trabajo for trabajo in partes_por_recuperar(revisados)
+            trabajo for trabajo in partes_por_ubicar(revisados)
             if str(trabajo.carpeta) in alcance
         ]
 
@@ -6564,8 +6663,64 @@ class AirVaultWindow(QDialog):
         trabajos = estado.get("buscar_trabajos") or []
         return bool(
             trabajos and estado.get("confirmacion_automatica")
-            and all(str(t.carpeta) in self._reenvios_automaticos for t in trabajos)
+            and all(
+                str(t.carpeta) in self._reenvios_automaticos
+                or str(t.carpeta) in self._ubicando
+                for t in trabajos
+            )
         )
+
+    def _ubicar_en_websearch(self) -> None:
+        """Busca ya en Web Search las cargas que la cola no tiene.
+
+        No espera al final de la cadena: la lectura va en su propio hilo y
+        no estorba a la subida ni al indexado, así que arranca en cuanto la
+        confirmación de la cola dice cuáles faltan. Cuando termina, lo que
+        esté publicado queda confirmado y lo que no vuelve a subirse en su
+        turno, detrás de la carga que esté en marcha.
+
+        Una ausencia reciente no se vuelve a preguntar, ni la carga por la
+        que ya se preguntó hace poco (`MINUTOS_ENTRE_CHEQUEOS_DE_PERDIDOS`).
+        """
+        from app.airvault.flujo import ausencia_vigente
+
+        if self._deteniendo or self._pausado or self._cancelacion_solicitada:
+            return
+        lector = self.lectura_websearch()
+        leyendose = {
+            str(t.carpeta) for t in (lector.estado.get("buscar_trabajos") or [])
+        } if lector is not None else set()
+        leyendose |= set(self._websearch_pendientes) | set(self._chequeo_por_repetir)
+        ahora = time.monotonic()
+        por_consultar = []
+        for trabajo in self._perdidos_por_recuperar:
+            clave = str(trabajo.carpeta)
+            if trabajo.manifiesto.cancelado or ausencia_vigente(trabajo):
+                continue
+            if clave not in leyendose and (
+                clave not in self._chequeo_de_perdidos
+                or ahora - self._chequeo_de_perdidos[clave]
+                >= MINUTOS_ENTRE_CHEQUEOS_DE_PERDIDOS * 60
+            ):
+                por_consultar.append(trabajo)
+        if not por_consultar:
+            return
+        for trabajo in por_consultar:
+            clave = str(trabajo.carpeta)
+            self._chequeo_de_perdidos[clave] = ahora
+            self._ubicando.add(clave)
+            if self._se_resube_sola(trabajo):
+                self._reenvios_automaticos.add(clave)
+            # La recuperación de antes no cuenta: es otra carga.
+            self._websearch_recuperados.discard(clave)
+        self._anotar(
+            "AirVault no publicó 1 batch; se comprueba en Web Search antes de volver a subirlo:"
+            if len(por_consultar) == 1 else
+            f"AirVault no publicó {len(por_consultar)} batches; se comprueban en Web Search "
+            "antes de volver a subirlos:",
+            [self._rotulo(trabajo) for trabajo in por_consultar],
+        )
+        self._iniciar_confirmacion(por_consultar, automatico=True)
 
     def _recuperar_perdidos(self) -> bool:
         """Retoma las cargas que AirVault aceptó y no publicó; dice si ocupó el hilo.
@@ -6580,46 +6735,27 @@ class AirVaultWindow(QDialog):
         """
         from app.airvault.flujo import ausencia_vigente
 
-        perdidos = [
+        if self._deteniendo or self._pausado or self._cancelacion_solicitada:
+            self._perdidos_por_recuperar = []
+            return False
+        # Lo que la revisión no alcanzó a preguntar (había otra lectura en
+        # marcha) se pregunta ahora.
+        self._ubicar_en_websearch()
+        # Un reenvío que ya espera su turno en la cola de acciones no se
+        # lanza otra vez desde aquí.
+        en_turno = {
+            str(trabajo.carpeta)
+            for modo, trabajos in self._cola_de_acciones
+            if modo == "recuperar_ausentes" for trabajo in trabajos
+        }
+        con_prueba = [
             trabajo for trabajo in self._perdidos_por_recuperar
             if not trabajo.manifiesto.cancelado
+            and str(trabajo.carpeta) not in en_turno
+            and ausencia_vigente(trabajo)
+            and self._se_resube_sola(trabajo)
         ]
         self._perdidos_por_recuperar = []
-        if (not perdidos or self._deteniendo or self._pausado
-                or self._cancelacion_solicitada):
-            return False
-        lector = self.lectura_websearch()
-        leyendose = {
-            str(t.carpeta) for t in (lector.estado.get("buscar_trabajos") or [])
-        } if lector is not None else set()
-        leyendose |= set(self._websearch_pendientes) | set(self._chequeo_por_repetir)
-        ahora = time.monotonic()
-        con_prueba, por_consultar = [], []
-        for trabajo in perdidos:
-            clave = str(trabajo.carpeta)
-            if ausencia_vigente(trabajo):
-                con_prueba.append(trabajo)
-            elif clave not in leyendose and (
-                clave not in self._chequeo_de_perdidos
-                or ahora - self._chequeo_de_perdidos[clave]
-                >= MINUTOS_ENTRE_CHEQUEOS_DE_PERDIDOS * 60
-            ):
-                por_consultar.append(trabajo)
-        if por_consultar:
-            for trabajo in por_consultar:
-                clave = str(trabajo.carpeta)
-                self._chequeo_de_perdidos[clave] = ahora
-                self._reenvios_automaticos.add(clave)
-                # La recuperación de antes no cuenta: es otra carga.
-                self._websearch_recuperados.discard(clave)
-            self._anotar(
-                "AirVault no publicó 1 batch; se comprueba en Web Search antes de volver a subirlo:"
-                if len(por_consultar) == 1 else
-                f"AirVault no publicó {len(por_consultar)} batches; se comprueban en Web Search "
-                "antes de volver a subirlos:",
-                [self._rotulo(trabajo) for trabajo in por_consultar],
-            )
-            self._iniciar_confirmacion(por_consultar, automatico=True)
         if not con_prueba:
             return False
         claves = {str(trabajo.carpeta) for trabajo in con_prueba}
@@ -7164,6 +7300,7 @@ class AirVaultWindow(QDialog):
             if not self._preguntar_por_amarillas(pendientes_subida):
                 return
             estado["pendientes_subida"] = pendientes_subida
+            estado["confirmar_todo"] = True
             self._lanzar("subir_pendientes", estado)
             return
         if self._listos():
@@ -7285,6 +7422,7 @@ class AirVaultWindow(QDialog):
         worker.entrega_preparada.connect(self._al_preparar_entrega)
         worker.preparacion_fallida.connect(self._al_preparacion_fallida)
         worker.batch_encontrado.connect(self._al_batch_encontrado)
+        worker.clasificado.connect(self._al_clasificar)
         worker.batch_indexado.connect(self._al_batch_indexado)
         worker.batch_indexando.connect(self._al_batch_indexando)
         worker.subido.connect(self._al_subir)
@@ -7798,8 +7936,8 @@ class AirVaultWindow(QDialog):
         «;», había que leerla entera para encontrar un batch.
         """
         hora = time.strftime("%H:%M:%S")
-        lineas = [f"{hora}  {texto}"]
-        lineas += [str(detalle).strip() for detalle in detalles]
+        lineas = [f"{hora}  {self._con_numero(texto)}"]
+        lineas += [self._con_numero(str(detalle).strip()) for detalle in detalles]
         lineas.append(self._totales_bitacoras())
         entrada = QListWidgetItem("\n".join(lineas))
         if ayuda and ayuda not in lineas:
@@ -7895,6 +8033,82 @@ class AirVaultWindow(QDialog):
             f"Detectado en AirVault: «{remoto.nombre}» es el batch "
             f"{remoto.batch_id}"
         )
+
+    def _al_clasificar(self, datos: dict) -> None:
+        """Pinta dónde quedó cada batch en cuanto se confirma la cola entera.
+
+        Llega del hilo que sube, antes de que espere a ninguna carga: la
+        cola se ve de una vez con lo que AirVault acaba de contestar, queda
+        dicho qué se hará con cada batch y lo que Web Index no tiene se
+        empieza a buscar en Web Search mientras lo demás sigue.
+        """
+        from app.airvault.flujo import estado_local
+
+        self._recibir_trabajos(datos.get("trabajos") or [])
+        self._estado["trabajos"] = self._filtrar_trabajos(
+            self._trabajos, self._worker_filtrado
+        )
+        revisados = list(datos["estados"])
+        por_carpeta = {str(parte.trabajo.carpeta): parte for parte in revisados}
+        anteriores = {str(parte.trabajo.carpeta): parte for parte in self._estados}
+        self._estados = [
+            por_carpeta.get(str(t.carpeta))
+            or anteriores.get(str(t.carpeta))
+            or estado_local(t)
+            for t in self._trabajos
+        ]
+        self._pintar_lotes()
+        self._anotar_confirmacion(revisados)
+        from app.airvault.flujo import resumen_de_clasificacion
+
+        self.resumen.setText(resumen_de_clasificacion(revisados) + ".")
+        self._perdidos_por_recuperar = self._perdidos_que_tocan(revisados)
+        self._ubicar_en_websearch()
+
+    def _anotar_confirmacion(self, revisados, acotado: bool = False) -> None:
+        """Deja en el registro en qué quedó cada batch y qué se hará con él.
+
+        Primero una línea por batch, con su número de la cola, su nombre y
+        su estado. Después la clasificación: un renglón por destino con los
+        números de sus batches, que es lo que contesta de un vistazo cuáles
+        se suben, cuáles esperan, cuáles están en Web Index o en Web Search
+        y cuáles hay que volver a subir.
+        """
+        from app.airvault.flujo import (A_MANO, A_RESUBIR, A_SUBIR, EN_ESPERA,
+                                        EN_WEB_INDEX, EN_WEB_SEARCH, SIN_UBICAR,
+                                        clasificar_partes,
+                                        resumen_de_clasificacion)
+
+        # Una línea por batch con su rótulo, como la columna Estado. El
+        # detalle entero de cada uno sigue en la ayuda de su celda.
+        self._anotar(
+            "Revisado:",
+            [f"{self._rotulo(p.trabajo)}: {p.titulo}" for p in revisados],
+        )
+        if acotado:
+            return
+        titulos = {
+            A_SUBIR: "Por subir, de uno en uno",
+            EN_ESPERA: "En espera, AirVault todavía los arma",
+            EN_WEB_INDEX: "En Web Index, se indexan y completan",
+            EN_WEB_SEARCH: "En Web Search o completados, terminados",
+            SIN_UBICAR: "No están en Web Index, se buscan en Web Search",
+            A_RESUBIR: "No están en Web Index ni en Web Search, se vuelven a subir",
+            A_MANO: "Para decidir a mano",
+        }
+        grupos = clasificar_partes(revisados)
+        if not grupos:
+            return
+        lineas = []
+        for destino, partes in grupos.items():
+            numeros = sorted(self._numero_de(parte.trabajo) for parte in partes)
+            cuales = ", ".join(str(numero) for numero in numeros if numero)
+            unidad = "batch" if len(partes) == 1 else "batches"
+            lineas.append(
+                f"{titulos[destino]}: {unidad} {cuales}" if cuales
+                else f"{titulos[destino]}: {len(partes)} {unidad}"
+            )
+        self._anotar(resumen_de_clasificacion(revisados) + ".", lineas)
 
     def _al_batch_indexando(self, trabajo, activo: bool) -> None:
         clave = str(trabajo.carpeta)
@@ -7993,7 +8207,7 @@ class AirVaultWindow(QDialog):
             self._subir_al_terminar = True
             self._anotar(
                 "Se suben los que faltan:",
-                [t.manifiesto.nombre_batch for t in sin_subir],
+                [self._rotulo(t) for t in sin_subir],
             )
         # Lo que sí llegó y AirVault no publicó dentro de su plazo tampoco se
         # queda esperando una orden: se retoma al terminar la cadena, tras
@@ -8001,6 +8215,9 @@ class AirVaultWindow(QDialog):
         self._perdidos_por_recuperar = (
             [] if acotado else self._perdidos_que_tocan(revisados)
         )
+        # Y se buscan ya en Web Search, que va en su propio hilo: al acabar
+        # lo demás ya se sabe cuáles están publicadas y cuáles faltan.
+        self._ubicar_en_websearch()
         conteo = conteo_de_estados(self._partes_del_alcance())
         if listos:
             self.resumen.setText(
@@ -8028,12 +8245,7 @@ class AirVaultWindow(QDialog):
                 "Revisión terminada: no hay batches en la cola."
             )
             self.estado_label.setText("Revisión terminada")
-        # Una línea por batch con su rótulo, como la columna Estado. El
-        # detalle entero de cada uno sigue en la ayuda de su celda.
-        self._anotar(
-            "Revisado:",
-            [f"{p.nombre}: {p.titulo}" for p in revisados],
-        )
+        self._anotar_confirmacion(revisados, acotado)
         for _clave, nombre, detalle in datos.get("fallos_de_plan") or ():
             motivo = mensaje_error(detalle, "AirVault no dejó leerlo.")
             self._anotar(

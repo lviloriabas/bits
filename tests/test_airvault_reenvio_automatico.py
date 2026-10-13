@@ -154,11 +154,9 @@ def test_una_carga_recien_subida_espera_y_no_se_retoma(tmp_path):
 
 @pytest.mark.parametrize("cambio", [
     lambda m: setattr(m, "cancelado", True),
-    # Tuvo batch y dejo de estar en la cola: lo completo o lo borro alguien.
-    lambda m: setattr(m, "batch_id", "003YA"),
     lambda m: setattr(m, "mezcla_pendiente", "003MEZCLA"),
     lambda m: setattr(m, "no_encontrado_desde", ""),
-], ids=["cancelado", "tuvo_batch", "mezcla_pendiente", "sin_plazo_vencido"])
+], ids=["cancelado", "mezcla_pendiente", "sin_plazo_vencido"])
 def test_lo_que_no_se_retoma_solo(tmp_path, cambio):
     trabajo, _cliente, _parte = perdida(tmp_path)
     cambio(trabajo.manifiesto)
@@ -167,6 +165,34 @@ def test_lo_que_no_se_retoma_solo(tmp_path, cambio):
 
     assert not se_reenvia_sola(parte)
     assert partes_por_recuperar([parte]) == []
+
+
+def test_sin_registro_de_haberlo_resubido_se_retoma_aunque_tuviera_batch(tmp_path):
+    """Tuvo batch y dejo de estar en la cola: si nunca se resubio, vuelve solo.
+
+    Que alguien lo completara a mano lo contesta Web Search, que se
+    consulta antes; si tampoco esta publicado, falta.
+    """
+    trabajo, _cliente, _parte = perdida(tmp_path)
+    trabajo.manifiesto.batch_id = "003YA"
+    parte = EstadoParte(trabajo, NO_ENCONTRADO)
+
+    assert not trabajo.manifiesto.eventos("reenvio")
+    assert se_reenvia_sola(parte)
+    assert partes_por_recuperar([parte]) == [trabajo]
+    assert "se vuelve a subir" in detalle_de_no_encontrada(trabajo)
+
+
+@pytest.mark.parametrize("automatico", [True, False], ids=["automatico", "manual"])
+def test_el_que_ya_se_resubio_y_tuvo_batch_lo_decide_una_persona(tmp_path, automatico):
+    trabajo, _cliente, _parte = perdida(tmp_path)
+    trabajo.manifiesto.batch_id = "003YA"
+    anotar_reenvio(trabajo, automatico=automatico)
+    parte = EstadoParte(trabajo, NO_ENCONTRADO)
+
+    assert not se_reenvia_sola(parte)
+    assert partes_por_recuperar([parte]) == []
+    assert "desde sus acciones" in detalle_de_no_encontrada(trabajo)
 
 
 def test_tras_dos_reenvios_automaticos_la_decision_pasa_a_una_persona(tmp_path):
@@ -227,6 +253,14 @@ def ventana(app, tmp_path):
     return modulo.AirVaultWindow(tmp_path)
 
 
+def sin_lectura_real(ventana):
+    """Anota las consultas a Web Search en vez de abrir su hilo."""
+    ventana._consultas = []
+    ventana._iniciar_confirmacion = lambda trabajos, **opciones: (
+        ventana._consultas.append((list(trabajos), opciones))
+    )
+
+
 def revisada(ventana, tmp_path):
     """La ventana tras una revision que deja una carga como no publicada."""
     trabajo, _cliente, parte = perdida(tmp_path)
@@ -234,6 +268,7 @@ def revisada(ventana, tmp_path):
     ventana._estados = [parte]
     ventana._estado["trabajos"] = [trabajo]
     ventana.auto_check.setChecked(True)
+    sin_lectura_real(ventana)
     ventana._al_comprobar({"estados": [parte], "planes": {}, "partes": []})
     return trabajo, parte
 
@@ -281,16 +316,16 @@ def test_revisar_filas_concretas_no_retoma_cargas_perdidas(ventana, tmp_path):
 
 def test_antes_de_reenviar_se_buscan_sus_bitacoras_en_web_search(ventana, tmp_path, monkeypatch):
     trabajo, _parte = revisada(ventana, tmp_path)
-    consultas, lanzados = [], []
-    monkeypatch.setattr(
-        ventana, "_iniciar_confirmacion",
-        lambda trabajos, **opciones: consultas.append((list(trabajos), opciones)),
-    )
+    lanzados = []
     monkeypatch.setattr(ventana, "_lanzar", lambda modo, estado: lanzados.append(modo))
+
+    # La consulta sale con la revision, sin esperar al final de la cadena.
+    assert ventana._consultas == [([trabajo], {"automatico": True})]
 
     assert ventana._recuperar_perdidos() is False
 
-    assert consultas == [([trabajo], {"automatico": True})]
+    # Al terminar la cadena no se pregunta otra vez ni se sube nada.
+    assert ventana._consultas == [([trabajo], {"automatico": True})]
     assert lanzados == []
     assert str(trabajo.carpeta) in ventana._reenvios_automaticos
     assert "se comprueba en Web Search antes de volver a subirlo" in lineas(ventana)
@@ -301,23 +336,19 @@ def test_antes_de_reenviar_se_buscan_sus_bitacoras_en_web_search(ventana, tmp_pa
 def test_no_se_pregunta_otra_vez_por_la_misma_carga_en_cada_vuelta(ventana, tmp_path, monkeypatch):
     """La cola se revisa cada pocos minutos; Web Search no."""
     trabajo, parte = revisada(ventana, tmp_path)
-    consultas = []
-    monkeypatch.setattr(
-        ventana, "_iniciar_confirmacion",
-        lambda trabajos, **_opciones: consultas.append(list(trabajos)),
-    )
+    consultas = ventana._consultas
     ventana._recuperar_perdidos()
 
     ventana._al_comprobar({"estados": [parte], "planes": {}, "partes": []})
     ventana._recuperar_perdidos()
-    assert consultas == [[trabajo]]
+    assert [trabajos for trabajos, _opciones in consultas] == [[trabajo]]
 
     # Pasado el espacio entre consultas, si.
     clave = str(trabajo.carpeta)
     ventana._chequeo_de_perdidos[clave] -= modulo.MINUTOS_ENTRE_CHEQUEOS_DE_PERDIDOS * 60
     ventana._al_comprobar({"estados": [parte], "planes": {}, "partes": []})
     ventana._recuperar_perdidos()
-    assert consultas == [[trabajo], [trabajo]]
+    assert [trabajos for trabajos, _opciones in consultas] == [[trabajo], [trabajo]]
 
 
 def test_con_la_ausencia_reciente_se_reenvia_sin_volver_a_preguntar(ventana, tmp_path, monkeypatch):

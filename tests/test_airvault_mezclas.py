@@ -92,6 +92,8 @@ def test_no_sube_el_segundo_si_el_primero_sigue_sin_identificar(tmp_path, monkey
 
     monkeypatch.setattr(Trabajo, "subir", subir)
     monkeypatch.setattr(Trabajo, "descubrir", descubrir)
+    # La espera conjunta de las cargas en vuelo mira la cola por su cuenta.
+    monkeypatch.setattr(Trabajo, "mirar_la_cola", descubrir)
     fallos = subir_partes(trabajos, SesionFalsa(), cliente=cliente)
     assert enviados == trabajos[:1]
     assert len(fallos) == 1
