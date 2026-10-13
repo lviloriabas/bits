@@ -9,10 +9,14 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import re
+import threading
 from datetime import date
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Sequence
+
+from loguru import logger
 
 from app.airvault.config import (
     CAMPOS_OBLIGATORIOS,
@@ -32,6 +36,9 @@ from app.airvault.model import Registro
 from app.utils.date_window import date_is_possible, month_end_date
 
 FLOTA_CACHE_FILENAME = "airvault_flota.json"
+# El cache lo guardan el indexado de la ventana y la consola; el temporal
+# lleva un nombre fijo, asi que las escrituras van de una en una.
+_ESCRITURA_DEL_CACHE = threading.Lock()
 
 _FECHA_CSV_RE = re.compile(r"^(\d{4})/(\d{2})/(\d{2})$")
 # Como vuelve una fecha leida de AirVault: la que se escribio, o el ISO que
@@ -174,21 +181,40 @@ class ResolutorFlota:
             return cls()
         try:
             datos = json.loads(ruta.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
+            # Sin el cache la flota sale de la regla de prefijos. Se sigue,
+            # pero se dice: antes era un cambio de comportamiento mudo.
+            logger.warning(
+                "No se pudo leer {}; la flota se deduce por regla hasta "
+                "que AirVault la confirme: {}", ruta.name, exc,
+            )
             return cls()
         if isinstance(datos, Mapping):
             return cls(datos.get("matriculas", datos))
         return cls()
 
     def guardar(self, path: Path | str) -> Path:
+        """Guarda lo aprendido sin dejar nunca el archivo a medias.
+
+        Se escribia directamente encima: un corte a mitad dejaba un JSON
+        truncado, que la carga siguiente tomaba por un cache vacio. Ahora
+        va a un temporal y se reemplaza de una vez, como las preferencias.
+        """
         ruta = Path(path)
-        ruta.write_text(
-            json.dumps(
-                {"version": 1, "matriculas": self._cache},
-                indent=2, ensure_ascii=False,
-            ),
-            encoding="utf-8",
+        contenido = json.dumps(
+            {"version": 1, "matriculas": self._cache},
+            indent=2, ensure_ascii=False,
         )
+        temporal = ruta.with_name(f"{ruta.name}.tmp")
+        with _ESCRITURA_DEL_CACHE:
+            try:
+                temporal.write_text(contenido, encoding="utf-8")
+                os.replace(temporal, ruta)
+            except OSError:
+                # Windows no deja reemplazar un archivo que otro tiene
+                # abierto. Queda lo que habia antes: escribir encima.
+                temporal.unlink(missing_ok=True)
+                ruta.write_text(contenido, encoding="utf-8")
         return ruta
 
     def aprender(self, matricula: str, fleet: str, lessor: str = "") -> None:

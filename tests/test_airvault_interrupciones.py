@@ -466,3 +466,87 @@ def test_un_cierre_omitido_no_se_anota_como_completado(tmp_path):
     anotado, = registro.anotar(trabajo.carpeta, [trabajo]).batches
     assert anotado.completado
     assert duplicados.anotar(libro, [trabajo]).controles()
+
+
+# ── las memorias locales ────────────────────────────────────────────
+
+def test_recuperar_una_mezcla_no_da_sus_bitacoras_por_eliminadas(tmp_path):
+    """Vuelven a estar por subir, no fuera de la entrega.
+
+    Marcadas como eliminadas contaban como ya cubiertas: si el reparto
+    cambiaba antes de resubirlas, ningun batch nuevo se las llevaba.
+    """
+    from app.airvault.mezclas import recuperar_mezclas
+
+    trabajos, cliente = escenario(tmp_path)
+    for trabajo in trabajos:
+        registro.anotar(trabajo.carpeta, [trabajo])
+    assert all(registro.comprometidas(t.carpeta) for t in trabajos)
+
+    assert recuperar_mezclas(trabajos, cliente) == trabajos
+
+    for trabajo in trabajos:
+        guardado = registro.leer(trabajo.carpeta)
+        assert guardado.batches == []
+        assert guardado.eliminadas == []
+        assert registro.comprometidas(trabajo.carpeta) == set()
+
+
+def test_un_archivo_de_memoria_tomado_un_instante_se_vuelve_a_leer(tmp_path, monkeypatch):
+    """El antivirus lo suelta enseguida; darlo por vacio borraba lo anotado."""
+    trabajo, _cliente = trabajo_subido(tmp_path)
+    registro.anotar(trabajo.carpeta, [trabajo])
+    ruta = registro.ruta_registro(trabajo.carpeta)
+    leer = type(ruta).read_text
+    fallos = [PermissionError("lo tiene otro proceso")]
+
+    def tomado(self, *args, **kwargs):
+        if self == ruta and fallos:
+            raise fallos.pop()
+        return leer(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(ruta), "read_text", tomado)
+    monkeypatch.setattr(registro.time, "sleep", lambda _s: None)
+
+    assert len(registro.leer(trabajo.carpeta).batches) == 1
+    assert fallos == []
+
+
+def test_un_archivo_de_memoria_danado_se_aparta_antes_de_reemplazarlo(tmp_path):
+    """Se sigue trabajando, pero lo que habia queda a mano para recuperarlo."""
+    trabajo, _cliente = trabajo_subido(tmp_path)
+    libro = carpeta_del_libro(trabajo)
+    ruta = duplicados.ruta_libro(libro)
+    ruta.write_text('{"version": 1, "envios": {"2312238": [', encoding="utf-8")
+
+    assert duplicados.leer(libro).envios == {}
+    duplicados.anotar(libro, [trabajo])
+
+    copia = ruta.with_name(f"{ruta.name}.ilegible")
+    assert copia.read_text(encoding="utf-8").startswith('{"version": 1')
+    assert duplicados.leer(libro).envios
+
+
+def test_el_cache_de_flota_se_reemplaza_de_una_vez(tmp_path, monkeypatch):
+    """Escrito encima, un corte a mitad lo dejaba truncado y se leia vacio."""
+    from app.airvault import mapping
+    from app.airvault.mapping import ResolutorFlota
+
+    ruta = tmp_path / mapping.FLOTA_CACHE_FILENAME
+    flota = ResolutorFlota()
+    flota.aprender("HP-1848CMP", "NG", "COPA")
+    flota.guardar(ruta)
+
+    assert ResolutorFlota.load(ruta).resolver("HP-1848CMP") == ("NG", "COPA", False)
+    assert [p.name for p in tmp_path.iterdir()] == [ruta.name]
+
+    # Si Windows no deja reemplazarlo, se escribe encima como antes.
+    def ocupado(*_a, **_k):
+        raise PermissionError("otro proceso lo tiene abierto")
+
+    monkeypatch.setattr(mapping.os, "replace", ocupado)
+    flota.aprender("HP-9901CMP", "MAX")
+    flota.guardar(ruta)
+
+    assert ResolutorFlota.load(ruta).resolver("HP-9901CMP") == ("MAX", "", False)
+    assert [p.name for p in tmp_path.iterdir()] == [ruta.name]

@@ -110,7 +110,8 @@ def recuperar_mezclas(trabajos, cliente, avisar=None):
             m.mezcla_pendiente = ""
             m.resubir_por_mezcla = True
             _reiniciar_subida_ausente(trabajo)
-            registro.olvidar(trabajo.carpeta, [trabajo.carpeta])
+            # Sin darlas por eliminadas: estas bitacoras vuelven a subir.
+            registro.desanotar(trabajo.carpeta, [trabajo.carpeta])
             recuperados.append(trabajo)
         if avisar:
             avisar(

@@ -26,7 +26,6 @@ no responder, y entonces queda el libro.
 
 from __future__ import annotations
 
-import json
 import os
 import tempfile
 import threading
@@ -35,6 +34,8 @@ from pathlib import Path
 from typing import Dict, List, Sequence
 
 from pydantic import BaseModel, Field
+
+from app.airvault.registro import apartar_ilegible, leer_json_de_memoria
 
 LIBRO_FILENAME = "bitacoras-enviadas.json"
 
@@ -163,13 +164,13 @@ def leer(raiz: Path | str) -> Libro:
     proteccion que no se puede leer no puede ademas impedir trabajar.
     """
     ruta = ruta_libro(raiz)
-    if not ruta.is_file():
+    datos = leer_json_de_memoria(ruta)
+    if datos is None:
         return Libro()
     try:
-        return Libro.model_validate(
-            json.loads(ruta.read_text(encoding="utf-8"))
-        )
-    except (OSError, ValueError):
+        return Libro.model_validate(datos)
+    except ValueError as exc:
+        apartar_ilegible(ruta, exc)
         return Libro()
 
 

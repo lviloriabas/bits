@@ -24,14 +24,21 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Sequence, Set, Tuple
 
+from loguru import logger
 from pydantic import BaseModel, Field
 
 REGISTRO_FILENAME = "registro-de-batches.json"
+
+# Pausas antes de volver a leer un archivo que Windows no dejo abrir. Pasa en
+# un instante y se resuelve solo; son menos de medio segundo en total.
+PAUSAS_DE_LECTURA = (0.05, 0.15, 0.3)
 
 # Repartos anteriores que se conservan. Cada uno es la lista completa de
 # batches tal como estaba antes de rehacerla, asi que sirve para ver que
@@ -124,6 +131,50 @@ def ruta_registro(carpeta: Path | str) -> Path:
     return raiz_de_registro(carpeta) / REGISTRO_FILENAME
 
 
+def leer_json_de_memoria(ruta: Path):
+    """Lo que guarda un archivo de memoria local, o ``None`` si no se pudo leer.
+
+    Estos archivos se leen, se cambian y se vuelven a escribir enteros, asi
+    que una lectura fallida que se tome por «vacio» acaba en una escritura
+    que borra lo que habia. Dos cosas para que eso no pase por un tropiezo:
+    el archivo que Windows tiene tomado un instante (el antivirus, otra
+    ventana) se vuelve a pedir, y el que esta danado se aparta con otro
+    nombre antes de seguir, para poder recuperarlo a mano.
+    """
+    if not ruta.is_file():
+        return None
+    texto = ""
+    for pausa in (*PAUSAS_DE_LECTURA, None):
+        try:
+            texto = ruta.read_text(encoding="utf-8")
+            break
+        except OSError as exc:
+            if pausa is None:
+                logger.warning("No se pudo leer {}: {}", ruta.name, exc)
+                return None
+            time.sleep(pausa)
+    try:
+        return json.loads(texto)
+    except ValueError as exc:
+        apartar_ilegible(ruta, exc)
+        return None
+
+
+def apartar_ilegible(ruta: Path, motivo: object) -> None:
+    """Deja una copia del archivo danado antes de que se reemplace."""
+    copia = ruta.with_name(f"{ruta.name}.ilegible")
+    try:
+        if copia.is_file() and copia.stat().st_size == ruta.stat().st_size:
+            return
+        shutil.copy2(ruta, copia)
+    except OSError:
+        return
+    logger.warning(
+        "{} esta danado ({}); se conserva una copia en {} y se sigue sin "
+        "esa memoria", ruta.name, motivo, copia.name,
+    )
+
+
 def leer(carpeta: Path | str) -> RegistroDeEntrega:
     """El registro de la entrega, o uno vacio si todavia no hay ninguno.
 
@@ -132,12 +183,13 @@ def leer(carpeta: Path | str) -> RegistroDeEntrega:
     con ellos se puede reconstruir.
     """
     ruta = ruta_registro(carpeta)
-    if not ruta.is_file():
+    datos = leer_json_de_memoria(ruta)
+    if datos is None:
         return RegistroDeEntrega()
     try:
-        datos = json.loads(ruta.read_text(encoding="utf-8"))
         return RegistroDeEntrega.model_validate(datos)
-    except (OSError, ValueError):
+    except ValueError as exc:
+        apartar_ilegible(ruta, exc)
         return RegistroDeEntrega()
 
 
@@ -319,6 +371,31 @@ def olvidar(
         return registro
     registro.batches = quedan
     registro.eliminadas = nuevas
+    guardar(registro, carpeta)
+    return registro
+
+
+def desanotar(
+    carpeta: Path | str,
+    carpetas_de_batch: Sequence[Path | str],
+) -> RegistroDeEntrega:
+    """Quita batches del registro sin darlos por eliminados.
+
+    Es para la carga que hay que volver a mandar: AirVault la junto con otra
+    y el batch mezclado se aparto, asi que sus bitacoras vuelven a estar por
+    subir. :func:`olvidar` no sirve para eso: deja las paginas marcadas como
+    eliminadas, que cuentan como ya cubiertas, y al cambiar el reparto antes
+    de resubirlas se quedaban fuera de todos los batches sin ningun aviso.
+    """
+    registro = leer(carpeta)
+    fuera = {str(Path(ruta)).casefold() for ruta in carpetas_de_batch}
+    quedan = [
+        batch for batch in registro.batches
+        if str(Path(batch.carpeta)).casefold() not in fuera
+    ]
+    if len(quedan) == len(registro.batches):
+        return registro
+    registro.batches = quedan
     guardar(registro, carpeta)
     return registro
 
