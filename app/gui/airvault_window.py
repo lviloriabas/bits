@@ -1279,101 +1279,44 @@ class TrabajoAirVaultWorker(QThread):
                                   motivos_redactados=True))
 
     def _revisar_reenvios(self, trabajos, cliente):
-        """Solo permite repetir un PDF si ninguna de sus bitacoras esta publicada.
+        """Autoriza repetir el PDF de un batch que el chequeo dio por ausente.
 
-        Se pregunta por todas las que tienen un número que se pueda buscar.
-        Las que no lo tienen (en REVISAR siempre hay alguna: por eso están
-        ahí) no se pueden consultar y no frenan el reenvío: exigirlas dejaba
-        cada REVISAR ausente sin volver a subirse nunca.
+        Vale la revisión que ya lo dejó como ausente: aquí no se vuelve a
+        preguntar a Web Search por cada bitácora, que en un batch grande eran
+        minutos de espera antes de cada subida. Si alguna quedó publicada y
+        la carga la repite, se corrige después desde Web Reports.
+
+        Un batch sin ningún número que se pueda buscar no tiene revisión en
+        la que apoyarse y no se reenvía a ciegas.
         """
-        from contextlib import ExitStack
-        from app.airvault.confirmacion import (huella_de_numeros, numeros_de_batch,
-                                               plazo_de_batch, verificar_batch)
-        from app.airvault.flujo import (Trabajo, autorizar_posible_duplicado,
-                                       marcar_posible_duplicado, ya_esta_en_airvault)
-        from app.airvault.session import ErrorDeSesion, SesionAirVault
-        from app.airvault.websearch_pagina import AccesoWebSearch
+        from app.airvault.confirmacion import numeros_de_batch
+        from app.airvault.flujo import autorizar_posible_duplicado, ya_esta_en_airvault
 
         autorizados, fallos = [], []
-        lector = acceso = None
-        with ExitStack() as cierre:
-            for trabajo in trabajos:
-                if self.hay_que_parar():
-                    raise SesionCancelada("Se canceló la recuperación de batches")
-                try:
-                    if ya_esta_en_airvault(trabajo, cliente) is not None:
-                        autorizados.append(trabajo)
-                        continue
-                    buscables = numeros_de_batch(trabajo.manifiesto)
-                    if not buscables:
-                        fallos.append((trabajo.manifiesto.nombre_batch,
-                                       "Ninguna bitácora tiene un número que se pueda buscar en Web Search. "
-                                       "Revise el batch en AirVault antes de volver a subirlo."))
-                        continue
-                    if lector is None:
-                        sesion = self.estado.get("sesion")
-                        if isinstance(sesion, SesionAirVault):
-                            lectura = sesion.clonar(renovable=True, cancelacion_independiente=True)
-                            self._lecturas_websearch.append(lectura)
-                            cierre.callback(lectura.http.close)
-                            cierre.callback(self._lecturas_websearch.remove, lectura)
-                            acceso = cierre.enter_context(AccesoWebSearch(
-                                trabajo.config, lectura,
-                                avisar=lambda texto: self._avisar(texto, 0, 0),
-                                cancelado=self.hay_que_parar,
-                                # A mitad de la recuperación Edge trabaja
-                                # en segundo plano y así se queda.
-                                permitir_ventana=False))
-                            lector = acceso.crear_lector()
-                            cierre.callback(lambda: lector.cerrar())
-                        else:
-                            lector = self.estado.get("buscador")
-                        if lector is None:
-                            raise ErrorDeSesion("Falta acceso a Web Search para confirmar el reenvío.")
-                    presupuesto = plazo_de_batch(len(trabajo.manifiesto.bitacoras()))
-                    # Lo ya contestado no se vuelve a preguntar si hay que
-                    # renovar el acceso a mitad del batch.
-                    leidas: dict = {}
-                    try:
-                        resultado = verificar_batch(lector, trabajo, self._avisar,
-                            presupuesto_s=presupuesto, cancelado=self.hay_que_parar, revisar_todas=True,
-                            consultas=leidas)
-                    except ErrorDeSesion:
-                        if acceso is None:
-                            raise
-                        lector.cerrar()
-                        acceso.renovar(lector.generacion)
-                        lector = acceso.crear_lector()
-                        resultado = verificar_batch(lector, trabajo, self._avisar,
-                            presupuesto_s=presupuesto, cancelado=self.hay_que_parar, revisar_todas=True,
-                            consultas=leidas)
-                    if not resultado.consulta_completa:
-                        raise ErrorDeSesion(resultado.detalle)
-                    if set(resultado.muestra) != set(buscables):
-                        raise ErrorDeSesion("Web Search no revisó todas las bitácoras del batch.")
-                    if resultado.encontradas:
-                        motivo = (f"AirVault tiene {resultado.encontradas} de {resultado.esperadas} "
-                                  "bitácoras publicadas. Se conserva el batch para revisar las faltantes.")
-                        marcar_posible_duplicado(trabajo, motivo)
-                        fallos.append((trabajo.manifiesto.nombre_batch, motivo))
-                        continue
-                    actual = Trabajo.cargar(trabajo.config, trabajo.carpeta)
-                    if (actual.manifiesto.cancelado or actual.manifiesto.websearch_resultado != "ausente"
-                            or actual.manifiesto.websearch_revision != trabajo.manifiesto.websearch_revision
-                            or actual.manifiesto.websearch_huella != huella_de_numeros(actual.manifiesto)):
-                        continue
-                    autorizar_posible_duplicado(actual)
-                    autorizados.append(actual)
-                except (SesionCancelada, TrabajoCancelado):
-                    raise
-                except Exception as exc:
-                    # El motivo completo queda en el registro: en la ventana
-                    # solo cabe su versión corta y sin él no se sabía por qué
-                    # un batch ausente seguía sin subirse.
-                    logger.warning("No se confirmó el reenvío del batch {}: {}",
-                                   trabajo.manifiesto.nombre_batch, exc)
+        for trabajo in trabajos:
+            if self.hay_que_parar():
+                raise SesionCancelada("Se canceló la recuperación de batches")
+            try:
+                if ya_esta_en_airvault(trabajo, cliente) is not None:
+                    autorizados.append(trabajo)
+                    continue
+                if not numeros_de_batch(trabajo.manifiesto):
                     fallos.append((trabajo.manifiesto.nombre_batch,
-                                   mensaje_error(exc, "No se pudo confirmar el reenvío en AirVault.")))
+                                   "Ninguna bitácora tiene un número que se pueda buscar en Web Search. "
+                                   "Revise el batch en AirVault antes de volver a subirlo."))
+                    continue
+                autorizar_posible_duplicado(trabajo)
+                autorizados.append(trabajo)
+            except (SesionCancelada, TrabajoCancelado):
+                raise
+            except Exception as exc:
+                # El motivo completo queda en el registro: en la ventana
+                # solo cabe su versión corta y sin él no se sabía por qué
+                # un batch ausente seguía sin subirse.
+                logger.warning("No se confirmó el reenvío del batch {}: {}",
+                               trabajo.manifiesto.nombre_batch, exc)
+                fallos.append((trabajo.manifiesto.nombre_batch,
+                               mensaje_error(exc, "No se pudo confirmar el reenvío en AirVault.")))
         return autorizados, fallos
 
     def _detectar_pendientes(self) -> None:

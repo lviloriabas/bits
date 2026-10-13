@@ -1,7 +1,5 @@
 """Un batch que Web Search no encontro se vuelve a subir aunque sea REVISAR."""
 
-import base64
-
 import pytest
 
 from app.airvault.confirmacion import huella_de_numeros
@@ -44,8 +42,8 @@ def test_las_bitacoras_sin_numero_no_impiden_volver_a_subir(app, tmp_path, monke
     envios, avisos = recuperar(ausentes, buscador, monkeypatch)
 
     assert [trabajo.carpeta for trabajo in envios] == [t.carpeta]
-    # Antes de reenviar se pregunto por todas las que tienen numero.
-    assert len(consultas) == 47
+    # Vale el chequeo que lo dejo ausente: no se vuelve a preguntar.
+    assert not consultas
     assert not avisos
 
 
@@ -66,18 +64,16 @@ def test_sin_ningun_numero_buscable_no_se_reenvia_a_ciegas(app, tmp_path, monkey
 def test_el_motivo_de_no_reenviar_llega_a_la_bitacora(app, tmp_path, monkeypatch):
     """Decia «No se pudo subir. Vuelva a intentarlo» de algo que no era eso."""
     t, buscador, _, ausentes = revisar_ausente(tmp_path, app)
-    # Una bitacora fuera de la muestra aparece publicada al revisarlas todas.
-    numero = t.manifiesto.registros[1].log_number
-    buscador.sesion.get = lambda _ruta, params, _get=buscador.sesion.get: (
-        {"rows": [{"C_DocNo": numero}], "records": 1}
-        if _numero_pedido(params) == numero else _get(_ruta, params)
-    )
+    for registro in t.manifiesto.registros:
+        registro.log_number = ""
+    t.manifiesto.websearch_huella = huella_de_numeros(t.manifiesto)
+    t.guardar()
 
     envios, avisos = recuperar(ausentes, buscador, monkeypatch)
 
     assert not envios
     motivo = avisos[0]["fallos"][0][1]
-    assert "1 de 47" in motivo
+    assert "Ninguna bitácora tiene un número" in motivo
     ventana = AirVaultWindow(tmp_path)
     ventana._trabajos = [t]
     ventana._estados = [estado_local(t)]
@@ -85,10 +81,6 @@ def test_el_motivo_de_no_reenviar_llega_a_la_bitacora(app, tmp_path, monkeypatch
     lineas = [ventana.bitacora.item(i).text() for i in range(ventana.bitacora.count())]
     assert any(motivo in linea for linea in lineas)
     assert not any("Vuelva a intentarlo" in linea for linea in lineas)
-
-
-def _numero_pedido(params):
-    return base64.b64decode(params["encodedValues"]).decode().split("=", 1)[1]
 
 
 @pytest.mark.parametrize("detalle,visible", [

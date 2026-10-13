@@ -248,7 +248,8 @@ def test_fin_no_cancela_el_chequeo_completo_automatico(app, tmp_path):
     assert worker.isRunning()
 
 
-def test_preflight_completo_detecta_publicacion_fuera_de_la_muestra(app, tmp_path, monkeypatch):
+def test_el_reenvio_confia_en_el_chequeo_y_no_revisa_todo_el_batch(app, tmp_path, monkeypatch):
+    """Revisar las 500 antes de subir eran minutos; lo repetido se corrige en Web Reports."""
     from tests.airvault_fake import ClienteFalso
     t, buscador, filas, consultas = caso(tmp_path, 500)
     filas[:] = [filas[271]]
@@ -258,14 +259,14 @@ def test_preflight_completo_detecta_publicacion_fuera_de_la_muestra(app, tmp_pat
     worker = TrabajoAirVaultWorker("recuperar_ausentes", {
         "pendientes_subida": avisos[-1]["ausentes"], "buscador": buscador,
     })
+    envios, fallos = [], []
     monkeypatch.setattr(worker, "_conectar", lambda: ClienteFalso())
-    monkeypatch.setattr(worker, "_enviar", lambda *_: pytest.fail("Ya hay una bitacora publicada"))
-    fallos = []
+    monkeypatch.setattr(worker, "_enviar", lambda trabajos, _cliente: envios.extend(trabajos))
     worker.subido.connect(lambda datos: fallos.extend(datos.get("fallos", [])))
     worker._recuperar_ausentes()
-    assert len(consultas) == 525
-    assert len(fallos) == 1
-    assert "1 de 500" in fallos[0][1]
+    assert len(consultas) == 25
+    assert [trabajo.carpeta for trabajo in envios] == [t.carpeta]
+    assert not fallos
 
 
 def test_recupera_pdf_previamente_reservado_y_autorizacion_no_sobrevive(app, tmp_path, monkeypatch):
