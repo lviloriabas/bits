@@ -429,8 +429,10 @@ def test_confirmar_un_batch_indexado_mantiene_el_progreso_final(app, tmp_path, m
 def test_busca_muchos_batches_simultaneamente_y_no_solo_dos(app, tmp_path):
     import base64
     from threading import Barrier
-    from app.airvault.confirmacion import MAX_BATCHES_PARALELOS
+    from app.airvault import confirmacion
     from tests.test_airvault_confirmacion import caso
+    # Los que caben en la memoria de este equipo, que es el limite de verdad.
+    MAX_BATCHES_PARALELOS = confirmacion.batches_paralelos()
     # Todos los que caben en el limite entran juntos: la barrera solo se
     # abre si las consultas coinciden de verdad.
     trabajos = [caso(tmp_path / str(i), 1, conocido=False)[0] for i in range(MAX_BATCHES_PARALELOS)]

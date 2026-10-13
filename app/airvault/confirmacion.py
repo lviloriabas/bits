@@ -15,13 +15,49 @@ from app.airvault.websearch import PLANTILLAS, _aparece
 
 METODO_MUESTRA = "muestra_por_numero"
 METODOS_MUESTRA = (METODO_MUESTRA, "muestra_distribuida")
-# Cuantos batches se leen a la vez. Todas las pestanas comparten la sesion
-# de AirVault, que atiende sus busquedas de una en una: abrir mas no hace
-# el chequeo mas rapido, solo reparte la misma cola entre mas batches. Con
-# 32 cada bitacora tardaba unos doce segundos y cada batch avanzaba tan
-# despacio que ninguno terminaba dentro de su plazo. Con diez, cada batch
-# recibe su respuesta en pocos segundos y la lista se va cerrando.
-MAX_BATCHES_PARALELOS = 10
+# Cuantos batches se leen a la vez, como mucho. Todas las pestanas comparten
+# la sesion de AirVault, que atiende sus busquedas de una en una: abrir mas
+# reparte la misma cola entre mas batches, y lo que se gana es lo que cada
+# pestana tarda en cargar su pagina, que si va en paralelo. Con 32 cada
+# bitacora tardaba unos doce segundos y, con el plazo de diez que habia
+# entonces, ningun batch terminaba. Con el plazo de un minuto por bitacora
+# (ver ``SEGUNDOS_POR_BITACORA``) veinte caben sin que ninguno se quede sin
+# tiempo. Cuantos se abren de verdad lo decide la memoria libre del equipo;
+# ver :func:`batches_paralelos`.
+MAX_BATCHES_PARALELOS = 20
+# Sin poder medir la memoria se usa el valor que ya estaba probado.
+BATCHES_PARALELOS_SIN_MEDIDA = 10
+# Con el equipo justo de memoria se sigue leyendo, pero de dos en dos.
+MINIMO_BATCHES_PARALELOS = 2
+# Lo que ocupa una pestana de Web Search con su tabla cargada. Medido sobre
+# el Edge del programa con trece pestanas abiertas: 97 MB de media y 138 la
+# mayor. Se redondea hacia arriba porque quedarse corto es lo que congela.
+MB_POR_PESTANA = 150
+# Memoria libre que el chequeo no toca: la cuarta parte del equipo y nunca
+# menos de 3 GB. Es lo que deja sitio al resto del programa (la lectura de
+# paginas puede estar corriendo a la vez), al propio Edge y a Windows.
+FRACCION_DE_MEMORIA_A_CONSERVAR = 0.25
+MB_LIBRES_A_CONSERVAR = 3072
+
+
+def batches_paralelos(libre_mb: int | None = None, total_mb: int | None = None) -> int:
+    """Cuantos batches se leen a la vez sin dejar al equipo sin memoria.
+
+    Cada batch en lectura es una pestana de Edge. Se abren las que caben en
+    la memoria libre despues de apartar la reserva, entre el minimo y el
+    tope. Se mide en el momento de empezar: un equipo que esta leyendo
+    paginas a la vez tiene menos libre y abre menos.
+    """
+    if libre_mb is None or total_mb is None:
+        from app.core.parallelism import available_memory_mb, total_memory_mb
+
+        libre_mb = available_memory_mb() if libre_mb is None else libre_mb
+        total_mb = total_memory_mb() if total_mb is None else total_mb
+    if libre_mb <= 0:
+        return BATCHES_PARALELOS_SIN_MEDIDA
+    reserva = max(MB_LIBRES_A_CONSERVAR, int(total_mb * FRACCION_DE_MEMORIA_A_CONSERVAR))
+    caben = (libre_mb - reserva) // MB_POR_PESTANA
+    return int(max(MINIMO_BATCHES_PARALELOS, min(MAX_BATCHES_PARALELOS, caben)))
 PORCENTAJE_MUESTRA = 5
 MINIMO_MUESTRA = 7
 

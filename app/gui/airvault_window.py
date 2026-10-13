@@ -327,6 +327,10 @@ LIMITE_BITACORA = 300
 # que gira; más lento se lee como tirones y no como algo que trabaja.
 MS_LATIDO = 100
 
+# Bitácoras ya leídas en Web Search antes de estimar cuánto falta. Con
+# menos, el ritmo todavía es el del arranque y la cifra saltaría sin sentido.
+BITACORAS_PARA_ESTIMAR = 5
+
 # Lo que dice la línea viva de cada trabajo hasta que el hilo avisa de su
 # primer paso. Nunca un «trabajando» a secas: se dice qué se está haciendo.
 PASO_INICIAL = {
@@ -438,6 +442,21 @@ def _minutos(segundos: float) -> str:
     """«m:ss», para el reloj del paso y la cuenta atrás de la revisión."""
     entero = int(segundos)
     return f"{entero // 60:d}:{entero % 60:02d}"
+
+
+def _duracion_aproximada(segundos: float) -> str:
+    """«aprox. 4 min», para un tiempo que es una estimación y no una cuenta.
+
+    Sin segundos a propósito: lo que falta sale del ritmo que se lleva, y
+    enseñarlo al segundo le daría una exactitud que no tiene.
+    """
+    minutos = int(round(max(0.0, segundos) / 60))
+    if minutos < 1:
+        return "menos de 1 min"
+    if minutos < 60:
+        return f"aprox. {minutos} min"
+    horas, resto = divmod(minutos, 60)
+    return f"aprox. {horas} h" + (f" {resto} min" if resto else "")
 
 
 def primera_frase(texto: str) -> str:
@@ -978,7 +997,7 @@ class TrabajoAirVaultWorker(QThread):
         from datetime import datetime
         from threading import Lock
         from app.airvault import confirmacion
-        from app.airvault.confirmacion import ConfirmacionBatch, MAX_BATCHES_PARALELOS, METODO_MUESTRA, huella_de_numeros, muestra_de_batch, numeros_de_batch, plazo_de_batch, verificar_batch
+        from app.airvault.confirmacion import ConfirmacionBatch, METODO_MUESTRA, huella_de_numeros, muestra_de_batch, numeros_de_batch, plazo_de_batch, verificar_batch
         from app.airvault.flujo import Trabajo, websearch_confirmacion_valida
         from app.airvault.manifest import copiar_confirmacion, guardar_confirmacion
         from app.airvault.session import ErrorDeSesion, SesionAirVault
@@ -1182,12 +1201,15 @@ class TrabajoAirVaultWorker(QThread):
         try:
             esperas = tuple(confirmacion.ESPERAS_ENTRE_VUELTAS_S)
             pendientes = list(trabajos)
+            # Cuantos a la vez lo decide la memoria libre de ahora mismo.
+            a_la_vez = confirmacion.batches_paralelos()
+            logger.info("Web Search: se leen hasta {} batches a la vez", a_la_vez)
             for numero, espera in enumerate((*esperas, None)):
                 self._avisar("Revisando batches en Web Search", 0, 0)
                 pendientes = vuelta(
                     pendientes,
-                    MAX_BATCHES_PARALELOS if numero == 0
-                    else confirmacion.BATCHES_PARALELOS_AL_REINTENTAR,
+                    a_la_vez if numero == 0
+                    else min(a_la_vez, confirmacion.BATCHES_PARALELOS_AL_REINTENTAR),
                     ultima=espera is None,
                 )
                 if not pendientes:
@@ -2168,6 +2190,15 @@ class AirVaultWindow(QDialog):
         self._avance_websearch: dict[str, tuple[int, int]] = {}
         self._nombres_websearch: dict[str, str] = {}
         self._inicio_websearch = time.monotonic()
+        # La hora de cada línea del chequeo es la de cuando el batch empezó
+        # a leerse; ver `_fila_websearch`.
+        self._horas_websearch: dict[str, str] = {}
+        # Con qué estimar lo que falta del chequeo: las bitácoras que se
+        # van a buscar de cada batch, los batches que ya contestaron y
+        # cuándo empezó la lectura de verdad. Ver `_restante_websearch`.
+        self._bitacoras_websearch: dict[str, int] = {}
+        self._websearch_terminados: set[str] = set()
+        self._inicio_lectura_websearch: Optional[float] = None
         self._websearch_inicio: Optional[set[str]] = None
         self._websearch_inicio_por_revisar: set[str] = set()
         self._websearch_proceso_activo = False
@@ -2792,7 +2823,7 @@ class AirVaultWindow(QDialog):
         self.boton_buscar_websearch.setToolTip(
             "Busca el 5 % de las bitácoras, con un mínimo de 7 si el batch tiene suficientes, "
             "repartidas entre el inicio y el final de cada batch. "
-            "Consulta números de bitácora en Web Search de hasta 10 batches a la vez, incluso durante "
+            "Consulta números de bitácora en Web Search de hasta 20 batches a la vez, según la memoria libre del equipo, incluso durante "
             "la subida o el indexado. Los batches ya confirmados conservan su prueba y no se vuelven "
             "a consultar; los omitidos tampoco. "
             "Los que no se pudieron leer se consultan de nuevo. "
@@ -3050,6 +3081,12 @@ class AirVaultWindow(QDialog):
         self._avance_websearch = {}
         self._nombres_websearch = {}
         self._inicio_websearch = time.monotonic()
+        self._horas_websearch = {}
+        self._websearch_terminados = set()
+        self._inicio_lectura_websearch = None
+        self._bitacoras_websearch = self._bitacoras_por_buscar(
+            trabajos, set(estado["todas_las_bitacoras"])
+        )
         self._paso_websearch = "Abriendo Web Search"
         worker = TrabajoAirVaultWorker("buscar_websearch", estado, self)
         worker.paso.connect(self._mostrar_paso_websearch)
@@ -3072,6 +3109,49 @@ class AirVaultWindow(QDialog):
         worker.start()
         self._actualizar_latido()
         self._actualizar_botones_proceso()
+
+    @staticmethod
+    def _bitacoras_por_buscar(trabajos, enteros: set[str]) -> dict[str, int]:
+        """Cuántas bitácoras se van a buscar de cada batch en este chequeo."""
+        from app.airvault.confirmacion import muestra_de_batch, numeros_de_batch
+
+        cuantas: dict[str, int] = {}
+        for trabajo in trabajos:
+            carpeta = str(trabajo.carpeta)
+            try:
+                numeros = (numeros_de_batch if carpeta in enteros
+                           else muestra_de_batch)(trabajo.manifiesto)
+            except Exception:  # noqa: BLE001 - es una estimación, no el chequeo
+                numeros = []
+            cuantas[carpeta] = len(numeros)
+        return cuantas
+
+    def _restante_websearch(self) -> str:
+        """Cuánto le falta al chequeo, según el ritmo que lleva.
+
+        Un solo tiempo para todos los batches: se leen varios a la vez y
+        cada uno va a su paso, así que lo que se puede decir con sentido es
+        cuánto falta para acabar con todos. Sale de las bitácoras ya leídas
+        y las que quedan, que es lo que de verdad tarda; contar batches
+        engaña, porque uno de 23 bitácoras pesa lo que tres de 7.
+        """
+        if not self._bitacoras_websearch or self._inicio_lectura_websearch is None:
+            return ""
+        total = hechas = 0
+        for carpeta, previstas in self._bitacoras_websearch.items():
+            leidas, de = self._avance_websearch.get(carpeta, (0, 0))
+            cuantas = de or previstas
+            total += cuantas
+            hechas += (cuantas if carpeta in self._websearch_terminados
+                       else min(leidas, cuantas))
+        if total <= 0 or hechas >= total:
+            return ""
+        if hechas < BITACORAS_PARA_ESTIMAR:
+            return "calculando el tiempo restante"
+        transcurrido = time.monotonic() - self._inicio_lectura_websearch
+        return "tiempo restante estimado: " + _duracion_aproximada(
+            transcurrido * (total - hechas) / hechas
+        )
 
     def _mostrar_paso_websearch(self, texto: str, hechas: int, total: int) -> None:
         if self._fin_confirmado is not None and self._lectura_websearch_pendiente() is None:
@@ -3275,6 +3355,11 @@ class AirVaultWindow(QDialog):
         al terminar se queda en el mismo sitio con su resultado. Así se ve
         de un vistazo cuáles van, cuáles faltan y en qué quedó cada uno, sin
         tener que cazar una frase que cambia.
+
+        La hora de la línea no avanza mientras el batch se lee: es la de
+        cuando empezó, y solo cambia al quedar con su resultado. Renovada en
+        cada bitácora, una docena de horas distintas saltaban a la vez y
+        parecían relojes; el único reloj del chequeo es el de la línea viva.
         """
         fila = self._filas_websearch.get(carpeta)
         if fila is None:
@@ -3288,7 +3373,12 @@ class AirVaultWindow(QDialog):
             while self.bitacora.count() > LIMITE_BITACORA:
                 self.bitacora.takeItem(0)
             self.bitacora.scrollToBottom()
-        fila.setText(f"{time.strftime('%H:%M:%S')}  {texto}")
+        hora = time.strftime("%H:%M:%S")
+        if activa:
+            hora = self._horas_websearch.setdefault(carpeta, hora)
+        else:
+            self._horas_websearch.pop(carpeta, None)
+        fila.setText(f"{hora}  {texto}")
         if activa:
             self._filas_websearch_activas.add(carpeta)
             self._pintar_filas_websearch()
@@ -3333,6 +3423,10 @@ class AirVaultWindow(QDialog):
         if not carpeta or self._worker_websearch is None:
             return
         hechas, total = int(datos.get("hechas", 0)), int(datos.get("total", 0))
+        if self._inicio_lectura_websearch is None:
+            # Desde la primera lectura y no desde la orden: abrir Web Search
+            # y entrar no dicen nada del ritmo al que se leen las bitácoras.
+            self._inicio_lectura_websearch = time.monotonic()
         self._avance_websearch[carpeta] = (hechas, total)
         self._nombres_websearch[carpeta] = str(datos.get("nombre", ""))
         cuenta = f", {min(hechas, total)} de {total} bitácoras" if total else ""
@@ -3353,6 +3447,7 @@ class AirVaultWindow(QDialog):
                 False,
             )
             return
+        self._websearch_terminados.add(carpeta)
         encontradas = f"{manifiesto.websearch_cotejadas} de {muestra} bitácoras encontradas"
         if confirmado:
             quedo = f"confirmado, {encontradas}"
@@ -7140,10 +7235,15 @@ class AirVaultWindow(QDialog):
                 texto += f" - {min(hechas, total)} de {total}"
                 if lector:
                     texto += " batches"
+            restante = self._restante_websearch() if lector or lector_paralelo is not None else ""
+            if lector and restante:
+                texto += f" - {restante}"
             if not lector and lector_paralelo is not None:
                 revisados, batches = self._cuenta_websearch
                 if batches > 0:
                     texto += f" - En paralelo: {self._paso_websearch} - Web Search: {min(revisados, batches)} de {batches} batches"
+                    if restante:
+                        texto += f", {restante}"
             color = color_indexando()
         elif self._reintentando_chequeo():
             # Por delante de la revisión periódica: es lo que está parado de

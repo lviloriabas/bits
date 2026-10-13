@@ -131,12 +131,31 @@ def test_el_hilo_cuenta_el_avance_de_cada_batch_por_separado(app, tmp_path):
     assert pasos == ["Revisando batches en Web Search"]
 
 
-def test_no_se_leen_mas_de_diez_batches_a_la_vez(app, tmp_path, monkeypatch):
-    """Mas pestanas no aceleran el chequeo: solo frenan a cada batch."""
+def test_cuantos_batches_se_leen_a_la_vez_lo_decide_la_memoria_libre():
+    """Cada batch en lectura es una pestana: se abren las que caben."""
+    tope, minimo = confirmacion.MAX_BATCHES_PARALELOS, confirmacion.MINIMO_BATCHES_PARALELOS
+    assert tope == 20
+    # Un equipo de 32 GB con la mitad libre llega al tope.
+    assert confirmacion.batches_paralelos(16_000, 32_000) == tope
+    # En uno de 16 GB se aparta la cuarta parte: con 5,6 GB libres caben diez.
+    assert confirmacion.batches_paralelos(5_600, 16_000) == 10
+    # La reserva nunca baja de 3 GB, aunque el equipo sea pequeno.
+    assert confirmacion.batches_paralelos(4_000, 8_000) == 6
+    # Sin margen se sigue leyendo, pero de a pocos.
+    assert confirmacion.batches_paralelos(2_500, 16_000) == minimo
+    assert confirmacion.batches_paralelos(300, 16_000) == minimo
+    # Sin poder medir se usa el valor de siempre.
+    assert confirmacion.batches_paralelos(0, 0) == confirmacion.BATCHES_PARALELOS_SIN_MEDIDA
+    for libre in range(0, 40_000, 517):
+        assert minimo <= confirmacion.batches_paralelos(libre, 16_000) <= tope
+
+
+def test_no_se_leen_mas_batches_a_la_vez_de_los_que_caben(app, tmp_path, monkeypatch):
+    """El chequeo abre las pestanas que le dice la memoria, y ni una mas."""
     import threading
     import time as reloj
 
-    assert confirmacion.MAX_BATCHES_PARALELOS == 10
+    monkeypatch.setattr(confirmacion, "batches_paralelos", lambda *_: 10)
     trabajos = [caso(tmp_path / str(n), 1)[0] for n in range(24)]
     candado, activos, maximo = threading.Lock(), [0], [0]
 
@@ -675,3 +694,62 @@ def test_lo_que_se_vuelve_a_subir_se_indexa_siempre(ventana, tmp_path, monkeypat
     assert lanzados[0][1]["completar"] is False
     # La revision normal sigue obedeciendo a la opcion de indexar.
     assert lanzados[1][1]["indexar_al_encontrar"] is indexar_solo
+
+
+def test_la_hora_de_la_linea_no_avanza_mientras_el_batch_se_lee(ventana, tmp_path, monkeypatch):
+    """Una docena de horas saltando a la vez parecian relojes, y no lo eran."""
+    uno, dos, avance = _lista(ventana, tmp_path)
+    cuenta = {"n": 0}
+
+    def hora(_formato):
+        cuenta["n"] += 1
+        return f"19:59:{cuenta['n']:02d}"
+
+    monkeypatch.setattr(modulo.time, "strftime", hora)
+    avance(uno, 1)
+    avance(dos, 1)
+    avance(uno, 2)
+    avance(uno, 3)
+    de_uno = next(linea for linea in _lineas(ventana) if "Entrega -1" in linea)
+    de_dos = next(linea for linea in _lineas(ventana) if "Entrega -2" in linea)
+    # La hora es la de cuando cada batch empezo a leerse; la cuenta si avanza.
+    assert de_uno == "19:59:01  Batch «Entrega -1»: revisando, 3 de 7 bitácoras"
+    assert de_dos.startswith("19:59:02  ")
+    # Al quedar con su resultado lleva la hora en que termino.
+    ventana._fila_websearch(str(uno.carpeta), "Batch «Entrega -1»: confirmado", False)
+    de_uno = next(linea for linea in _lineas(ventana) if "Entrega -1" in linea)
+    assert de_uno.startswith("19:59:0") and not de_uno.startswith("19:59:01")
+
+
+def test_la_linea_viva_estima_lo_que_falta_del_chequeo(ventana, tmp_path, monkeypatch):
+    """Un solo tiempo para todos los batches, por las bitacoras que quedan."""
+    reloj = [1000.0]
+    monkeypatch.setattr(modulo.time, "monotonic", lambda: reloj[0])
+    uno, dos, avance = _lista(ventana, tmp_path)
+    assert ventana._bitacoras_websearch == {str(uno.carpeta): 7, str(dos.carpeta): 7}
+    # Abrir Web Search no cuenta: todavia no se ha leido nada.
+    reloj[0] += 40
+    assert ventana._restante_websearch() == ""
+    avance(uno, 1)
+    assert ventana._restante_websearch() == "calculando el tiempo restante"
+    reloj[0] += 60
+    avance(uno, 6)
+    avance(dos, 1)
+    # Siete de catorce en un minuto: queda otro tanto.
+    assert ventana._restante_websearch() == "tiempo restante estimado: aprox. 1 min"
+    ventana._pintar_linea_viva()
+    assert "tiempo restante estimado: aprox. 1 min" in ventana._linea_viva.text()
+    # El que ya contesto cuenta entero aunque su ultima cuenta fuera menor.
+    ventana._websearch_terminados.add(str(uno.carpeta))
+    reloj[0] += 60
+    avance(dos, 6)
+    assert ventana._restante_websearch() == "tiempo restante estimado: menos de 1 min"
+    ventana._websearch_terminados.add(str(dos.carpeta))
+    assert ventana._restante_websearch() == ""
+
+
+def test_lo_que_falta_se_dice_sin_segundos():
+    assert modulo._duracion_aproximada(20) == "menos de 1 min"
+    assert modulo._duracion_aproximada(240) == "aprox. 4 min"
+    assert modulo._duracion_aproximada(3600) == "aprox. 1 h"
+    assert modulo._duracion_aproximada(5400) == "aprox. 1 h 30 min"
