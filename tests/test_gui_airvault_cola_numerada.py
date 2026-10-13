@@ -114,11 +114,13 @@ def test_la_linea_viva_dice_el_batch_y_el_paso_en_curso(app, tmp_path, monkeypat
     ventana._linea_viva = QListWidgetItem()
     ventana._pintar_linea_viva()
     assert ventana._linea_viva.text().startswith("Ahora: Escribiendo en AirVault los batches listos")
-    ventana._mostrar_paso("Batch 003AAA: Escribiendo en AirVault", 3, 10)
+    ventana._mostrar_paso("Batch «listo»: Escribiendo en AirVault", 3, 10)
     ventana._pintar_linea_viva()
     assert ventana._linea_viva.text().startswith(
         "Ahora: Batch 1 «listo»: Escribiendo en AirVault ("
     )
+    # El número de la barra lateral, no el ID: ese es de AirVault.
+    assert "003AAA" not in ventana._linea_viva.text()
     assert "3 de 10" in ventana._linea_viva.text()
     assert "trabajando" not in ventana._linea_viva.text()
 

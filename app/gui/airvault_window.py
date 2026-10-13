@@ -1629,6 +1629,24 @@ class TrabajoAirVaultWorker(QThread):
                 and trabajo.manifiesto.batch_id
                 and estado_local(trabajo).estado in (BUSCANDO, SOLO_REVISAR)
             ]
+        # Y lo que la ventana vio en Web Index con algo por hacer: el
+        # incompleto al que le toca otro intento, el indexado por completar
+        # y, cuando lo que se sube es un reenvío, todos los demás. Van antes
+        # de la primera carga, que es lo único que puede tardar: primero se
+        # termina lo que AirVault ya tiene y después se sigue con el resto.
+        primero = estado.pop("en_index_primero", None) or ()
+        if estado.get("indexar_al_encontrar") and primero:
+            del_hilo = {_clave_estable(t.carpeta): t for t in trabajos}
+            vistos = {
+                _clave_estable(t.carpeta) for t in (*ya_confirmados, *por_subir)
+            }
+            for trabajo in primero:
+                clave = _clave_estable(trabajo.carpeta)
+                if clave in vistos or clave in omitidos:
+                    continue
+                vistos.add(clave)
+                # El del hilo si lo tiene: es el que devuelve al terminar.
+                ya_confirmados.append(del_hilo.get(clave, trabajo))
         # Al retomar la cola sin una revisión previa, los batches que no
         # hay que subir se confirman en la misma pasada: así la cola entera
         # queda clasificada antes de esperar a ninguna carga. Lo que arranca
@@ -1677,21 +1695,17 @@ class TrabajoAirVaultWorker(QThread):
 
     def _indexar_batch_encontrado(self, trabajo, cliente, raiz: Path) -> dict:
         """Planifica, escribe, verifica y cierra un batch recién confirmado."""
-        from app.airvault.flujo import comprobar_memoria_de_libros
+        from app.airvault.flujo import (_con_cabeza, _prefijo,
+                                        comprobar_memoria_de_libros)
         from app.airvault.mapping import FLOTA_CACHE_FILENAME, ResolutorFlota
 
-        self._avisar(
-            f"Batch {trabajo.manifiesto.batch_id}: Preparando indexado",
-            0,
-            0,
-        )
+        # Por su nombre, como todos los avisos del recorrido: la ventana le
+        # pone el número de la barra lateral. El ID es de AirVault.
+        cabeza = _prefijo(trabajo)
+        self._avisar(f"{cabeza}Preparando indexado", 0, 0)
 
         def avisar_batch(texto: str, hechas: int, total: int) -> None:
-            self._avisar(
-                f"Batch {trabajo.manifiesto.batch_id}: {texto}",
-                hechas,
-                total,
-            )
+            self._avisar(_con_cabeza(cabeza, texto), hechas, total)
 
         resolutor = ResolutorFlota.load(raiz / FLOTA_CACHE_FILENAME)
         plan = trabajo.planificar(
@@ -1732,7 +1746,8 @@ class TrabajoAirVaultWorker(QThread):
         lista, para que la lista pueda decir «14 se escribirían, 5
         bloqueadas» en vez de un «listo» a secas.
         """
-        from app.airvault.flujo import (INCOMPLETO, LISTO,
+        from app.airvault.flujo import (INCOMPLETO, LISTO, _con_cabeza,
+                                        _prefijo,
                                         comprobar_memoria_de_libros,
                                         comprobar_partes, detectar_indexados)
         from app.airvault.indexer import FALLOS_DE_CAMINO
@@ -1795,19 +1810,16 @@ class TrabajoAirVaultWorker(QThread):
                 or (parte.estado == INCOMPLETO and clave in en_espera)
             ):
                 continue
-            self._avisar(
-                f"Batch {parte.batch_id}: Preparando revisión", 0, 0
-            )
+            cabeza = _prefijo(parte.trabajo)
+            self._avisar(f"{cabeza}Preparando revisión", 0, 0)
 
             def avisar_batch(
                 texto: str,
                 hechas: int,
                 total: int,
-                batch_id: str = parte.batch_id,
+                cabeza: str = cabeza,
             ) -> None:
-                self._avisar(
-                    f"Batch {batch_id}: {texto}", hechas, total
-                )
+                self._avisar(_con_cabeza(cabeza, texto), hechas, total)
 
             try:
                 planes[clave] = parte.trabajo.planificar(
@@ -1827,8 +1839,8 @@ class TrabajoAirVaultWorker(QThread):
                 )
                 fallos_de_plan.append((clave, parte.nombre, str(exc)))
                 self._avisar(
-                    f"Batch {parte.batch_id}: No se pudo leer; se sigue con "
-                    "los demás batches", 0, 0,
+                    f"{cabeza}No se pudo leer; se sigue con los demás "
+                    "batches", 0, 0,
                 )
                 continue
             comprobar_memoria_de_libros(planes[clave][1], raiz)
@@ -1853,7 +1865,8 @@ class TrabajoAirVaultWorker(QThread):
     # ── indexar ────────────────────────────────────────────────────
 
     def _indexar(self) -> None:
-        from app.airvault.flujo import cerrar_partes, completar_partes
+        from app.airvault.flujo import (_prefijo, cerrar_partes,
+                                        completar_partes)
         from app.airvault.indexer import FALLOS_DE_CAMINO, Resultado
 
         estado = self.estado
@@ -1912,8 +1925,8 @@ class TrabajoAirVaultWorker(QThread):
                     str(exc),
                 ))
                 self._avisar(
-                    f"Batch {trabajo.manifiesto.batch_id}: No se pudo "
-                    "indexar; se sigue con el siguiente batch", 0, 0,
+                    f"{_prefijo(trabajo)}No se pudo indexar; se sigue con "
+                    "el siguiente batch", 0, 0,
                 )
                 continue
             suma, suyo = datos["resultado"], parte["resultado"]
@@ -2397,6 +2410,13 @@ class AirVaultWindow(QDialog):
         # AirVault le dio, por carpeta. Ver `_numerar` e `_id_de`.
         self._numeros: dict[str, int] = {}
         self._ids_recordados: dict[str, str] = {}
+        # Los hallazgos ya anotados en el registro, por carpeta e ID. Un
+        # batch que ya estaba en Web Index pasa por la misma revisión cada
+        # vez que se atiende, y decir «detectado» en todas era ruido.
+        self._detectados: set[tuple[str, str]] = set()
+        # Cuándo se mandó atender cada batch de Web Index por delante de una
+        # subida. Ver `_por_atender_en_index` y `_atendido_hace_poco`.
+        self._atendidos_en_index: dict[str, float] = {}
         # Lo que la lista de pasos dijo de cada batch la última vez, para
         # anotar después solo lo que cambió. Ver `_anotar_plan`.
         self._plan_anotado: dict[str, str] = {}
@@ -6327,7 +6347,64 @@ class AirVaultWindow(QDialog):
             trabajo for trabajo in self._listos()
             if str(trabajo.carpeta) not in agotados
             and not self._fallo_reciente(str(trabajo.carpeta))
+            and not self._atendido_hace_poco(str(trabajo.carpeta))
         ]
+
+    def _por_atender_en_index(self) -> list:
+        """Batches que ya están en Web Index y a los que se les puede hacer algo.
+
+        Van siempre primero. Antes de subir o de volver a subir un archivo
+        se mira en qué quedó lo que AirVault ya tiene y se hace lo que
+        falte: indexar el que está listo, reintentar el incompleto al que
+        le toca y completar el indexado. Nada de eso depende de una carga,
+        y una carga puede tardar más de media hora en aparecer. Con todo
+        eso hecho se sigue con el resto.
+
+        El que alguien tiene abierto no entra, ni el incompleto que ya
+        gastó sus intentos: con ellos no hay nada que hacer ahora.
+        """
+        from app.airvault.flujo import (BUSCANDO, INCOMPLETO, INDEXADO, LISTO,
+                                        SOLO_REVISAR)
+
+        if not self._opciones.indexar:
+            return []
+        completar = self.completar_check.isChecked()
+        ahora = time.monotonic()
+        elegidos = []
+        for parte in self._partes_del_alcance():
+            trabajo = parte.trabajo
+            manifiesto = trabajo.manifiesto
+            clave = str(trabajo.carpeta)
+            if not manifiesto.batch_id or manifiesto.cancelado:
+                continue
+            if parte.lote is not None and parte.lote.bloqueado_por:
+                continue
+            if self._fallo_reciente(clave):
+                continue
+            if parte.estado in (LISTO, SOLO_REVISAR, BUSCANDO):
+                elegidos.append(trabajo)
+            elif parte.estado == INCOMPLETO:
+                if (self._reconfirmaciones.get(clave) != 0
+                        or self._toca_reintento_espaciado(clave)):
+                    elegidos.append(trabajo)
+            elif (parte.estado == INDEXADO and completar
+                  and not manifiesto.solo_subir):
+                intentos, cuando = self._cierres_fallidos.get(clave, (0, 0))
+                if intentos < 3 and ahora - cuando >= self.minutos_spin.value() * 60:
+                    elegidos.append(trabajo)
+        return elegidos
+
+    def _atendido_hace_poco(self, clave: str) -> bool:
+        """Si ese batch ya se atendió en la subida de esta misma vuelta.
+
+        Lo que quedó incompleto ahí lo retoma la revisión siguiente. Sin
+        esto la cadena lo volvía a escribir nada más terminar de subir.
+        """
+        cuando = self._atendidos_en_index.get(clave)
+        return (
+            cuando is not None
+            and time.monotonic() - cuando < self.minutos_spin.value() * 60
+        )
 
     def _fallo_reciente(self, clave: str) -> bool:
         """Si AirVault acaba de negarse a indexar ese batch.
@@ -7399,6 +7476,18 @@ class AirVaultWindow(QDialog):
             estado["forzados"] = []
         if modo in ("subir", "subir_pendientes", "resubir"):
             estado["indexar_manual"] = False
+        if modo in ("subir", "subir_pendientes", "recuperar_ausentes"):
+            # Antes de subir o volver a subir nada se atiende lo que ya está
+            # en Web Index. La orden dada a mano sobre unas filas («resubir»)
+            # es la única que no toca otros batches.
+            primero = self._por_atender_en_index()
+            self._gastar_reintentos_espaciados(primero)
+            ahora = time.monotonic()
+            for trabajo in primero:
+                self._atendidos_en_index[str(trabajo.carpeta)] = ahora
+            estado["en_index_primero"] = primero
+        else:
+            estado.pop("en_index_primero", None)
         # Lo omitido no entra en ningún proceso. El hilo recibe la cola de
         # la ejecución entera, que necesita para no repetir bitácoras, y
         # esta lista le dice a cuáles no les hace nada.
@@ -7519,8 +7608,8 @@ class AirVaultWindow(QDialog):
     def _seguir_en_vuelo(self, texto: str, hechas: int, total: int) -> None:
         """Anota cuánto lleva el batch que está subiendo o escribiendo.
 
-        El aviso no dice de qué batch es más que por su prefijo («Batch
-        003SRO: »), el mismo con el que el recorrido lo escribe. Solo cuentan
+        El aviso no dice de qué batch es más que por su prefijo (su nombre
+        entre comillas), el mismo con el que el recorrido lo escribe. Solo cuentan
         la subida de un batch que aún no está en AirVault y la escritura del
         que se está indexando: el resto de los pasos con cuenta (leer el
         batch, revisar lo guardado) no acercan el final.
@@ -7701,7 +7790,9 @@ class AirVaultWindow(QDialog):
 
         trabajo = self._trabajo_del_paso(texto)
         if trabajo is None:
-            return texto
+            # Un aviso que nombra batches sin empezar por uno: a cada nombre
+            # se le pone igual el número que tiene en la barra lateral.
+            return self._con_numero(texto)
         paso = texto[len(_prefijo(trabajo)):]
         if paso.startswith("Posible duplicado:"):
             paso = (
@@ -7711,10 +7802,16 @@ class AirVaultWindow(QDialog):
         return f"{self._rotulo(trabajo)}: {paso}"
 
     def _trabajo_del_paso(self, texto: str):
-        """El batch del que habla un aviso del hilo, por su prefijo."""
+        """El batch del que habla un aviso del hilo, por su prefijo.
+
+        El prefijo es el nombre del batch, que no cambia mientras se trabaja
+        en él. Se busca también en la cola entera: el hilo que vuelve a
+        subir unos batches atiende antes otros que no vienen en su lista.
+        """
         from app.airvault.flujo import _prefijo
 
-        for trabajo in self._estado.get("trabajos") or self._trabajos:
+        del_hilo = list(self._estado.get("trabajos") or ())
+        for trabajo in (*del_hilo, *self._trabajos):
             prefijo = _prefijo(trabajo)
             if prefijo and texto.startswith(prefijo):
                 return trabajo
@@ -8029,6 +8126,10 @@ class AirVaultWindow(QDialog):
                 self._estados[indice] = remoto
                 break
         self._pintar_lotes()
+        hallazgo = (clave, str(remoto.batch_id or "").upper())
+        if not hallazgo[1] or hallazgo in self._detectados:
+            return
+        self._detectados.add(hallazgo)
         self._anotar(
             f"Detectado en AirVault: «{remoto.nombre}» es el batch "
             f"{remoto.batch_id}"

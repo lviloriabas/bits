@@ -207,10 +207,13 @@ def test_el_aviso_de_escritura_identifica_el_batch(tmp_path):
         avisar=lambda texto, _hechas, _total: mensajes.append(texto),
     )
 
-    assert any(
-        texto == "Batch 003SRO: Escribiendo en AirVault"
-        for texto in mensajes
+    # Por su nombre y no por el ID: con él la ventana le pone el número que
+    # el batch tiene en la barra lateral.
+    assert (
+        f"Batch «{trabajo.manifiesto.nombre_batch}»: Escribiendo en AirVault"
+        in mensajes
     )
+    assert not any("003SRO" in texto for texto in mensajes)
 
 
 def test_un_batch_mayor_que_el_manifiesto_se_detiene(tmp_path):
@@ -411,15 +414,15 @@ def test_avisos_cortos_al_detectar_y_corregir_empty_batch(tmp_path):
         avisar=lambda texto, _hechas, _total: mensajes.append(texto),
     )
 
-    assert any(
-        texto.startswith("Batch 003NUEVO: Empty-Batch detectado")
-        for texto in mensajes
-    )
-    assert any(
-        texto.startswith("Batch 003NUEVO: corrigiendo nombre")
-        for texto in mensajes
-    )
-    assert "Batch 003NUEVO: nombre corregido" in mensajes
+    cabeza = f"Batch «{trabajo.manifiesto.nombre_batch}»: "
+    assert (
+        f"{cabeza}AirVault lo publicó sin nombre (Empty-Batch); "
+        "identificado por su contenido"
+    ) in mensajes
+    assert f"{cabeza}Corrigiendo su nombre en AirVault" in mensajes
+    assert f"{cabeza}Nombre corregido en AirVault" in mensajes
+    # El ID es de AirVault y todavía no era de este batch: no se nombra.
+    assert not any("003NUEVO" in texto for texto in mensajes)
 
 
 def test_identifica_empty_batch_aunque_falte_un_log_ocr(tmp_path):
@@ -529,12 +532,11 @@ def test_aviso_corto_al_detectar_un_nombre_incorrecto(tmp_path):
         avisar=lambda texto, _hechas, _total: mensajes.append(texto),
     )
 
-    assert any(
-        texto.startswith(
-            "Batch 003CRUZADO: nombre incorrecto «DP | NOMBRE EQUIVOCADO»"
-        )
-        for texto in mensajes
-    )
+    assert (
+        f"Batch «{trabajo.manifiesto.nombre_batch}»: En AirVault figura con "
+        'otro nombre ("DP | NOMBRE EQUIVOCADO")'
+    ) in mensajes
+    assert not any("003CRUZADO" in texto for texto in mensajes)
 
 
 def test_confirma_pronto_el_nombre_sin_repetir_el_renombrado(

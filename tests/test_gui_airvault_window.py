@@ -1710,14 +1710,15 @@ def test_la_escritura_de_un_batch_mueve_la_barra_sin_volver_atras(ventana):
     assert ventana.progreso.value() == 40
 
     ventana._al_batch_indexando(ventana._estados[0].trabajo, True)
-    ventana._mostrar_paso("Batch 003SRO: Escribiendo en AirVault", 60, 120)
+    ventana._mostrar_paso("Batch «DP | BITS»: Escribiendo en AirVault", 60, 120)
     assert ventana.progreso.value() == 60
+    # Con el número de la barra lateral; el ID es de AirVault.
     assert ventana.estado_label.text() == (
-        "Batch 003SRO: Escribiendo en AirVault"
+        "Batch 1 «DP | BITS»: Escribiendo en AirVault"
     )
 
     # Un reintento vuelve a contar desde cero; la barra no retrocede.
-    ventana._mostrar_paso("Batch 003SRO: Escribiendo en AirVault", 1, 120)
+    ventana._mostrar_paso("Batch «DP | BITS»: Escribiendo en AirVault", 1, 120)
     assert ventana.progreso.value() == 60
 
 

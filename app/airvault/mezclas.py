@@ -114,8 +114,13 @@ def recuperar_mezclas(trabajos, cliente, avisar=None):
             registro.desanotar(trabajo.carpeta, [trabajo.carpeta])
             recuperados.append(trabajo)
         if avisar:
+            # Por el nombre de cada carga, que es con lo que la ventana les
+            # pone su numero; el ID del batch mezclado es de AirVault.
+            cuales = ", ".join(
+                f"«{t.manifiesto.nombre_batch}»" for t in involucrados
+            )
             avisar(
-                f"Batch {lote.batch_id}: mezcla confirmada; se aparto como NO INDEXAR "
-                f"y se recuperaran {len(involucrados)} batches por separado", 0, 0,
+                f"AirVault juntó en un solo batch las cargas de {cuales}; se "
+                "apartó como NO INDEXAR y se vuelven a subir por separado", 0, 0,
             )
     return recuperados

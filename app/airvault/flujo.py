@@ -1590,7 +1590,7 @@ class Trabajo:
         if armandose:
             lote = max(armandose, key=lambda actual: actual.paginas)
             return (
-                f"AirVault todavía arma el batch {lote.batch_id}: "
+                f"AirVault todavía arma la carga: "
                 f"{lote.paginas} de {esperadas} páginas"
             )
         return "AirVault todavía no publica la carga completa"
@@ -1673,9 +1673,12 @@ class Trabajo:
                 "no permite ponerle el título esperado. No se indexó para no "
                 "dejar otro Empty-Batch."
             )
+        # Los avisos nombran el batch como el resto del recorrido, por su
+        # nombre: el ID de AirVault todavía no es de este trabajo.
+        cabeza = _prefijo(self)
         if avisar is not None:
             avisar(
-                f"Batch {lote.batch_id}: corrigiendo nombre a «{nombre}»",
+                _con_cabeza(cabeza, "Corrigiendo su nombre en AirVault"),
                 0,
                 0,
             )
@@ -1707,7 +1710,7 @@ class Trabajo:
             if confirmado is not None:
                 if avisar is not None:
                     avisar(
-                        f"Batch {lote.batch_id}: nombre corregido",
+                        _con_cabeza(cabeza, "Nombre corregido en AirVault"),
                         0,
                         0,
                     )
@@ -1715,8 +1718,10 @@ class Trabajo:
             if intento < len(pausas) - 1 and not aceptado:
                 if avisar is not None and not aceptado:
                     avisar(
-                        f"Batch {lote.batch_id}: nombre no aceptado; "
-                        "reintentando",
+                        _con_cabeza(
+                            cabeza,
+                            "AirVault no aceptó el nombre; se reintenta",
+                        ),
                         0,
                         0,
                     )
@@ -2770,11 +2775,15 @@ def _renumerar(trabajos: Sequence["Trabajo"]) -> List["Trabajo"]:
 
 
 def _prefijo(trabajo: "Trabajo") -> str:
-    """Etiqueta corta e inequívoca del batch para los avisos de avance."""
+    """Etiqueta corta e inequívoca del batch para los avisos de avance.
+
+    Por su nombre y nunca por su ID. El ID es de AirVault: solo existe
+    cuando el batch ya salió en Web Index, y un aviso que lo usaba dejaba de
+    reconocerse en cuanto el batch lo ganaba o lo perdía a mitad del paso.
+    El nombre no cambia, y con él la ventana le pone a cada aviso el número
+    que el batch tiene en la barra lateral.
+    """
     manifiesto = trabajo.manifiesto
-    batch_id = str(manifiesto.batch_id or "").strip()
-    if batch_id:
-        return f"Batch {batch_id}: "
     nombre = str(manifiesto.nombre_batch or "").strip()
     if nombre:
         return f"Batch «{nombre}»: "
@@ -2783,6 +2792,16 @@ def _prefijo(trabajo: "Trabajo") -> str:
     if manifiesto.partes > 1:
         return f"Batch {manifiesto.parte}/{manifiesto.partes}: "
     return "Batch: "
+
+
+def _con_cabeza(cabeza: str, texto: str) -> str:
+    """Antepone el batch a un aviso, salvo que el aviso ya lo nombre.
+
+    Los pasos de dentro (identificar la carga, corregirle el nombre) nombran
+    al batch por su cuenta, porque también se llaman sin nadie que lo haga
+    por ellos. Sin esta comprobación salía dos veces.
+    """
+    return texto if cabeza and texto.startswith(cabeza) else f"{cabeza}{texto}"
 
 
 def id_recordado(trabajo: "Trabajo") -> str:
@@ -3499,8 +3518,8 @@ def subir_partes(
                 publicar(trabajo)
                 if avisar is not None:
                     avisar(
-                        f"{cabeza}AirVault ya lo tiene publicado "
-                        f"({publicado.batch_id}); no se sube otra vez",
+                        f"{cabeza}AirVault ya lo tiene en Web Index; no se "
+                        "sube otra vez",
                         0,
                         0,
                     )
@@ -3570,7 +3589,7 @@ def subir_partes(
 
         def propio(texto: str, hechas: int, total: int, cabeza: str = cabeza) -> None:
             if avisar is not None:
-                avisar(f"{cabeza}{texto}", hechas, total)
+                avisar(_con_cabeza(cabeza, texto), hechas, total)
 
         try:
             trabajo.subir(
@@ -3799,7 +3818,7 @@ def _esperar_cargas_en_vuelo(
 
             def propio(texto: str, hechas: int, total: int, cabeza: str = cabeza) -> None:
                 if avisar is not None:
-                    avisar(f"{cabeza}{texto}", hechas, total)
+                    avisar(_con_cabeza(cabeza, texto), hechas, total)
 
             try:
                 batch_id, lotes_actuales = trabajo.mirar_la_cola(
@@ -4265,7 +4284,7 @@ def subir_y_descubrir_partes(
 
         def propio(texto: str, hechas: int, total: int, cabeza: str = cabeza) -> None:
             if avisar is not None:
-                avisar(f"{cabeza}{texto}", hechas, total)
+                avisar(_con_cabeza(cabeza, texto), hechas, total)
 
         trabajo.subir(sesion, avisar=propio if avisar else None, cliente=cliente)
         if trabajo.manifiesto.batch_id:
@@ -4333,7 +4352,7 @@ def descubrir_partes(
 
         def propio(texto: str, hechas: int, total: int, cabeza: str = cabeza) -> None:
             if avisar is not None:
-                avisar(f"{cabeza}{texto}", hechas, total)
+                avisar(_con_cabeza(cabeza, texto), hechas, total)
 
         trabajo.descubrir(cliente, esperar, dormir, propio if avisar else None)
         if manifiesto.batch_id:
@@ -5131,18 +5150,23 @@ def _lote_por_identidad_y_contenido(
         candidatos = suyos
     _puntaje, lote, _motivo = candidatos[0]
     if avisar is not None:
+        # Por el nombre del trabajo, como el resto de los avisos: el ID es
+        # de AirVault y en este punto todavía no es de este batch.
         if normalizar_nombre(lote.nombre) == "empty batch":
-            texto = f"Batch {lote.batch_id}: Empty-Batch detectado"
+            texto = (
+                "AirVault lo publicó sin nombre (Empty-Batch); "
+                "identificado por su contenido"
+            )
         elif not _nombre_visible_compatible(
             lote.nombre, manifiesto.nombre_batch
         ):
+            # Entre comillas rectas: las angulares son de los nombres de
+            # batch propios, a los que la ventana les pone su número.
             actual = str(lote.nombre or "(sin nombre)").strip()
-            texto = (
-                f"Batch {lote.batch_id}: nombre incorrecto «{actual}»"
-            )
+            texto = f'En AirVault figura con otro nombre ("{actual}")'
         else:
-            texto = f"Batch {lote.batch_id}: identidad confirmada"
-        avisar(texto, 0, 0)
+            texto = "Identidad confirmada en Web Index"
+        avisar(_con_cabeza(_prefijo(trabajo), texto), 0, 0)
     return lote
 
 
@@ -5482,8 +5506,8 @@ def _reconciliar_batches(
                 fallidos.add(str(trabajo.carpeta))
             if avisar is not None:
                 avisar(
-                    f"Batch {lote.batch_id}: nombre no confirmado; "
-                    "se reintentará",
+                    f"{_prefijo(trabajo)}AirVault aún no confirma su "
+                    "nombre; se reintentará",
                     0,
                     0,
                 )
@@ -6540,7 +6564,7 @@ def planificar_partes(
 
         def propio(texto: str, hechas: int, total: int, cabeza: str = cabeza) -> None:
             if avisar is not None:
-                avisar(f"{cabeza}{texto}", hechas, total)
+                avisar(_con_cabeza(cabeza, texto), hechas, total)
 
         try:
             planes.append(
@@ -6590,7 +6614,7 @@ def indexar_partes(
             arrastre: int = arrastre,
         ) -> None:
             if avisar is not None:
-                avisar(f"{cabeza}{texto}", arrastre + propias, total)
+                avisar(_con_cabeza(cabeza, texto), arrastre + propias, total)
 
         if al_indexar is not None:
             al_indexar(trabajo, True)
