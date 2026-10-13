@@ -14,10 +14,11 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import Qt
 
-from app.gui import actualizacion
+
+from app.gui import actualizacion, novedades_dialog
 from app.gui import main_window as ventana_principal
+from app.gui.novedades_dialog import NovedadesDialog
 from app.gui.tokens import TEMA_CLARO, TEMA_OSCURO, paleta, tema
 from app.gui.theme import aplicar_tema, install_application_theme
 from app.utils.preferencias_ui import guardar_opcion
@@ -158,17 +159,41 @@ def test_el_aviso_se_muestra_una_vez_al_volver_a_abrir(window, tmp_path, monkeyp
     vistos = []
 
     def mostrar(aviso):
-        vistos.append(aviso.text())
-        assert aviso.textFormat() == Qt.TextFormat.PlainText
+        vistos.append((aviso.intro.text(), aviso.cambios()))
 
-    monkeypatch.setattr(ventana_principal.QMessageBox, "exec", mostrar)
+    monkeypatch.setattr(ventana_principal.NovedadesDialog, "exec", mostrar)
     window.mostrar_novedades_instaladas()
     window.mostrar_novedades_instaladas()
 
-    assert vistos == [
-        "Se instalaron estos cambios:\n\ndef456 Mejora el visor\nfed321 Conserva <datos>"
-    ]
+    assert vistos == [(
+        "Se instalaron 2 cambios:",
+        [("def456", "Mejora el visor"), ("fed321", "Conserva <datos>")],
+    )]
     assert actualizacion.leer_novedades_instaladas(tmp_path) == []
+
+
+def test_el_aviso_no_crece_con_los_cambios_y_distingue_el_identificador(app):
+    pocos = NovedadesDialog(["def456 Mejora el visor"])
+    muchos = NovedadesDialog([
+        f"{indice:07x} Cambio numero {indice} con una descripcion larga que "
+        "no cabe en una sola linea del cuadro y tiene que bajar a la siguiente"
+        for indice in range(60)
+    ])
+    try:
+        assert pocos.height() < muchos.height() <= novedades_dialog._ALTO_MAXIMO
+        tabla = muchos.tabla
+        # Todos siguen ahi: lo que no cabe se alcanza desplazando la lista.
+        assert tabla.rowCount() == 60
+        alto_filas = sum(tabla.rowHeight(fila) for fila in range(60))
+        assert alto_filas > muchos.height()
+        # La descripcion larga baja de linea en vez de cortarse.
+        assert tabla.rowHeight(0) > pocos.tabla.rowHeight(0)
+        identificador, descripcion = tabla.item(0, 0), tabla.item(0, 1)
+        assert identificador.font().pointSize() < descripcion.font().pointSize()
+        assert identificador.foreground().color().name() == paleta().TEXT_TERTIARY
+    finally:
+        pocos.close()
+        muchos.close()
 
 
 def test_un_pull_sin_cambios_no_inventa_novedades(repositorio, monkeypatch):

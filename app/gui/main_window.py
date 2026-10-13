@@ -87,6 +87,7 @@ from app.gui.eta import estimate_remaining_seconds, wall_ms_per_page
 from app.gui.export_options import ExportOptionsGroup
 from app.gui.field_selector import ImportantFieldsDialog
 from app.gui.fleet_editor import FLEET_FILENAME, FleetEditorDialog, FleetStore
+from app.gui.novedades_dialog import NovedadesDialog
 from app.gui.memoria import PRINCIPAL, recordar
 from app.gui.responsive import (
     COMPACT,
@@ -841,13 +842,7 @@ class MainWindow(QMainWindow):
         novedades = leer_novedades_instaladas(SCRIPT_DIR)
         if not novedades:
             return
-        aviso = QMessageBox(self)
-        aviso.setWindowTitle("Actualización instalada")
-        aviso.setIcon(QMessageBox.Icon.Information)
-        aviso.setTextFormat(Qt.TextFormat.PlainText)
-        aviso.setText("Se instalaron estos cambios:\n\n" + "\n".join(novedades))
-        aviso.addButton("Aceptar", QMessageBox.ButtonRole.AcceptRole)
-        aviso.exec()
+        NovedadesDialog(novedades, self).exec()
         confirmar_novedades_instaladas(SCRIPT_DIR)
 
     def vigilar_actualizaciones(self) -> None:
