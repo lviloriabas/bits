@@ -196,7 +196,7 @@ def cadena(app, tmp_path, monkeypatch):
     ventana.close()
 
 
-def _todo_terminado(ventana, cliente, trabajos, fallos):
+def _todo_terminado(ventana, cliente, trabajos, fallos, indexa_antes=True):
     assert fallos == []
     # Cada archivo se subió una sola vez.
     assert [e for e in cliente.eventos if e[0] == "subir"] == [
@@ -214,14 +214,14 @@ def _todo_terminado(ventana, cliente, trabajos, fallos):
     assert cliente.completados == ["003B1", "003B2", "003B3"]
     # Ninguna carga salió con otra todavía armándose en AirVault.
     assert all(en_vuelo == [] for en_vuelo in cliente.en_vuelo_al_subir)
-    # El segundo se escribió mientras AirVault armaba el tercero, no al
-    # terminar todas las cargas.
+    # Lo ya subido se indexa antes de mandar la carga siguiente. El reenvío
+    # ordenado a mano no consulta antes de subir, así que escribe el
+    # segundo mientras AirVault arma el tercero.
     eventos = cliente.eventos
-    assert (
-        eventos.index(("subir", f"DP | {NOMBRE} -3"))
-        < eventos.index(("escribir", "003B2"))
-        < eventos.index(("escribir", "003B3"))
-    )
+    tercera = eventos.index(("subir", f"DP | {NOMBRE} -3"))
+    segundo = eventos.index(("escribir", "003B2"))
+    assert (segundo < tercera) if indexa_antes else (tercera < segundo)
+    assert max(segundo, tercera) < eventos.index(("escribir", "003B3"))
     assert ventana.progreso.text() == "100%"
     assert "Proceso terminado: 3 completados." in ventana.resumen.text()
     assert "No queda trabajo automático pendiente" in ventana.bitacora.item(
@@ -255,7 +255,9 @@ def test_revisar_en_airvault_termina_todo_lo_que_falta(cadena, reloj, chequeo_au
 
     ventana.boton_revisar.trigger()
 
-    _todo_terminado(ventana, cliente, trabajos, fallos)
+    # Con el chequeo a mano la revisión va por el camino normal, que indexa
+    # lo ya subido antes de mandar la carga siguiente.
+    _todo_terminado(ventana, cliente, trabajos, fallos, indexa_antes=not chequeo_automatico)
     assert modos[0] == ("recuperar_ausentes" if chequeo_automatico else "comprobar")
     if not chequeo_automatico:
         assert "recuperar_ausentes" not in modos

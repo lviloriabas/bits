@@ -1852,12 +1852,12 @@ def test_subir_confirma_todos_y_carga_solo_la_division_pendiente(
     )
 
     assert subidas == ["DP | BIT -2"]
-    # La carga pendiente sale primero, para que AirVault empiece a armarla,
-    # y los ya confirmados se indexan mientras tanto.
+    # Lo que ya esta en AirVault se indexa primero; despues sale la carga
+    # pendiente.
     assert eventos == [
-        ("subir", "DP | BIT -2"),
         ("encontrado", "DP | BIT"),
         ("encontrado", "DP | BIT REVISAR"),
+        ("subir", "DP | BIT -2"),
         ("encontrado", "DP | BIT -2"),
     ]
     assert trabajos[0].manifiesto.batch_id == "003PRI"
@@ -1912,8 +1912,8 @@ def test_subir_otra_vez_espera_la_carga_en_vuelo_y_sube_las_que_faltan(
     """Pulsar «Subir» con una parte ya subida retoma las que faltan.
 
     La parte subida seguia armandose en AirVault y la subida se rendia al
-    instante sin mandar las demas. Ahora espera a que se confirme, manda la
-    siguiente y la indexa mientras AirVault arma esa otra.
+    instante sin mandar las demas. Ahora espera a que se confirme, la
+    indexa y solo entonces manda la siguiente.
     """
     primera, segunda = _dos_partes(tmp_path)
     cliente = AirVaultSimulado()
@@ -1941,8 +1941,8 @@ def test_subir_otra_vez_espera_la_carga_en_vuelo_y_sube_las_que_faltan(
     assert confirmada_antes == [True]
     assert cliente.eventos == [
         ("subir", "DP | BIT -1"),
-        ("subir", "DP | BIT -2"),
         ("indexar", "DP | BIT -1"),
+        ("subir", "DP | BIT -2"),
         ("indexar", "DP | BIT -2"),
     ]
     assert [t.manifiesto.batch_id for t in (primera, segunda)] == [
@@ -1981,11 +1981,11 @@ def test_la_reanudacion_tambien_espera_la_carga_en_vuelo_de_la_ejecucion(
     )
 
     assert confirmada_antes == [True]
-    # Se indexa mientras AirVault arma la carga nueva, no despues de todo.
+    # Lo ya subido se indexa antes de mandar la carga nueva.
     assert cliente.eventos == [
         ("subir", "DP | BIT -1"),
-        ("subir", "DP | BIT -2"),
         ("indexar", "DP | BIT -1"),
+        ("subir", "DP | BIT -2"),
         ("indexar", "DP | BIT -2"),
     ]
 
@@ -3345,7 +3345,7 @@ def test_la_espera_a_airvault_indexa_lo_confirmado_y_duerme_lo_que_sobre(
     assert cliente.eventos == [
         ("subir", "DP | BIT -1"),
         ("indexar", "DP | OTRO"),
-        ("subir", "DP | BIT -2"),
         ("indexar", "DP | BIT -1"),
+        ("subir", "DP | BIT -2"),
         ("indexar", "DP | BIT -2"),
     ]

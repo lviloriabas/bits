@@ -1889,7 +1889,7 @@ def test_la_bitacora_dice_que_el_proceso_sigue_en_curso(ventana):
     try:
         ventana._actualizar_latido()
         viva = ventana.bitacora.item(ventana.bitacora.count() - 1)
-        assert viva.text().startswith("BITS trabajando")
+        assert viva.text().startswith("Ahora: ")
         # No es algo que haya pasado: ni se elige ni se copia.
         assert not viva.flags() & Qt.ItemFlag.ItemIsSelectable
         assert not viva.icon().isNull()
@@ -1915,7 +1915,7 @@ def test_entre_revisiones_la_bitacora_cuenta_lo_que_falta(ventana):
     ventana._ajustar_vigilancia()
     try:
         viva = ventana.bitacora.item(ventana.bitacora.count() - 1)
-        assert viva.text().startswith("Depende de AirVault: próxima revisión en")
+        assert viva.text().startswith("En espera de AirVault: próxima revisión automática en")
     finally:
         ventana._parar_vigilancia()
     assert ventana.bitacora.count() == 0

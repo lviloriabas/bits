@@ -399,7 +399,7 @@ def test_la_cuenta_del_chequeo_va_por_delante_de_la_revision_periodica(ventana, 
     ventana._parar_reintento_del_chequeo()
     ventana._pintar_linea_viva()
     viva = ventana.bitacora.item(ventana.bitacora.count() - 1).text()
-    assert viva.startswith("Depende de AirVault: próxima revisión en")
+    assert viva.startswith("En espera de AirVault: próxima revisión automática en")
 
 
 def test_gastados_los_intentos_el_chequeo_queda_pendiente_y_se_dice(ventana, tmp_path, monkeypatch):

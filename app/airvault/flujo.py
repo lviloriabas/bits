@@ -20,7 +20,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import (
     Callable, Collection, Dict, List, Mapping, Optional, Sequence, Tuple,
 )
@@ -2576,6 +2576,31 @@ def _prefijo(trabajo: "Trabajo") -> str:
     return "Batch: "
 
 
+def id_recordado(trabajo: "Trabajo") -> str:
+    """El ID que AirVault devolvio alguna vez para este batch.
+
+    El manifiesto lo pierde cuando la carga se da por ausente o se reinicia
+    para reenviarla, pero la confirmacion de Web Search y el registro de la
+    entrega lo conservan. Sirve para nombrar el batch en la cola, no para
+    escribir en el: lo que se indexa sigue saliendo de ``batch_id``.
+    """
+    manifiesto = trabajo.manifiesto
+    if manifiesto.batch_id:
+        return str(manifiesto.batch_id)
+    if getattr(manifiesto, "websearch_batch_id", ""):
+        return str(manifiesto.websearch_batch_id).upper()
+    # Las rutas anotadas son las del equipo que subio el batch: se compara
+    # el final de la carpeta, que es lo que no cambia al mover el portable.
+    cola = tuple(parte.casefold() for parte in Path(trabajo.carpeta).parts[-2:])
+    for anotado in registro_entrega.leer(trabajo.carpeta).batches:
+        if not anotado.batch_id:
+            continue
+        partes = PureWindowsPath(anotado.carpeta).parts[-2:]
+        if tuple(parte.casefold() for parte in partes) == cola:
+            return str(anotado.batch_id)
+    return ""
+
+
 def _entrega_de(trabajo: "Trabajo") -> str:
     """A que entrega pertenece un batch, normalizado para comparar.
 
@@ -3178,6 +3203,21 @@ def subir_partes(
                 0,
             )
 
+    # Lo que ya esta en AirVault va primero: se indexa todo lo confirmado
+    # antes de mandar el primer archivo. Asi el trabajo que solo depende de
+    # este programa no espera detras de cargas que pueden tardar horas, y
+    # ninguna escritura comparte la sesion con un archivo que sube.
+    if por_indexar and por_subir:
+        if avisar is not None:
+            avisar(
+                f"Primero se indexan los batches ya subidos "
+                f"({len(por_indexar)} por revisar); después se suben "
+                f"{len(por_subir)} pendientes",
+                0,
+                0,
+            )
+        indexar_todo()
+
     fallos: List[Tuple["Trabajo", str]] = []
     for trabajo in por_subir:
         cabeza = _prefijo(trabajo)
@@ -3601,6 +3641,19 @@ def _reiniciar_subida_ausente(trabajo: "Trabajo") -> None:
     """Quita la suposicion local de un batch que AirVault no devolvio."""
     manifiesto = trabajo.manifiesto
     manifiesto.websearch_resultado = ""
+    if manifiesto.websearch_confirmado:
+        # La prueba de Web Search hablaba de la carga anterior. Es lo unico
+        # que la borra: mientras no se vuelva a subir, un batch confirmado
+        # no se consulta otra vez. La marca de revision nueva impide que una
+        # copia vieja del manifiesto devuelva la prueba al guardarse.
+        manifiesto.websearch_confirmado = ""
+        manifiesto.websearch_muestra = []
+        manifiesto.websearch_detalle = ""
+        manifiesto.websearch_cotejadas = 0
+        manifiesto.websearch_batch_id = ""
+        manifiesto.websearch_revision = datetime.now().isoformat(
+            timespec="microseconds"
+        )
     manifiesto.batch_id = None
     manifiesto.lotes_previos = []
     manifiesto.intentos_identificacion = 0

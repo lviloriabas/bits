@@ -96,7 +96,7 @@ def test_inicio_revisa_subidos_pendientes_y_deja_nuevos_fuera(ventana, tmp_path)
     assert nuevo not in ventana._pendientes_websearch_automaticos()
 
 
-def test_otra_accion_vuelve_a_revisar_aunque_la_firma_no_cambie(ventana, tmp_path):
+def test_una_orden_vuelve_a_revisar_y_el_reloj_no(ventana, tmp_path):
     anterior = crear_trabajo(tmp_path, "anterior", EstadoEtapa.HECHA)
     preparar(ventana, [anterior])
     ventana._lanzar("comprobar", ventana._estado)
@@ -107,6 +107,15 @@ def test_otra_accion_vuelve_a_revisar_aunque_la_firma_no_cambie(ventana, tmp_pat
     ventana._worker.corriendo = False
     ventana._al_terminar()
 
+    # Lo que arranca solo (el reloj) no olvida lo que ya consulto.
+    firma = dict(ventana._websearch_revisados)
+    ventana._lanzar("comprobar", ventana._estado)
+    assert ventana._websearch_revisados == firma
+    assert not ventana._pendientes_websearch_automaticos()
+    ventana._worker.corriendo = False
+    ventana._al_terminar()
+
+    ventana._cadena_manual = True
     ventana._lanzar("comprobar", ventana._estado)
     assert ventana._websearch_revisados == {}
     ventana._confirmar_solo()

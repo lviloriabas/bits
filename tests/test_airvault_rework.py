@@ -301,8 +301,8 @@ def test_filtros_ocultan_solo_la_vista_y_conservan_la_meta(app, tmp_path):
                         EstadoParte(pendiente, SIN_SUBIR), EstadoParte(cancelado, CANCELADO)]
     antes = ventana._avance_global()
     ventana._pintar_lotes()
-    assert ventana.ocultar_indexados_check.text() == "Ocultar batches indexados"
-    assert ventana.ocultar_completados_check.text() == "Ocultar batches completados"
+    assert ventana.ocultar_indexados_check.text() == "Omitir batches indexados"
+    assert ventana.ocultar_completados_check.text() == "Omitir batches completados"
     assert ventana.lotes.count() == 4
     ventana.ocultar_indexados_check.setChecked(True)
     assert [p.trabajo for p in ventana._partes_en_cola()] == [terminado, pendiente, cancelado]
@@ -358,16 +358,33 @@ def test_revision_empieza_sin_intervalo_y_consulta_todos_aunque_haya_subida(app,
     assert not ventana._confirmador.isActive()
 
 
-def test_busqueda_manual_incluye_todos_los_batches_ocultos(app, tmp_path, monkeypatch):
+def test_busqueda_manual_no_consulta_los_batches_omitidos(app, tmp_path, monkeypatch):
     ventana = AirVaultWindow(tmp_path)
     ventana._trabajos = [trabajo(tmp_path, n) for n in ("a", "b", "c")]
-    ventana._estados = [EstadoParte(t, COMPLETADO) for t in ventana._trabajos]
+    ventana._estados = [EstadoParte(t, COMPLETADO) for t in ventana._trabajos[:2]]
+    ventana._estados.append(EstadoParte(ventana._trabajos[2], SIN_SUBIR))
     ventana.ocultar_completados_check.setChecked(True)
-    assert ventana.lotes.count() == 0
+    assert ventana.lotes.count() == 1
     peticiones = []
     monkeypatch.setattr(ventana, "_iniciar_confirmacion", lambda trabajos, automatico: peticiones.append((trabajos, automatico)))
     ventana._buscar_websearch()
-    assert peticiones[0][0] == ventana._trabajos
+    assert peticiones[0][0] == ventana._trabajos[2:]
+
+
+def test_lo_omitido_no_entra_en_los_procesos_ni_frena_el_final(app, tmp_path):
+    from app.airvault.flujo import INDEXADO
+    ventana = AirVaultWindow(tmp_path)
+    indexado, pendiente = trabajo(tmp_path, "indexado"), trabajo(tmp_path, "pendiente")
+    ventana._trabajos = [indexado, pendiente]
+    ventana._estados = [EstadoParte(indexado, INDEXADO), EstadoParte(pendiente, COMPLETADO)]
+    ventana.completar_check.setChecked(True)
+    assert ventana._por_completar() == [indexado]
+    assert ventana._firma_de_fin() is None
+    ventana.ocultar_indexados_check.setChecked(True)
+    assert ventana._por_completar() == []
+    assert len(ventana._claves_omitidas()) == 1
+    assert not ventana._falta_esperar()
+    assert ventana._firma_de_fin() is not None
 
 
 def test_confirmacion_automatica_no_hace_retroceder_el_progreso_final(app, tmp_path, monkeypatch):

@@ -115,17 +115,31 @@ def test_no_revoca_un_batch_que_se_completa_durante_el_chequeo(app, tmp_path):
     assert cargar(t.carpeta).etapa_hecha("completar")
 
 
-def test_manual_incluye_confirmados_completados_y_ocultos(app, tmp_path, monkeypatch):
+def test_un_batch_confirmado_no_se_vuelve_a_consultar(app, tmp_path, monkeypatch):
     t, buscador, _, _ = caso(tmp_path, 50)
     comprobar(t, buscador, app)
     monkeypatch.setattr("app.gui.airvault_window.TrabajoAirVaultWorker", WorkerFalso)
     ventana = AirVaultWindow(tmp_path)
     ventana._trabajos = [t]
     ventana._estados = [estado_local(t)]
-    ventana.ocultar_completados_check.setChecked(True)
     ventana._buscar_websearch()
-    assert ventana._worker_websearch.estado["buscar_trabajos"] == [t]
-    assert ventana._worker_websearch.estado["revisar_todos"]
+    assert ventana._worker_websearch is None
+    assert "ya están confirmados" in ventana.resumen.text()
+    ventana._iniciar_confirmacion([t], automatico=False)
+    assert ventana._worker_websearch is None
+    assert not ventana._subidos_por_confirmar_websearch()
+
+
+def test_solo_volver_a_subir_borra_la_confirmacion(app, tmp_path):
+    from app.airvault.flujo import reiniciar_subida, websearch_confirmacion_valida
+    t, buscador, _, _ = caso(tmp_path, 50)
+    comprobar(t, buscador, app)
+    assert websearch_confirmacion_valida(cargar(t.carpeta))
+    reiniciar_subida(t)
+    final = cargar(t.carpeta)
+    assert not final.websearch_confirmado
+    assert not websearch_confirmacion_valida(final)
+    assert not final.etapa_hecha("completar")
 
 
 def test_la_resubida_espera_a_que_termine_el_worker(app, tmp_path, monkeypatch):

@@ -177,7 +177,7 @@ def test_la_casilla_oculta_los_confirmados_y_deja_lo_que_falta(app, tmp_path):
     ventana._pintar_lotes()
 
     casilla = ventana.ocultar_confirmados_check
-    assert casilla.text() == "Ocultar batches confirmados"
+    assert casilla.text() == "Omitir batches confirmados"
     assert not casilla.isChecked()
     assert ventana.lotes.count() == 3
     casilla.setChecked(True)
@@ -188,9 +188,13 @@ def test_la_casilla_oculta_los_confirmados_y_deja_lo_que_falta(app, tmp_path):
     ventana.ocultar_completados_check.setChecked(True)
     assert [p.trabajo for p in ventana._partes_en_cola()] == [pendiente]
     ventana.ocultar_completados_check.setChecked(False)
-    # Solo cambia la vista: el chequeo sigue revisando todos.
+    # Lo omitido no entra en ningun proceso, tampoco en la revision completa.
     casilla.setChecked(True)
+    assert ventana._por_confirmar_websearch(incluir_confirmados=True) == [sin_prueba, pendiente]
+    casilla.setChecked(False)
     assert ventana._por_confirmar_websearch(incluir_confirmados=True) == ventana._trabajos
+    # La muestra no vuelve a preguntar por el que ya tiene su prueba.
+    assert confirmado not in ventana._por_confirmar_websearch(incluir_sin_muestra=True)
 
 
 def test_la_casilla_va_con_las_demas_y_se_recuerda(app, tmp_path):
@@ -202,7 +206,7 @@ def test_la_casilla_va_con_las_demas_y_se_recuerda(app, tmp_path):
         ventana.ocultar_indexados_check, ventana.ocultar_completados_check)
     assert casilla.height() == ventana.ocultar_completados_check.height()
     assert casilla.toolTip()
-    espejo = _acciones(ventana.batch_actions_button.menu())["Ocultar batches confirmados"]
+    espejo = _acciones(ventana.batch_actions_button.menu())["Omitir batches confirmados"]
     espejo.setChecked(True)
     assert casilla.isChecked()
     ventana._habilitar(False)

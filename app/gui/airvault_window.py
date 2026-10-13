@@ -27,6 +27,7 @@ El trabajo va en tres tiempos, separados porque duran cosas muy distintas:
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -52,7 +53,8 @@ from app.airvault.config import (AIRVAULT_FILENAME, AirVaultConfig,
 from app.airvault.session import SesionCancelada
 from app.gui.airvault_busqueda import buscar_en_la_cola, frase_de
 from app.gui.airvault_bitacora import RegistroAirVaultDelegate
-from app.gui.batches_sidebar import BatchesSidebar, agregar_filtros_al_menu
+from app.gui.batches_sidebar import (ROL_ID_ANTERIOR, BatchesSidebar,
+                                     agregar_filtros_al_menu)
 from app.gui.automatizacion import (COMPLETAR, MenuAutomatizacion,
                                     OpcionesAutomatizacion)
 from app.gui.csv_utils import (TEXTO_ELEGIR_EJECUCION, find_csv_files,
@@ -325,6 +327,24 @@ LIMITE_BITACORA = 300
 # que gira; más lento se lee como tirones y no como algo que trabaja.
 MS_LATIDO = 100
 
+# Lo que dice la línea viva de cada trabajo hasta que el hilo avisa de su
+# primer paso. Nunca un «trabajando» a secas: se dice qué se está haciendo.
+PASO_INICIAL = {
+    "subir": "Preparando la entrega antes de conectar con AirVault",
+    "subir_pendientes": "Conectando con AirVault para subir los batches pendientes",
+    "resubir": "Conectando con AirVault para volver a subir los batches elegidos",
+    "recuperar_ausentes": "Comprobando los batches que Web Search no encontró",
+    "comprobar": "Revisando en AirVault el estado de los batches",
+    "indexar": "Escribiendo en AirVault los batches listos",
+    "completar": "Completando en AirVault los batches indexados",
+}
+
+# Horas de revisión automática sin que cambie el estado de ningún batch
+# antes de dejar de preguntar. AirVault publica una carga en una hora como
+# mucho (ver `espera_para_darla_por_perdida`); pasado el doble, seguir
+# consultando ya no espera nada y solo golpea el servidor.
+HORAS_SIN_CAMBIOS_ANTES_DE_PARAR = 2
+
 # Cuánto del camino de un batch deja hecho cada estado, para la barra de
 # avance de toda la cola. Subir y escribir son lo que tarda, y por eso se
 # llevan casi todo el recorrido; la espera a que AirVault lo publique y el
@@ -402,6 +422,16 @@ AIRVAULT_TOOLTIP = (
     "Escribe en AirVault los datos que la ejecución ya leyó, sin teclear "
     "página por página en el Web Index."
 )
+
+
+def _clave_estable(carpeta: Path | str) -> str:
+    """La carpeta de un batch escrita siempre igual, sin tocar el disco.
+
+    Un mismo batch llega a la ventana por dos caminos (la cola entera y la
+    ejecución elegida) y cada uno escribe la ruta a su manera. El número del
+    batch y su ID recordado no pueden depender de eso.
+    """
+    return os.path.normcase(os.path.abspath(str(carpeta)))
 
 
 def _minutos(segundos: float) -> str:
@@ -1418,15 +1448,47 @@ class TrabajoAirVaultWorker(QThread):
         esperando hasta agotar sus intentos, y el batch quedaba sin escribir.
         Ahora nada se indexa mientras un archivo sube: solo en la espera.
         """
-        from app.airvault.flujo import (BUSCANDO, SOLO_REVISAR, estado_local,
-                                        subir_partes)
+        from app.airvault.flujo import (BUSCANDO, INDEXADO, SOLO_REVISAR,
+                                        cerrar_partes, completar_partes,
+                                        estado_local, subir_partes)
+        from app.airvault.indexer import Resultado
 
         estado = self.estado
         raiz = Path(estado["raiz"])
+        # La cola entera sigue viajando como contexto de la entrega, pero a
+        # lo omitido no se le hace nada: ni se sube ni se revisa.
+        omitidos = set(estado.get("omitidos") or ())
+        por_subir = [t for t in por_subir if _clave_estable(t.carpeta) not in omitidos]
         trabajos = list(estado.get("trabajos") or por_subir)
         self._notificar_subidas(trabajos)
         en_cola: set[str] = set()
         fallos_indexado: list[tuple[str, str]] = []
+
+        def completar_sin_cortar(trabajo) -> None:
+            """Cierra un batch ya indexado antes de seguir con las cargas."""
+            try:
+                try:
+                    cierres = completar_partes(
+                        [trabajo], cliente, avisar=self._avisar, automatico=True
+                    )
+                finally:
+                    cerrar_partes([trabajo], cliente)
+            except (TrabajoCancelado, SesionCancelada):
+                raise
+            except Exception as exc:  # noqa: BLE001 - se informa y siguen
+                logger.opt(exception=exc).error(
+                    "No se pudo completar el batch {}: {}",
+                    trabajo.manifiesto.batch_id, exc,
+                )
+                fallos_indexado.append((trabajo.manifiesto.nombre_batch, str(exc)))
+                return
+            total = len(trabajo.manifiesto.bitacoras())
+            self.batch_indexado.emit({
+                "trabajo": trabajo, "resultado": Resultado(), "validas": total,
+                "total": total, "lotes": 1, "cierres": cierres,
+                "incompleto": False, "carpetas": [str(trabajo.carpeta)],
+                "amarillas": {},
+            })
 
         def indexar_sin_cortar(trabajo) -> None:
             """Un batch que no se deja indexar no frena a los siguientes."""
@@ -1471,11 +1533,19 @@ class TrabajoAirVaultWorker(QThread):
                 "trabajos": list(trabajos), "estado": remoto,
             })
             clave = str(trabajo.carpeta)
+            if not estado.get("indexar_al_encontrar") or clave in en_cola:
+                return
             if (
-                not estado.get("indexar_al_encontrar")
-                or not remoto.se_puede_indexar
-                or clave in en_cola
+                remoto.estado == INDEXADO and estado.get("completar")
+                and not trabajo.manifiesto.solo_subir
+                and clave not in (estado.get("no_completar") or ())
             ):
+                # Indexado y sin cerrar: se completa ahora, antes de las
+                # cargas, igual que se indexa primero lo ya subido.
+                en_cola.add(clave)
+                completar_sin_cortar(trabajo)
+                return
+            if not remoto.se_puede_indexar:
                 return
             en_cola.add(clave)
             indexar_sin_cortar(trabajo)
@@ -1494,6 +1564,7 @@ class TrabajoAirVaultWorker(QThread):
             ya_confirmados = [
                 trabajo for trabajo in trabajos
                 if str(trabajo.carpeta) not in enviados
+                and _clave_estable(trabajo.carpeta) not in omitidos
                 and trabajo.manifiesto.batch_id
                 and estado_local(trabajo).estado in (BUSCANDO, SOLO_REVISAR)
             ]
@@ -1595,6 +1666,11 @@ class TrabajoAirVaultWorker(QThread):
             if seleccionados is not None
             else estado["trabajos"]
         )
+        if seleccionados is None:
+            # Lo omitido no se revisa. Una orden sobre filas concretas sí:
+            # esas filas estaban a la vista cuando se pidió.
+            omitidos = set(estado.get("omitidos") or ())
+            trabajos = [t for t in trabajos if _clave_estable(t.carpeta) not in omitidos]
         estados = comprobar_partes(trabajos, cliente, avisar=self._avisar)
         from app.airvault.flujo import DESCUADRADO
         from app.airvault.mezclas import recuperar_mezclas
@@ -2036,6 +2112,9 @@ class AirVaultWindow(QDialog):
         self._reloj: Optional[QTimer] = None
         self._inicio_paso = time.monotonic()
         self._ultimo_paso = ""
+        # El paso en curso tal como se lee, con el batch por su número y su
+        # nombre. Es lo que dice la línea viva.
+        self._paso_visible = ""
         # La cuenta del paso en curso («30 de 120»), para la línea viva.
         self._cuenta_paso = (0, 0)
         # Lo que lleva el paso en curso de cada batch que está subiendo o
@@ -2156,6 +2235,23 @@ class AirVaultWindow(QDialog):
         self._bitacora_buscada = ""
         self._hallazgos: list = []
         self._posicion_hallazgo = -1
+        # El número con el que se nombra cada batch y el último ID que
+        # AirVault le dio, por carpeta. Ver `_numerar` e `_id_de`.
+        self._numeros: dict[str, int] = {}
+        self._ids_recordados: dict[str, str] = {}
+        # Lo que la lista de pasos dijo de cada batch la última vez, para
+        # anotar después solo lo que cambió. Ver `_anotar_plan`.
+        self._plan_anotado: dict[str, str] = {}
+        # La cola tal como estaba la última vez que cambió algo y cuándo
+        # fue, para parar la revisión automática que ya no sirve. Ver
+        # `_vigilancia_sin_cambios`.
+        self._firma_vigilada: Optional[tuple] = None
+        self._ultimo_cambio_cola = time.monotonic()
+        self._vigilancia_agotada = False
+        # Batches que ya pasaron por la recuperación de ausentes desde la
+        # última orden. Una ausencia se intenta recuperar una vez: repetirlo
+        # con una carga que AirVault todavía arma es como se duplica.
+        self._websearch_recuperados: set[str] = set()
 
         self.setWindowTitle("Indexar en AirVault")
         # Con botón de minimizar: escribir una ejecución entera tarda, y
@@ -2270,14 +2366,23 @@ class AirVaultWindow(QDialog):
         # ya filtrada.
         recordar(AIRVAULT, "solo_ejecucion", self.solo_ejecucion_check)
         filtros.addWidget(self.solo_ejecucion_check)
-        self.ocultar_indexados_check = QCheckBox("Ocultar batches indexados")
-        self.ocultar_indexados_check.setToolTip("Oculta los batches con el indexado terminado y el batch aún abierto.")
-        self.ocultar_completados_check = QCheckBox("Ocultar batches completados")
-        self.ocultar_completados_check.setToolTip("Oculta los batches completados, también los confirmados en Web Search.")
-        self.ocultar_confirmados_check = QCheckBox("Ocultar batches confirmados")
+        # «Omitir» y no «Ocultar»: lo que sale de la lista sale también de
+        # todos los procesos. No se sube, no se revisa, no se completa y no
+        # se consulta en Web Search mientras la casilla siga marcada.
+        self.ocultar_indexados_check = QCheckBox("Omitir batches indexados")
+        self.ocultar_indexados_check.setToolTip(
+            "Saca de la cola los batches con el indexado terminado y el batch aún abierto. "
+            "Mientras esté marcada no se revisan, no se completan ni se consultan en Web Search."
+        )
+        self.ocultar_completados_check = QCheckBox("Omitir batches completados")
+        self.ocultar_completados_check.setToolTip(
+            "Saca de la cola los batches completados, también los confirmados en Web Search. "
+            "Mientras esté marcada no entran en ningún proceso."
+        )
+        self.ocultar_confirmados_check = QCheckBox("Omitir batches confirmados")
         self.ocultar_confirmados_check.setToolTip(
-            "Oculta los batches cuya subida ya se confirmó en Web Search. "
-            "Quedan a la vista los que falta verificar o volver a subir."
+            "Saca de la cola los batches cuya subida ya se confirmó en Web Search. "
+            "Quedan los que falta verificar o volver a subir; los omitidos no entran en ningún proceso."
         )
         for clave, control in (("ocultar_indexados", self.ocultar_indexados_check),
                                ("ocultar_completados", self.ocultar_completados_check),
@@ -2688,7 +2793,8 @@ class AirVaultWindow(QDialog):
             "Busca el 5 % de las bitácoras, con un mínimo de 7 si el batch tiene suficientes, "
             "repartidas entre el inicio y el final de cada batch. "
             "Consulta números de bitácora en Web Search de hasta 10 batches a la vez, incluso durante "
-            "la subida o el indexado. Revisa todos, incluidos los completados. "
+            "la subida o el indexado. Los batches ya confirmados conservan su prueba y no se vuelven "
+            "a consultar; los omitidos tampoco. "
             "Los que no se pudieron leer se consultan de nuevo. "
             "Al terminar el chequeo se reenvían los no encontrados."
         )
@@ -2845,15 +2951,32 @@ class AirVaultWindow(QDialog):
         self._verificar_en_websearch(todas=True)
 
     def _verificar_en_websearch(self, todas: bool) -> None:
-        trabajos = self._por_confirmar_websearch(incluir_confirmados=True)
+        # La muestra no vuelve a preguntar por lo ya confirmado; la revisión
+        # completa sí, que para eso se pide: mira todas sus bitácoras.
+        trabajos = self._por_confirmar_websearch(
+            incluir_sin_muestra=True, incluir_confirmados=todas,
+        )
         if not trabajos:
-            self.resumen.setText("No hay batches pendientes con números de bitácora válidos para consultar en Web Search.")
+            texto = (
+                "Web Search: todos los batches de la cola ya están confirmados. "
+                "No se vuelven a consultar."
+                if self._trabajos else
+                "No hay batches pendientes con números de bitácora válidos para consultar en Web Search."
+            )
+            self.resumen.setText(texto)
+            self._anotar(texto)
+            if self._revision_airvault_pendiente:
+                # «Revisar en AirVault» sigue aunque no quede nada que
+                # buscar en Web Search: falta mirar la cola de Web Index.
+                self._revision_airvault_pendiente = False
+                self._continuar_pendiente()
             return
         self._chequeo_incompleto = False
         # Una orden nueva revisa todo otra vez: lo que esperaba su turno
         # entra en esta pasada y la cuenta de intentos empieza de cero.
         self._parar_reintento_del_chequeo()
         self._intentos_de_chequeo = 0
+        self._websearch_recuperados.clear()
         if todas:
             self._iniciar_confirmacion(trabajos, automatico=False, todas=True)
             return
@@ -2874,6 +2997,18 @@ class AirVaultWindow(QDialog):
         de la muestra.
         """
         trabajos = list(trabajos)
+        if not todas:
+            from app.airvault.flujo import websearch_confirmacion_valida
+            # Última puerta, también para la orden dada sobre filas
+            # concretas: lo confirmado tiene su prueba guardada y la muestra
+            # no lo consulta otra vez. Solo volver a subirlo borra la prueba.
+            confirmados = [t for t in trabajos if websearch_confirmacion_valida(t.manifiesto)]
+            trabajos = [t for t in trabajos if not websearch_confirmacion_valida(t.manifiesto)]
+            if confirmados and not automatico:
+                self._anotar(
+                    "Web Search: ya confirmados, no se vuelven a consultar:",
+                    [self._rotulo(t) for t in confirmados],
+                )
         if not trabajos or self._deteniendo or (automatico and (self._pausado or self._cancelacion_solicitada)):
             return
         if todas:
@@ -3051,6 +3186,7 @@ class AirVaultWindow(QDialog):
         self._cerrar_filas_websearch()
         self.boton_cancelar.setEnabled(self.hilo() is not None)
         self._actualizar_latido()
+        self._anotar_plan()
         self._publicar_avance()
         self._actualizar_botones_proceso()
         if self._pausado or self._cancelacion_solicitada:
@@ -3096,7 +3232,14 @@ class AirVaultWindow(QDialog):
             # que venía detrás espera al nuevo intento.
             self._ajustar_confirmacion()
         else:
-            ausentes = list(self._websearch_resubidas.values())
+            # Una ausencia se intenta recuperar una sola vez por orden. Si
+            # tras recuperarla Web Search sigue sin verla es que AirVault
+            # todavía la arma, y volver a mandarla es como se duplica.
+            ausentes = [
+                trabajo for trabajo in self._websearch_resubidas.values()
+                if str(trabajo.carpeta) not in self._websearch_recuperados
+            ]
+            self._websearch_recuperados.update(str(t.carpeta) for t in ausentes)
             self._websearch_resubidas.clear()
             if (ausentes or self._revision_airvault_pendiente) and not self._websearch_proceso_activo:
                 self._websearch_inicio = set(self._websearch_revisados)
@@ -3526,9 +3669,16 @@ class AirVaultWindow(QDialog):
             menu, "Revisar en AirVault", partes,
             lambda: self._comprobar_estas(partes),
         )
+        # Lo ya confirmado guarda su prueba y no se vuelve a consultar: la
+        # acción solo se ofrece para lo que falta.
+        from app.airvault.flujo import websearch_confirmacion_valida
+        por_verificar = [
+            parte for parte in partes
+            if not websearch_confirmacion_valida(parte.trabajo.manifiesto)
+        ]
         self._accion(
-            menu, "Verificar subidas en Web Search", partes,
-            lambda: self._iniciar_confirmacion([p.trabajo for p in partes], automatico=False),
+            menu, "Verificar subidas en Web Search", por_verificar,
+            lambda: self._verificar_estas(por_verificar),
         )
         self._accion(
             menu, "Verificar todas las bitácoras en Web Search", partes,
@@ -3843,6 +3993,13 @@ class AirVaultWindow(QDialog):
                 f"Se vuelve a subir {nombres}"
             ),
         )
+
+    def _verificar_estas(self, partes) -> None:
+        """Busca en Web Search los batches elegidos, por orden expresa."""
+        for parte in partes:
+            # La orden devuelve su intento a lo que ya se intentó recuperar.
+            self._websearch_recuperados.discard(str(parte.trabajo.carpeta))
+        self._iniciar_confirmacion([p.trabajo for p in partes], automatico=False)
 
     def _comprobar_estas(self, partes) -> None:
         """Revisa una seleccion de la tabla como una accion de una sola vez."""
@@ -4405,9 +4562,9 @@ class AirVaultWindow(QDialog):
         self.boton_subir.setObjectName("primaryButton")
         self.boton_subir.setEnabled(False)
         self.boton_subir.setToolTip(
-            "Busca en AirVault los batches de la entrega y sube solo los que "
-            "falten. Si uno se queda atascado, al pulsarlo de nuevo se "
-            "reenvía."
+            "Revisa en AirVault los batches de la cola. Primero indexa y "
+            "completa los que ya están subidos; después sube los que falten, "
+            "de uno en uno. Los batches omitidos no entran."
         )
         self.boton_subir.setFixedWidth(max(
             160, self.boton_subir.fontMetrics().horizontalAdvance("Continuar proceso") + SPACE_L * 2,
@@ -4480,6 +4637,12 @@ class AirVaultWindow(QDialog):
         self._pausado = False
         self._cancelacion_solicitada = False
         self._proceso_iniciado = True
+        # Lo primero que se lee es qué se le va a hacer a cada batch.
+        self._anotar_plan(completo=True)
+        self._anotar(
+            "Orden del proceso: primero se indexan y completan los batches "
+            "ya subidos; después se suben los pendientes, de uno en uno."
+        )
         if continuar:
             self._anotar("Continuando el proceso desde lo guardado")
             lecturas = self._continuacion_lector
@@ -4911,6 +5074,7 @@ class AirVaultWindow(QDialog):
             return
         self.avance_automatico.emit(SUBIR, EN_CURSO)
         self._anotar("Subida pedida por el proceso automático")
+        self._anotar_plan(completo=True)
         self._subir()
 
     def _cargar_trabajos(self, carpeta: Path, csv: Path) -> None:
@@ -5390,24 +5554,212 @@ class AirVaultWindow(QDialog):
         }
 
     def _partes_en_cola(self) -> list:
+        """La cola tal como se enseña: lo que entra en los procesos, por número."""
+        self._numerar()
+        return sorted(
+            self._partes_del_alcance(),
+            key=lambda parte: self._numeros.get(_clave_estable(parte.trabajo.carpeta), 0),
+        )
+
+    def _omitida(self, parte) -> bool:
+        """Si las casillas «Omitir» dejan este batch fuera de todo proceso."""
         from app.airvault.flujo import (AUTOCOMPLETADO, COMPLETADO, INDEXADO, PUBLICADO,
                                         websearch_confirmacion_valida)
-        partes = self._partes_del_alcance()
-        if self.ocultar_indexados_check.isChecked():
-            partes = [p for p in partes if p.estado != INDEXADO]
-        if self.ocultar_completados_check.isChecked():
-            partes = [p for p in partes if p.estado not in (COMPLETADO, AUTOCOMPLETADO, PUBLICADO)]
-        if self.ocultar_confirmados_check.isChecked():
+        if not hasattr(self, "ocultar_confirmados_check"):
+            return False
+        return bool(
+            (self.ocultar_indexados_check.isChecked() and parte.estado == INDEXADO)
+            or (self.ocultar_completados_check.isChecked()
+                and parte.estado in (COMPLETADO, AUTOCOMPLETADO, PUBLICADO))
             # Por la prueba y no por el estado: un batch marcado como
             # completado sin estar en Web Search es justo el que hay que ver.
-            partes = [p for p in partes if not websearch_confirmacion_valida(p.trabajo.manifiesto)]
-        return partes
+            or (self.ocultar_confirmados_check.isChecked()
+                and websearch_confirmacion_valida(parte.trabajo.manifiesto))
+        )
 
-    def _partes_del_alcance(self) -> list:
+    def _claves_omitidas(self) -> set[str]:
+        return {_clave_estable(p.trabajo.carpeta) for p in self._estados if self._omitida(p)}
+
+    def _partes_de_la_ejecucion(self) -> list:
+        """Los batches de las ejecuciones elegidas, también los omitidos.
+
+        Sirve para lo que se mira y no se toca: las partes ya indexadas son
+        la prueba de que AirVault pasó de largo por una carga, se omitan o no.
+        """
         visibles = {id(t) for t in self._filtrar_trabajos(
             parte.trabajo for parte in self._estados
         )}
         return [parte for parte in self._estados if id(parte.trabajo) in visibles]
+
+    def _partes_del_alcance(self) -> list:
+        """Los batches sobre los que se trabaja: la ejecución sin lo omitido."""
+        return [p for p in self._partes_de_la_ejecucion() if not self._omitida(p)]
+
+    def _numerar(self) -> None:
+        """Da a cada batch un número que no cambia mientras la ventana viva.
+
+        Es con lo que se nombra en la cola y en el registro. No sale de la
+        fila, que cambia con los filtros: sale del orden en que el batch
+        llegó a la cola, y uno nuevo recibe el siguiente.
+        """
+        nuevos = [
+            parte for parte in self._estados
+            if _clave_estable(parte.trabajo.carpeta) not in self._numeros
+        ]
+        # Por fecha de creación, así la numeración sigue el orden en que se
+        # prepararon las entregas y no el alfabético de sus carpetas.
+        for parte in sorted(nuevos, key=lambda p: str(getattr(p.trabajo.manifiesto, "creado", "") or "")):
+            self._numeros.setdefault(
+                _clave_estable(parte.trabajo.carpeta), len(self._numeros) + 1
+            )
+
+    def _numero_de(self, trabajo) -> int:
+        self._numerar()
+        return self._numeros.get(_clave_estable(trabajo.carpeta), 0)
+
+    def _id_de(self, parte) -> tuple[str, str]:
+        """El ID vigente del batch y, si se perdió, el último que tuvo."""
+        from app.airvault.flujo import id_recordado
+        clave = _clave_estable(parte.trabajo.carpeta)
+        if parte.batch_id:
+            self._ids_recordados[clave] = parte.batch_id
+            return parte.batch_id, ""
+        if clave not in self._ids_recordados:
+            try:
+                self._ids_recordados[clave] = id_recordado(parte.trabajo)
+            except Exception:  # noqa: BLE001 - es un rótulo, no puede cortar la cola
+                self._ids_recordados[clave] = ""
+        return "", self._ids_recordados[clave]
+
+    def _rotulo(self, trabajo) -> str:
+        """«Batch 12 «nombre»»: como se nombra un batch en el registro."""
+        numero = self._numero_de(trabajo)
+        nombre = trabajo.manifiesto.nombre_batch or "(sin nombre)"
+        return f"Batch {numero} «{nombre}»" if numero else f"Batch «{nombre}»"
+
+    def _pasos_de(self, parte) -> tuple[list[str], list[str], list[str]]:
+        """Los pasos de un batch: hechos, en proceso y pendientes, en su orden.
+
+        Sale del estado del batch y de lo que el hilo tiene entre manos, así
+        que dice lo mismo que la cola. Un paso que el programa no va a dar
+        (completar un REVISAR, completar con la casilla apagada) no se
+        promete: o no aparece, o se dice quién lo hace.
+        """
+        from app.airvault.flujo import (AUTOCOMPLETADO, BUSCANDO, CANCELADO,
+                                        COMPLETADO, DESCUADRADO, INCOMPLETO,
+                                        INDEXADO, LISTO, NO_ENCONTRADO,
+                                        POSIBLE_DUPLICADO, PROCESANDO, PUBLICADO,
+                                        SOLO_REVISAR, TOMADO,
+                                        websearch_confirmacion_valida)
+
+        manifiesto = parte.trabajo.manifiesto
+        clave = str(parte.trabajo.carpeta)
+        estado = parte.estado
+        if estado == CANCELADO:
+            return [], [], ["reanudar en la cola (está cancelado y no se procesa)"]
+        cerrado = estado in (COMPLETADO, AUTOCOMPLETADO, PUBLICADO)
+        indexado = cerrado or estado == INDEXADO
+        detectado = indexado or bool(parte.batch_id) or estado in (
+            LISTO, SOLO_REVISAR, INCOMPLETO, TOMADO, DESCUADRADO, PROCESANDO,
+        )
+        subido = detectado or estado == BUSCANDO
+        hechos: list[str] = []
+        en_proceso: list[str] = []
+        pendientes: list[str] = []
+
+        def paso(nombre: str, hecho: bool, activo: bool = False) -> None:
+            (hechos if hecho else en_proceso if activo else pendientes).append(nombre)
+
+        if estado == POSIBLE_DUPLICADO:
+            pendientes.append("decidir si es un duplicado antes de subir")
+        elif estado == NO_ENCONTRADO:
+            pendientes.append("volver a subir (AirVault no publicó la carga)")
+        else:
+            paso("subir", subido, self._en_vuelo.get(clave, ("", 0.0))[0] == "subir")
+        paso("detectar en AirVault", detectado,
+             subido and (self.hilo() is not None or self._vigilando()))
+        if estado == DESCUADRADO:
+            pendientes.append("revisar a mano: las páginas no coinciden")
+            return hechos, en_proceso, pendientes
+        if estado == TOMADO:
+            pendientes.append("esperar a que lo cierren en AirVault")
+        paso(
+            "indexar" if indexado
+            else "terminar el indexado (quedan páginas en amarillo)" if estado == INCOMPLETO
+            else "indexar los datos disponibles" if manifiesto.solo_subir
+            else "indexar",
+            indexado, clave in self._indexando,
+        )
+        if manifiesto.solo_subir and not cerrado:
+            pendientes.append("revisión manual en AirVault (no la hace el programa)")
+        elif cerrado or (hasattr(self, "completar_check")
+                         and self.completar_check.isChecked()):
+            if not manifiesto.solo_subir:
+                paso("completar", cerrado)
+            lector = self.lectura_websearch()
+            consultando = lector is not None and any(
+                str(t.carpeta) == clave for t in lector.estado.get("buscar_trabajos", [])
+            )
+            paso("confirmar en Web Search",
+                 websearch_confirmacion_valida(manifiesto), consultando)
+        return hechos, en_proceso, pendientes
+
+    def _resumen_de_pasos(self, parte) -> str:
+        """Los pasos del batch en una línea, con lo que corre primero."""
+        hechos, en_proceso, pendientes = self._pasos_de(parte)
+        if not en_proceso and not pendientes:
+            return "Terminado: " + ", ".join(hechos) + "."
+        trozos = []
+        if en_proceso:
+            trozos.append("En proceso: " + ", ".join(en_proceso) + ".")
+        if pendientes:
+            trozos.append("Pendiente: " + ", ".join(pendientes) + ".")
+        if hechos:
+            trozos.append("Hecho: " + ", ".join(hechos) + ".")
+        return " ".join(trozos)
+
+    def _anotar_plan(self, completo: bool = False) -> None:
+        """Anota en el registro los pasos de cada batch de la cola.
+
+        Al empezar va entera: un batch por línea, con su número, su ID y lo
+        que tiene en proceso, pendiente y hecho. Después solo se anotan los
+        batches que cambiaron, para que la lista no tape lo que va pasando.
+        """
+        partes = self._partes_en_cola()
+        lineas: list[str] = []
+        terminados: list[str] = []
+        actual: dict[str, str] = {}
+        for parte in partes:
+            clave = str(parte.trabajo.carpeta)
+            resumen = self._resumen_de_pasos(parte)
+            actual[clave] = resumen
+            numero = self._numero_de(parte.trabajo)
+            if completo and resumen.startswith("Terminado"):
+                terminados.append(str(numero))
+                continue
+            if completo or self._plan_anotado.get(clave, resumen) != resumen:
+                vigente, anterior = self._id_de(parte)
+                ident = (f" (ID {vigente})" if vigente
+                         else f" (último ID {anterior})" if anterior else "")
+                lineas.append(
+                    f"{numero}. {parte.nombre or '(sin nombre)'}{ident} - {resumen}"
+                )
+        self._plan_anotado = actual
+        if not completo:
+            if lineas:
+                self._anotar("Cambios en los pasos de la cola:", lineas)
+            return
+        omitidos = sum(self._omitida(p) for p in self._partes_de_la_ejecucion())
+        cabecera = (
+            f"Pasos por batch: {len(partes)} en la cola, "
+            f"{len(partes) - len(terminados)} con pasos por hacer y "
+            f"{len(terminados)} terminados"
+        )
+        if omitidos:
+            cabecera += f"; {omitidos} omitidos que no entran en ningún proceso"
+        if terminados:
+            lineas.append("Terminados: batches " + ", ".join(terminados) + ".")
+        self._anotar(cabecera + ".", lineas)
 
     def _al_filtrar_vista(self, _marcado: bool) -> None:
         self.lotes.clearSelection()
@@ -5457,8 +5809,13 @@ class AirVaultWindow(QDialog):
             papel = papel_de_estado(
                 parte.estado, indexando, revisar=parte.trabajo.manifiesto.solo_subir,
             )
+            id_anterior = self._id_de(parte)[1]
             for columna, texto in enumerate(celdas):
                 item = QTableWidgetItem(texto)
+                if columna == 0 and id_anterior:
+                    # El ID que tuvo: se enseña para poder buscarlo en
+                    # AirVault, sin darlo por vigente.
+                    item.setData(ROL_ID_ANTERIOR, id_anterior)
                 if columna == 1:
                     item.setToolTip(nombre)
                 if columna == 2:
@@ -5486,6 +5843,10 @@ class AirVaultWindow(QDialog):
                 tabla.setItem(fila, columna, item)
             tarjeta = tabla.item(fila)
             clave = str(parte.trabajo.carpeta)
+            tabla.numerar(fila, self._numero_de(parte.trabajo))
+            # Qué tiene hecho y qué le falta, al posar el puntero: lo mismo
+            # que dice la lista de pasos del registro.
+            tarjeta.setToolTip(tarjeta.toolTip().rstrip() + "\n" + self._resumen_de_pasos(parte))
             tarjeta.setData(Qt.ItemDataRole.UserRole, clave)
             tarjeta.setSelected(clave in seleccionadas)
             if clave == actual:
@@ -5614,6 +5975,7 @@ class AirVaultWindow(QDialog):
         return [
             parte.trabajo for parte in partes
             if parte.estado == INDEXADO and not parte.trabajo.manifiesto.solo_subir
+            and not self._omitida(parte)
             and (not automatico or (
                 self._cierres_fallidos.get(str(parte.trabajo.carpeta), (0, 0))[0] < 3
                 and ahora - self._cierres_fallidos.get(str(parte.trabajo.carpeta), (0, 0))[1]
@@ -5640,7 +6002,7 @@ class AirVaultWindow(QDialog):
         siguientes, ya indexadas, las que demuestran que AirVault pasó de
         largo. Ninguna regla puede decidirlo mirando una sola fila.
         """
-        return [parte.trabajo for parte in self._partes_del_alcance()]
+        return [parte.trabajo for parte in self._partes_de_la_ejecucion()]
 
     def _falta_esperar(self) -> bool:
         """Si queda algún batch que AirVault todavía no ha terminado.
@@ -5676,6 +6038,7 @@ class AirVaultWindow(QDialog):
              or (parte.estado == INDEXADO and self.completar_check.isChecked()
                  and not parte.trabajo.manifiesto.solo_subir))
             and parte.estado != POSIBLE_DUPLICADO
+            and not self._omitida(parte)
             and not (parte.estado == INDEXADO
                      and self._cierres_fallidos.get(str(parte.trabajo.carpeta), (0, 0))[0] >= 3)
             and (
@@ -5832,6 +6195,9 @@ class AirVaultWindow(QDialog):
         if not self.auto_check.isChecked() or not self._falta_esperar():
             self._parar_vigilancia()
             return
+        if self._vigilancia_sin_cambios():
+            self._parar_vigilancia()
+            return
         if self._vigilante is None:
             self._vigilante = QTimer(self)
             self._vigilante.timeout.connect(self._comprobar_solo)
@@ -5839,15 +6205,69 @@ class AirVaultWindow(QDialog):
         self._vigilante.start()
         self._actualizar_latido()
 
-    def _por_confirmar_websearch(self, incluir_confirmados: bool = False) -> list:
+    def _vigilancia_sin_cambios(self) -> bool:
+        """Si la revisión automática lleva demasiado sin que nada cambie.
+
+        El reloj pregunta mientras quede algo que esperar, y una carga que
+        AirVault nunca publica es algo que esperar para siempre: sin tope,
+        la ventana consultaba la cola cada pocos minutos durante días. Se
+        mira la cola entera y no cada batch: mientras alguno avance, la
+        revisión sirve. El tope va muy por encima de lo que AirVault tarda
+        en publicar una carga, y cualquier orden lo reinicia.
+        """
+        firma = tuple(sorted(
+            (str(parte.trabajo.carpeta), parte.estado, parte.batch_id,
+             self._amarillas.get(str(parte.trabajo.carpeta), 0))
+            for parte in self._partes_del_proceso()
+        ))
+        ahora = time.monotonic()
+        # Con el reloj parado no corre el plazo: solo cuenta el tiempo que
+        # de verdad se pasó preguntando.
+        if firma != self._firma_vigilada or not self._vigilando():
+            self._firma_vigilada = firma
+            self._ultimo_cambio_cola = ahora
+            self._vigilancia_agotada = False
+            return False
+        if ahora - self._ultimo_cambio_cola < HORAS_SIN_CAMBIOS_ANTES_DE_PARAR * 3600:
+            return False
+        if not self._vigilancia_agotada:
+            self._vigilancia_agotada = True
+            texto = (
+                f"Revisión automática detenida: {HORAS_SIN_CAMBIOS_ANTES_DE_PARAR} horas "
+                "sin ningún cambio en AirVault. Pulse «Empezar proceso» para "
+                "volver a revisar."
+            )
+            self.resumen.setText(texto)
+            self._anotar(texto)
+        return True
+
+    def _por_confirmar_websearch(self, incluir_sin_muestra: bool = False,
+                                 incluir_confirmados: bool = False) -> list:
+        """Batches que todavía hay que buscar en Web Search.
+
+        Un batch confirmado no vuelve a entrar: la prueba queda guardada en
+        su manifiesto y vale hasta que alguien lo vuelva a subir a mano, que
+        es lo único que la borra. Sin esto cada revisión repetía la consulta
+        de todo lo ya publicado. Los omitidos tampoco entran.
+
+        ``incluir_sin_muestra`` es la consulta pedida a mano: lleva también
+        los batches sin números de bitácora válidos, para que el resultado
+        diga por qué no se pudieron buscar. ``incluir_confirmados`` es la
+        revisión de todas las bitácoras, que se pide justo para volver a
+        mirar un batch entero.
+        """
         from app.airvault.flujo import websearch_confirmacion_valida
         from app.airvault.confirmacion import muestra_de_batch
+        # La revisión completa es siempre una orden dada a mano.
+        incluir_sin_muestra = incluir_sin_muestra or incluir_confirmados
+        omitidos = self._claves_omitidas()
         trabajos = [
             t for t in self._trabajos if not t.manifiesto.cancelado
+            and _clave_estable(t.carpeta) not in omitidos
             and (incluir_confirmados or not websearch_confirmacion_valida(t.manifiesto))
-            and (incluir_confirmados or muestra_de_batch(t.manifiesto))
+            and (incluir_sin_muestra or muestra_de_batch(t.manifiesto))
         ]
-        return trabajos if incluir_confirmados else sorted(
+        return trabajos if incluir_sin_muestra else sorted(
             trabajos, key=lambda t: (getattr(t.manifiesto, "websearch_revision", ""), str(t.carpeta)))
 
     def _firma_consulta_websearch(self, trabajo):
@@ -5861,7 +6281,7 @@ class AirVaultWindow(QDialog):
     def _subidos_por_confirmar_websearch(self) -> list:
         from app.airvault.flujo import _subida_rastreable
         return [
-            t for t in self._por_confirmar_websearch(incluir_confirmados=True)
+            t for t in self._por_confirmar_websearch(incluir_sin_muestra=True)
             if _subida_rastreable(t, bool(t.manifiesto.batch_id))
         ]
 
@@ -5875,6 +6295,10 @@ class AirVaultWindow(QDialog):
             if self._websearch_inicio is not None and clave not in self._websearch_inicio:
                 continue
             if self._websearch_revisados.get(clave) == self._firma_consulta_websearch(trabajo):
+                continue
+            if clave in self._websearch_recuperados:
+                # Ya se intentó recuperar: lo que le pase ahora lo dice la
+                # cola de AirVault, no otra consulta a Web Search.
                 continue
             if self.auto_check.isChecked() or clave in self._websearch_inicio_por_revisar:
                 pendientes.append(trabajo)
@@ -6283,12 +6707,22 @@ class AirVaultWindow(QDialog):
         if self._worker is not None and self._worker.isRunning():
             return
         if CHEQUEO_WEBSEARCH_AUTOMATICO and not self._websearch_proceso_activo:
-            self._websearch_inicio = {
-                str(t.carpeta) for t in self._subidos_por_confirmar_websearch()
-            }
-            self._websearch_inicio_por_revisar = set(self._websearch_inicio)
-            self._websearch_revisados.clear()
+            # Solo una orden de alguien (o el primer trabajo de la ventana)
+            # vuelve a abrir la consulta a Web Search de lo que sigue sin
+            # confirmar. Lo que arranca el reloj no: antes cada vuelta
+            # olvidaba lo ya consultado y volvía a preguntar por todos los
+            # batches subidos, cada pocos minutos y sin fin.
+            if self._cadena_manual or self._websearch_inicio is None:
+                self._websearch_inicio = {
+                    str(t.carpeta) for t in self._subidos_por_confirmar_websearch()
+                }
+                self._websearch_inicio_por_revisar = set(self._websearch_inicio)
+                self._websearch_revisados.clear()
+                self._websearch_recuperados.clear()
             self._websearch_proceso_activo = True
+        if self._cadena_manual:
+            # Una orden vuelve a dar su plazo entero a la revisión automática.
+            self._firma_vigilada = None
         if self._worker is not None:
             self._worker.deleteLater()
             self._worker = None
@@ -6316,6 +6750,16 @@ class AirVaultWindow(QDialog):
             estado["forzados"] = []
         if modo in ("subir", "subir_pendientes", "resubir"):
             estado["indexar_manual"] = False
+        # Lo omitido no entra en ningún proceso. El hilo recibe la cola de
+        # la ejecución entera, que necesita para no repetir bitácoras, y
+        # esta lista le dice a cuáles no les hace nada.
+        estado["omitidos"] = self._claves_omitidas()
+        # Cierres que AirVault ya rechazó tres veces: no se insisten solos.
+        estado["no_completar"] = {
+            clave for clave, (intentos, _cuando) in self._cierres_fallidos.items()
+            if intentos >= 3
+        }
+        self._paso_visible = ""
         sesion = estado.get("sesion")
         if sesion is not None and sesion.cancelada:
             # La sesión quedó cortada por la cancelación anterior. Lo que se
@@ -6500,8 +6944,10 @@ class AirVaultWindow(QDialog):
 
     def _partes_del_proceso(self) -> list:
         """El filtro visual no cambia la meta de un trabajo que ya comenzo."""
+        # Con lo omitido dentro: quien decide qué hacer lo salta, pero la
+        # barra y el final no retroceden por marcar una casilla.
         if self._alcance_proceso is None:
-            return self._partes_del_alcance()
+            return self._partes_de_la_ejecucion()
         return [p for p in self._estados if str(p.trabajo.carpeta) in self._alcance_proceso]
 
     def _firma_de_fin(self) -> Optional[tuple]:
@@ -6517,6 +6963,10 @@ class AirVaultWindow(QDialog):
         indexar = completar or self._opciones.indexar or self._estado.get("indexar_manual", False)
         for parte in activos:
             if parte.estado in (COMPLETADO, AUTOCOMPLETADO, PUBLICADO):
+                continue
+            if self._omitida(parte):
+                # Lo omitido no entra en ningún proceso, así que tampoco
+                # puede dejar la cola esperando por algo que nadie va a hacer.
                 continue
             if not indexar and parte.estado in (LISTO, SOLO_REVISAR):
                 continue
@@ -6608,7 +7058,7 @@ class AirVaultWindow(QDialog):
                         "Posible duplicado; se continúa la subida autorizada."
                         if "se continúa" in paso else "Posible duplicado; no se sube."
                     )
-                return f"Batch «{trabajo.manifiesto.nombre_batch}»: {paso}"
+                return f"{self._rotulo(trabajo)}: {paso}"
         return texto
 
     def _actualizar_latido(self) -> None:
@@ -6672,12 +7122,20 @@ class AirVaultWindow(QDialog):
             lector = getattr(worker, "modo", "") == "buscar_websearch"
             hechas, total = self._cuenta_websearch if lector else self._cuenta_paso
             parando = getattr(worker, "hay_que_parar", lambda: False)()
-            esperando = total <= 0 and any(p in self._ultimo_paso.casefold()
-                                           for p in ("esperando", "airvault está", "airvault arma", "entrando"))
+            # Dice el paso exacto y no un «trabajando» a secas: qué batch,
+            # qué se le está haciendo y cuánto lleva. Es lo que se mira para
+            # saber si una espera larga es de AirVault o del programa.
             inicio = self._inicio_websearch if lector else self._inicio_paso
-            texto = ("Pausando" if parando and self._pausado else "Cancelando" if parando else self._paso_websearch if lector
-                     else "Esperando respuesta de AirVault" if esperando
-                     else "BITS trabajando") + f" ({_minutos(time.monotonic() - inicio)})"
+            texto = (
+                "Pausando: se espera a que termine el paso en curso"
+                if parando and self._pausado
+                else "Cancelando: se desbloquean los batches abiertos" if parando
+                else self._paso_websearch if lector
+                else "Ahora: " + (
+                    self._paso_visible
+                    or PASO_INICIAL.get(getattr(worker, "modo", ""), "Preparando el proceso")
+                )
+            ) + f" ({_minutos(time.monotonic() - inicio)})"
             if total > 0:
                 texto += f" - {min(hechas, total)} de {total}"
                 if lector:
@@ -6685,7 +7143,7 @@ class AirVaultWindow(QDialog):
             if not lector and lector_paralelo is not None:
                 revisados, batches = self._cuenta_websearch
                 if batches > 0:
-                    texto += f" - {self._paso_websearch} - Web Search: {min(revisados, batches)} de {batches} batches"
+                    texto += f" - En paralelo: {self._paso_websearch} - Web Search: {min(revisados, batches)} de {batches} batches"
             color = color_indexando()
         elif self._reintentando_chequeo():
             # Por delante de la revisión periódica: es lo que está parado de
@@ -6695,7 +7153,15 @@ class AirVaultWindow(QDialog):
             color = color_ayuda()
         else:
             restante = max(0, self._vigilante.remainingTime()) / 1000
-            texto = f"Depende de AirVault: próxima revisión en {_minutos(restante)}"
+            from app.airvault.flujo import CANCELADO
+            esperan = sum(
+                not parte.se_acabo and parte.estado != CANCELADO
+                for parte in self._partes_del_alcance()
+            )
+            texto = (
+                f"En espera de AirVault: próxima revisión automática en {_minutos(restante)}"
+                + (f" - {esperan} batches con pasos pendientes" if esperan else "")
+            )
             color = color_ayuda()
         linea.setText(f"{texto} - {self._totales_bitacoras()}")
         linea.setForeground(QColor(color))
@@ -6736,6 +7202,7 @@ class AirVaultWindow(QDialog):
 
     def _mostrar_paso(self, texto: str, hechas: int, total: int) -> None:
         visible = self._nombre_del_paso(texto)
+        self._paso_visible = visible
         self.estado_label.setText(visible)
         self.estado_label.setToolTip(visible)
         # La barra no se vuelve «en marcha continua» en los pasos sin
@@ -6751,6 +7218,8 @@ class AirVaultWindow(QDialog):
             self._ultimo_paso = texto
             self._inicio_paso = time.monotonic()
             self._anotar(visible)
+            # El batch que acaba de empezar a subir pasa a «en proceso».
+            self._anotar_plan()
             self._ajustar_confirmacion()
 
     def _anotar(self, texto: str, detalles: Sequence[str] = (), *, ayuda: str = "") -> None:
@@ -6865,6 +7334,8 @@ class AirVaultWindow(QDialog):
         else:
             self._indexando.discard(clave)
         self._pintar_lotes()
+        if activo:
+            self._anotar_plan()
 
     def _al_batch_indexado(self, datos: dict) -> None:
         """Pinta cómo quedó un batch que la cadena acaba de indexar."""
@@ -6896,6 +7367,7 @@ class AirVaultWindow(QDialog):
         self.resumen.setText(
             f"«{trabajo.manifiesto.nombre_batch}» {quedo}: {cuenta}."
         )
+        self._anotar_plan()
 
     def _al_comprobar(self, datos: dict) -> None:
         # Una comprobación buena borra la racha: lo que llevara fallando
@@ -7242,6 +7714,8 @@ class AirVaultWindow(QDialog):
         self._parar_reloj()
         # Si lo que sigue lanza otro hilo, la línea vuelve a girar en el acto.
         self._actualizar_latido()
+        # Cómo quedó cada batch tras este trabajo, antes de encadenar otro.
+        self._anotar_plan()
         if self._cerrar_al_terminar:
             self._websearch_proceso_activo = False
             self._cerrar_al_terminar = False

@@ -44,7 +44,7 @@ def test_el_total_acumula_batches_y_no_cuenta_separadores_o_reintentos(ventana):
     ventana._mostrar_paso("Batch UNO: Escribiendo en AirVault", 1, 2)
     ventana._mostrar_paso("Batch UNO: Escribiendo en AirVault", 0, 1)
     assert "5 de 5 bitácoras subidas, 1 de 5 indexadas" in ventana._totales_bitacoras()
-    assert "Batch «Batch uno»" in ventana.bitacora.item(0).text()
+    assert "Batch 1 «Batch uno»" in ventana.bitacora.item(0).text()
     assert "Total:" in ventana.bitacora.item(0).text()
     assert ventana.bitacora.count() == 1
 

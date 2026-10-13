@@ -18,6 +18,8 @@ def cargada(app, tmp_path):
     ventana._estados = [EstadoParte(t, estado) for t, estado in
                         zip(trabajos, (SIN_SUBIR, INDEXADO, COMPLETADO))]
     ventana._trabajos = trabajos
+    # La cola se ordena por el numero de cada batch: aqui sigue a la lista.
+    ventana._numeros.clear()
     ventana._pintar_lotes()
     ventana.show()
     app.processEvents()
@@ -82,8 +84,8 @@ def test_previa_abre_todos_sin_elegir_corrida_y_las_marcas_se_sincronizan(app, t
     assert not ventana.ocultar_indexados_check.isChecked()
     assert visibles(previ) == ["pendiente", "indexado"]
     exterior = acciones(ventana.batch_actions_button.menu())
-    assert not exterior["Ocultar batches indexados"].isChecked()
-    exterior["Ocultar batches completados"].setChecked(False)
+    assert not exterior["Omitir batches indexados"].isChecked()
+    exterior["Omitir batches completados"].setChecked(False)
     assert not ventana.ocultar_completados_check.isChecked()
     assert not previ.acciones_filtro[2].isChecked()
     assert visibles(previ) == ["pendiente", "indexado", "completado"]
