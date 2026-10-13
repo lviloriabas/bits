@@ -1410,6 +1410,7 @@ class Trabajo:
         limite = max(0.0, float(self.config.espera_maxima_s if limite_s is None else limite_s))
         edad_inicial = edad_de_la_carga(self) or 0.0
         presupuesto = max(0.0, espera_para_darla_por_perdida(self) - edad_inicial)
+        ya_era_vieja = _carga_vieja_sin_publicar(self)
         inicio = time.monotonic()
         # Las vueltas acotan la espera aunque ``dormir`` no duerma, que es
         # como la ejercitan las pruebas.
@@ -1446,11 +1447,19 @@ class Trabajo:
                     0,
                 )
             dormir(min(espera, max(0.0, limite - transcurrido)))
-        if not any(
-            _es_nombre_provisional(actual.nombre, nombre)
-            or _nombre_visible_compatible(actual.nombre, nombre)
-            for actual in lotes_actuales
-        ):
+        # Un batch sin titulo solo puede ser esta carga mientras AirVault la
+        # arma. Si el plazo ya estaba vencido al empezar a mirar, es de otro
+        # y no la deja «en camino» frenando las cargas siguientes.
+        posibles = (
+            _con_su_titulo(self, lotes_actuales)
+            if ya_era_vieja
+            else [
+                actual for actual in lotes_actuales
+                if _es_nombre_provisional(actual.nombre, nombre)
+                or _nombre_visible_compatible(actual.nombre, nombre)
+            ]
+        )
+        if not posibles:
             if limite_s is not None and limite >= presupuesto and _subida_rastreable(self):
                 self.manifiesto.no_encontrado_desde = datetime.now().isoformat(timespec="seconds")
                 self.guardar()
@@ -4831,6 +4840,49 @@ def _candidatos_provisionales_descuadrados(
     ]
 
 
+def _con_su_titulo(
+    trabajo: "Trabajo", lotes: Sequence[ResumenLote]
+) -> List[ResumenLote]:
+    """De esos batches, los que llevan el titulo de esta carga.
+
+    Un batch sin titulo solo se le atribuye a una carga porque llego despues
+    de la foto de la cola que se tomo al subirla. Eso vale mientras AirVault
+    puede estar armandola. Vencido el plazo de publicacion, despues de la
+    foto llegaron las cargas de todo el mundo: cualquier ``Empty-Batch`` con
+    otra cantidad de paginas parecia esta carga descuadrada, el batch se
+    quedaba en «Páginas no coinciden» sin poder resubirse y frenaba las
+    demas subidas. Para una carga vieja solo cuenta lo que lleva su titulo
+    y lo que puede ser una mezcla (ver :func:`_puede_ser_mezcla`).
+    """
+    nombre = trabajo.manifiesto.nombre_batch
+    return [
+        lote for lote in lotes if _nombre_visible_compatible(lote.nombre, nombre)
+    ]
+
+
+def _puede_ser_mezcla(
+    trabajo: "Trabajo", lote: ResumenLote, otras: Sequence["Trabajo"]
+) -> bool:
+    """Si las paginas del batch son las de esta carga mas las de otras perdidas.
+
+    AirVault junta cargas que llegan seguidas, y el batch que resulta suma
+    sus paginas. Solo se mira la cuenta: demostrar la mezcla, pagina por
+    pagina, es cosa de :func:`app.airvault.mezclas.recuperar_mezclas`, que
+    se dispara mientras la parte siga descuadrada.
+    """
+    sumas = set(trabajo.manifiesto.cantidades_paginas_compatibles())
+    mezclas: set[int] = set()
+    for otra in otras:
+        propias = otra.manifiesto.cantidades_paginas_compatibles()
+        mezclas |= {
+            suma + paginas
+            for suma in sumas | mezclas
+            for paginas in propias
+            if suma + paginas <= lote.paginas
+        }
+    return lote.paginas in mezclas
+
+
 def _candidatos_con_contenido_contradictorio(
     trabajo: "Trabajo", cliente, lotes: Sequence[ResumenLote]
 ) -> List[ResumenLote]:
@@ -5132,8 +5184,14 @@ def _estado_de(
     lote_confirmado: Optional[ResumenLote] = None,
     identidad_fallida: bool = False,
     amplia_fallida: bool = False,
+    otras_sin_batch: Sequence["Trabajo"] = (),
 ) -> EstadoParte:
-    """En que va una parte, mirando la cola que se acaba de pedir."""
+    """En que va una parte, mirando la cola que se acaba de pedir.
+
+    ``otras_sin_batch`` son las demas cargas de la revision que tampoco
+    aparecen: con sus paginas se sabe si un batch sin titulo puede ser una
+    mezcla de esta con alguna de ellas.
+    """
     manifiesto = trabajo.manifiesto
     esperadas = len(manifiesto.registros)
     completar = manifiesto.etapas.get("completar")
@@ -5180,6 +5238,13 @@ def _estado_de(
         if not subida_rastreable:
             return EstadoParte(trabajo, SIN_SUBIR, "no esta en AirVault")
         descuadrados = _candidatos_provisionales_descuadrados(trabajo, lotes)
+        if descuadrados and _carga_vieja_sin_publicar(trabajo):
+            propios = _con_su_titulo(trabajo, descuadrados)
+            descuadrados = [
+                candidato for candidato in descuadrados
+                if candidato in propios
+                or _puede_ser_mezcla(trabajo, candidato, otras_sin_batch)
+            ]
         if descuadrados:
             cantidades = " o ".join(
                 str(n) for n in sorted(manifiesto.cantidades_paginas_compatibles())
@@ -5474,6 +5539,13 @@ def comprobar_partes(
             if not trabajo.manifiesto.batch_id
         )
 
+    sin_batch = [
+        trabajo for trabajo in trabajos
+        if not trabajo.manifiesto.batch_id
+        and not trabajo.manifiesto.cancelado
+        and _pendiente_de_busqueda(trabajo)
+        and _subida_rastreable(trabajo)
+    ]
     return [
         _estado_de(
             trabajo,
@@ -5485,6 +5557,7 @@ def comprobar_partes(
             ) if str(trabajo.carpeta) in confirmados else None,
             str(trabajo.carpeta) in fallos_identidad,
             str(trabajo.carpeta) in sin_hallar,
+            [otra for otra in sin_batch if otra is not trabajo],
         )
         for trabajo in trabajos
     ]
