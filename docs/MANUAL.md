@@ -162,7 +162,7 @@ Exportar vuelve a generar los datos y PDF sin repetir OCR. Conserva los PDF ante
 8. Para publicar los batches normales, active **Completar batch** antes de indexar o use **Completar el batch** en el menú de una fila indexada. Solo se completa cuando todas sus páginas son válidas.
 9. Revise el estado final y atienda por separado el batch **REVISAR**.
 
-En **REVISAR**, BITS guarda los campos disponibles y verifica lo escrito. Las páginas con incidencias pueden seguir amarillas, pendientes de corrección humana, aunque termine el trabajo automático. Ese batch conserva sus separadores y no se completa ni publica automáticamente.
+En **REVISAR**, BITS guarda los campos disponibles y verifica lo escrito. Si una página suelta ya tiene en AirVault otro número de bitácora, BITS no la escribe ni la espera: queda para quien revisa y el batch termina su parte automática. Las páginas con incidencias pueden seguir amarillas, pendientes de corrección humana, aunque termine el trabajo automático. Ese batch conserva sus separadores y no se completa ni publica automáticamente.
 
 Así avanza cada batch de la cola. Cada paso queda anotado en el equipo, por eso **Continuar pendiente** retoma desde el primero que falte sin repetir lo ya confirmado:
 

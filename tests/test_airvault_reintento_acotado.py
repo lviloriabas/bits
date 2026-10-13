@@ -227,10 +227,10 @@ def test_revisar_no_relee_las_paginas_que_ya_guardo():
     cliente = ClienteConMapa(page_count=4)
     indexador = Indexador(cliente, m, PICKLIST, dormir=lambda _s: None)
     indexador.aplicar(indexador.planificar(4))
-    # Alguien corrigio a mano el log de la pagina 2 antes de confirmarla.
+    # AirVault no conservo la fecha de la pagina 2.
     cliente.paginas[2] = pagina(
         2, estado=ESTADO_NECESITA_CORRECCION,
-        valores={**cliente.paginas[2].valores, CAMPO_LOG_NUMBER: "2287399"},
+        valores={**cliente.paginas[2].valores, CAMPO_END_DATE: ""},
     )
     assert verificar_revision(cliente, m)[:2] == (3, 4)
     cliente.lecturas.clear()
@@ -241,7 +241,7 @@ def test_revisar_no_relee_las_paginas_que_ya_guardo():
     cliente.lecturas.clear()
     plan = Indexador(cliente, m, PICKLIST).planificar(4)
     assert cliente.lecturas == [2]
-    assert [p.seq for p in plan.bloqueadas if not p.ya_indexada] == [2]
+    assert [p.seq for p in plan.paginas if not p.ya_indexada] == [2]
 
 
 def test_la_verificacion_conjunta_lee_solo_lo_pendiente_de_cada_batch():
@@ -258,3 +258,90 @@ def test_la_verificacion_conjunta_lee_solo_lo_pendiente_de_cada_batch():
     # La barra cuenta las ya confirmadas: no vuelve a empezar de cero al
     # leer la unica que falta.
     assert avances[-1] == (4, 4)
+
+
+# ── la pagina de REVISAR que AirVault tiene con otro numero ────────
+
+
+def revisar_con_un_log_distinto(cuantos: int = 12, distinta: int = 5):
+    """Un batch REVISAR escrito, con una pagina que trae otro numero."""
+    m = manifiesto(cuantos, revisar=True)
+    for registro in m.registros:
+        registro.log_number = f"22873{registro.seq:02d}"
+    cliente = ClienteConMapa(
+        page_count=cuantos,
+        paginas={distinta: pagina(
+            distinta, estado=ESTADO_NECESITA_CORRECCION,
+            valores={CAMPO_LOG_NUMBER: "2297399"},
+        )},
+    )
+    indexador = Indexador(cliente, m, PICKLIST, dormir=lambda _s: None)
+    plan = indexador.planificar(cuantos)
+    indexador.aplicar(plan, detener_en_error=False)
+    return m, cliente, plan
+
+
+def test_revisar_no_escribe_la_pagina_que_trae_otro_numero():
+    _m, cliente, plan = revisar_con_un_log_distinto()
+
+    assert [p.seq for p in plan.bloqueadas] == [5]
+    assert 5 not in [escritura[0] for escritura in cliente.escrituras]
+    assert cliente.paginas[5].valores[CAMPO_LOG_NUMBER] == "2297399"
+
+
+def test_revisar_termina_aunque_una_pagina_traiga_otro_numero():
+    """Esa pagina queda para quien revisa: no deja el batch sin confirmar."""
+    m, cliente, _plan = revisar_con_un_log_distinto()
+    esperas = []
+
+    resultado = verificar_revision(
+        cliente, m, esperas=(5, 15), dormir=esperas.append,
+    )
+
+    assert resultado == (12, 12, [])
+    # Releerla no la iba a cambiar: no se espera por ella.
+    assert esperas == []
+
+
+def test_un_batch_revisar_corrido_no_se_da_por_terminado():
+    """Si muchas paginas traen otro numero no es una suelta: es otro PDF."""
+    m = manifiesto(12, revisar=True)
+    for registro in m.registros:
+        registro.log_number = f"22873{registro.seq:02d}"
+    cliente = ClienteConMapa(page_count=12, paginas={
+        n: pagina(n, estado=ESTADO_NECESITA_CORRECCION,
+                  valores={CAMPO_LOG_NUMBER: f"22973{n:02d}"})
+        for n in range(1, 7)
+    })
+    indexador = Indexador(cliente, m, PICKLIST, dormir=lambda _s: None)
+    indexador.aplicar(indexador.planificar(12), detener_en_error=False)
+
+    validas, total, problemas = verificar_revision(cliente, m)
+
+    assert (validas, total) == (6, 12)
+    assert len(problemas) == 6
+
+
+def test_el_numero_de_otra_bitacora_del_batch_no_se_deja_pasar():
+    """Una pagina con el log de su vecina es un PDF en otro orden."""
+    m, cliente, _plan = revisar_con_un_log_distinto()
+    cliente.paginas[5] = pagina(
+        5, estado=ESTADO_NECESITA_CORRECCION,
+        valores={CAMPO_LOG_NUMBER: m.registros[5].log_number},
+    )
+
+    assert verificar_revision(cliente, m)[:2] == (11, 12)
+
+
+def test_en_el_batch_automatico_otro_numero_sigue_sin_confirmar():
+    m = manifiesto(12)
+    for registro in m.registros:
+        registro.log_number = f"22873{registro.seq:02d}"
+    cliente = ClienteConMapa(page_count=12, paginas={5: pagina(
+        5, estado=ESTADO_NECESITA_CORRECCION,
+        valores={CAMPO_LOG_NUMBER: "2297399"},
+    )})
+    indexador = Indexador(cliente, m, PICKLIST, dormir=lambda _s: None)
+    indexador.aplicar(indexador.planificar(12), detener_en_error=False)
+
+    assert verificar_lote(cliente, m)[:2] == (11, 12)

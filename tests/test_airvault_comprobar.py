@@ -884,6 +884,23 @@ def test_el_lote_de_revisar_se_ofrece_para_indexar_lo_disponible(tmp_path):
     assert not parte.se_acabo
 
 
+def test_el_lote_de_revisar_sin_confirmar_no_vuelve_a_listo_para_indexar(tmp_path):
+    """Es un incompleto, con sus topes de reintento.
+
+    Volvia a «Listo para indexar» en cada revision y, como esos topes solo
+    cuentan para el incompleto, se reescribia sin fin por una pagina que
+    ningun reintento iba a cambiar.
+    """
+    trabajo, cliente = trabajo_subido(tmp_path)
+    trabajo.manifiesto.solo_subir = True
+    trabajo.manifiesto.etapa("verificar").marcar(
+        EstadoEtapa.ERROR, "1/2 con los datos disponibles revisados"
+    )
+    parte, = comprobar_partes([trabajo], cliente)
+    assert parte.estado == INCOMPLETO
+    assert parte.se_puede_indexar
+
+
 def test_lo_ya_indexado_deja_de_esperar_a_nada(tmp_path):
     trabajo, cliente = trabajo_subido(tmp_path)
     trabajo.manifiesto.etapa("indexar").marcar(EstadoEtapa.HECHA, "escritas 2")

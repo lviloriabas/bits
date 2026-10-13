@@ -6140,14 +6140,20 @@ def _estado_de(
             detalle,
             lote,
         )
-    if manifiesto.solo_subir:
+    # El batch REVISAR que ya se escribio y quedo sin confirmar es un
+    # incompleto como cualquier otro. Antes volvia aqui a «Listo para
+    # indexar» en cada revision, y como los topes de reintento solo cuentan
+    # para el incompleto, se releia y se reescribia sin fin por una pagina
+    # que ningun reintento iba a cambiar.
+    sin_confirmar = bool(verificar and verificar.estado is EstadoEtapa.ERROR)
+    if manifiesto.solo_subir and not sin_confirmar:
         return EstadoParte(
             trabajo,
             SOLO_REVISAR,
             f"{esperadas} paginas para indexar y revisar",
             lote,
         )
-    if verificar and verificar.estado is EstadoEtapa.ERROR:
+    if sin_confirmar:
         detalle = verificar.detalle
         if lote.bloqueado_por:
             detalle += f"; lo tiene abierto {lote.bloqueado_por}"
