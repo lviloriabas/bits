@@ -2368,10 +2368,10 @@ def test_la_leyenda_explica_cada_estado_con_el_color_de_la_cola(ventana):
     assert rotulos == set(NOMBRE_ESTADO_PARTE.values()) | {
         "Indexando", "Chequeo pendiente",
     }
-    # «Indexado» va en los dos colores con que lo escribe la cola: el acento
-    # del batch normal y el ámbar del REVISAR.
+    # «Indexado» sale una sola vez y en el acento: el de un batch REVISAR es
+    # el mismo estado y se escribe igual.
     assert [papel for rotulo, papel, _texto in filas if rotulo == "Indexado"] == [
-        "acento", "STATUS_WARNING",
+        "acento",
     ]
     papeles = {rotulo: papel for rotulo, papel, _texto in filas}
     assert papeles["Confirmado en Web Search"] == "STATUS_OK"
@@ -2383,7 +2383,8 @@ def test_la_leyenda_explica_cada_estado_con_el_color_de_la_cola(ventana):
     assert f"color: {tonos.STATUS_OK};" in html.split("Completado")[0]
     assert f"color: {tonos.TEXT_TERTIARY};" in html.split("Sin subir")[0]
     assert f"color: {link_text_color()};" in html.split("Indexando")[0]
-    assert f"color: {tonos.STATUS_WARNING};" in html.split("REVISAR")[0]
+    assert f"color: {tonos.STATUS_WARNING};" not in html
+    assert "REVISAR" not in html
     assert "«Complete»" in html
     assert "Web Index" in html
     assert "Terminado" not in html

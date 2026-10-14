@@ -8,7 +8,7 @@ from app.airvault.flujo import Trabajo
 from app.airvault.indexer import Resultado
 from app.airvault.model import EstadoEtapa, Manifiesto, Registro
 from app.gui.airvault_window import AirVaultWindow
-from app.gui.tokens import paleta
+from app.gui.tokens import link_text_color
 
 
 @pytest.mark.parametrize("revision", [False, True])
@@ -32,11 +32,12 @@ def test_el_aviso_por_batch_distingue_guardado_de_validacion(app, tmp_path, revi
             assert "en verde" not in texto
         else:
             assert "1 de 1 páginas en verde" in texto
-    if revision:
-        for columna in range(ventana.lotes.columnCount()):
-            assert ventana.lotes.item(0, columna).foreground().color() == QColor(
-                paleta().STATUS_WARNING
-            )
+    # El indexado de REVISAR se escribe en el mismo acento que el de los
+    # demás batches: es el mismo estado.
+    for columna in range(ventana.lotes.columnCount()):
+        assert ventana.lotes.item(0, columna).foreground().color() == QColor(
+            link_text_color()
+        )
     ventana.close()
 
 
