@@ -874,6 +874,32 @@ def test_un_lote_abierto_por_otro_no_se_ofrece_para_indexar(tmp_path):
     assert not parte.se_puede_indexar
 
 
+def test_abrir_un_batch_que_airvault_rechaza_no_lo_deja_tomado(tmp_path):
+    """LockAndGetBatchInfo puede tomar el batch y contestar con un error.
+
+    Con «Sql command has timed out» el batch quedaba tomado a nombre propio:
+    la cola lo mostraba abierto por alguien y nadie volvia a indexarlo.
+    """
+    from app.airvault.session import ErrorDeAirVault
+
+    trabajo, cliente = trabajo_subido(tmp_path)
+    trabajo.manifiesto.batch_id = "003SRO"
+
+    def abrir(_batch_id):
+        raise ErrorDeAirVault(
+            "AirVault rechazo /index/Batch/LockAndGetBatchInfo: "
+            "Sql command has timed out.."
+        )
+
+    cliente.abrir_lote = abrir
+
+    with pytest.raises(ErrorDeAirVault):
+        trabajo.planificar(cliente)
+
+    assert cliente.cerrados == ["003SRO"]
+    assert not trabajo._tomado
+
+
 def test_el_lote_de_revisar_se_ofrece_para_indexar_lo_disponible(tmp_path):
     """Los datos del CSV se escriben y la persona confirma lo dudoso."""
     trabajo, cliente = trabajo_subido(tmp_path)

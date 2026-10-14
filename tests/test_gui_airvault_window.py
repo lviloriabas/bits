@@ -2759,6 +2759,48 @@ def test_la_bitacora_lista_cada_batch_en_su_propia_linea(ventana):
     assert not lineas[1].startswith(" ")
 
 
+def test_la_bitacora_dice_que_batch_esta_abierto_en_airvault(ventana):
+    """El batch abierto no se toca: sin decirlo, la espera parecia un fallo.
+
+    Se anunciaba «se indexan y completan» para batches que AirVault tenia
+    tomados, y despues el proceso esperaba sin indexar ninguno.
+    """
+    from app.airvault.client import ResumenLote
+    from app.airvault.flujo import INCOMPLETO, LISTO
+
+    tomado = ResumenLote(
+        batch_id="003TI2", nombre="DP | BITS REVISAR", paginas=78, repo_id=1,
+        repositorio="", paso="", bloqueado_por="Diego Vargas", recibido="",
+    )
+    ventana._al_comprobar({
+        "estados": [
+            parte(INCOMPLETO, "DP | BITS REVISAR", carpeta="job-1", lote=tomado),
+            parte(LISTO, "DP | BITS -2", carpeta="job-2"),
+        ],
+        "planes": {}, "partes": [],
+    })
+
+    textos = [
+        ventana.bitacora.item(i).text() for i in range(ventana.bitacora.count())
+    ]
+    revisado = [t for t in textos if "Revisado:" in t][-1].splitlines()
+    assert revisado[1].endswith("lo tiene abierto Diego Vargas")
+    assert "abierto" not in revisado[2]
+    clasificacion = "\n".join(textos)
+    abiertos = [
+        linea for linea in clasificacion.splitlines()
+        if "abiertos en AirVault" in linea
+    ]
+    indexables = [
+        linea for linea in clasificacion.splitlines()
+        if "se indexan y completan" in linea
+    ]
+    assert len(abiertos) == 1 and len(indexables) == 1
+    numero_tomado = str(ventana._numero_de(ventana._estados[0].trabajo))
+    assert numero_tomado in abiertos[0].split(":")[-1]
+    assert numero_tomado not in indexables[0].split(":")[-1]
+
+
 def test_un_mensaje_de_error_se_muestra_sin_ayuda_al_pasar_el_cursor(ventana):
     """El registro conserva el motivo seguro en el texto visible."""
     ventana._al_fallar(

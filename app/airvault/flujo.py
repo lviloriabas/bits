@@ -1818,10 +1818,22 @@ class Trabajo:
         justo cuando hace falta y el mensaje deja de ser un tiempo agotado
         sin explicacion.
         """
-        from app.airvault.session import ErrorDeConexion
+        from app.airvault.session import ErrorDeAirVault, ErrorDeConexion
 
         try:
             info = cliente.abrir_lote(self.manifiesto.batch_id)
+        except ErrorDeAirVault:
+            # AirVault contesto con un error, pero tomar el batch es lo
+            # primero que hace esa peticion: con «Sql command has timed
+            # out» el batch quedaba tomado a nombre propio sin que el
+            # programa lo supiera. Nadie lo soltaba, la cola lo mostraba
+            # abierto por alguien y dejaba de indexarse hasta que una
+            # persona lo cerraba en AirVault. Se suelta aqui mismo; si no
+            # habia llegado a tomarse, AirVault contesta que no es de este
+            # usuario y no pasa nada.
+            self._tomado = True
+            self.cerrar(cliente)
+            raise
         except ErrorDeConexion as exc:
             dueno = self._quien_lo_tiene(cliente)
             if not dueno:

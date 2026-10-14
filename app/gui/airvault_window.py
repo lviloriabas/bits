@@ -8194,9 +8194,22 @@ class AirVaultWindow(QDialog):
 
         # Una línea por batch con su rótulo, como la columna Estado. El
         # detalle entero de cada uno sigue en la ayuda de su celda.
+        def abierto_por(parte) -> str:
+            """Quién tiene abierto en AirVault un batch que sigue pendiente."""
+            lote = getattr(parte, "lote", None)
+            if lote is None or getattr(parte, "se_acabo", False):
+                return ""
+            return str(getattr(lote, "bloqueado_por", "") or "")
+
+        # El batch abierto en AirVault no se toca, y sin decirlo la espera
+        # se leía como un proceso parado con trabajo por hacer.
         self._anotar(
             "Revisado:",
-            [f"{self._rotulo(p.trabajo)}: {p.titulo}" for p in revisados],
+            [
+                f"{self._rotulo(p.trabajo)}: {p.titulo}"
+                + (f", lo tiene abierto {abierto_por(p)}" if abierto_por(p) else "")
+                for p in revisados
+            ],
         )
         if acotado:
             return
@@ -8212,6 +8225,25 @@ class AirVaultWindow(QDialog):
         grupos = clasificar_partes(revisados)
         if not grupos:
             return
+        # Lo que alguien tiene abierto en AirVault va en su propio renglón:
+        # está en Web Index, pero no se indexa hasta que lo cierren.
+        clave_abiertos = "abiertos"
+        titulos[clave_abiertos] = (
+            "En Web Index, abiertos en AirVault; no se tocan hasta que los "
+            "cierren allí"
+        )
+        abiertos = [p for p in grupos.get(EN_WEB_INDEX, ()) if abierto_por(p)]
+        if abiertos:
+            libres = [p for p in grupos[EN_WEB_INDEX] if not abierto_por(p)]
+            reparto = {}
+            for destino, partes in grupos.items():
+                if destino != EN_WEB_INDEX:
+                    reparto[destino] = partes
+                    continue
+                if libres:
+                    reparto[EN_WEB_INDEX] = libres
+                reparto[clave_abiertos] = abiertos
+            grupos = reparto
         lineas = []
         for destino, partes in grupos.items():
             numeros = sorted(self._numero_de(parte.trabajo) for parte in partes)
