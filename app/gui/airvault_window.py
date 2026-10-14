@@ -1941,6 +1941,7 @@ class TrabajoAirVaultWorker(QThread):
             "resultado": Resultado(), "validas": 0, "total": 0,
             "lotes": len(trabajos), "cierres": [], "incompleto": False,
             "incluye_revision": False, "carpetas": [], "amarillas": {},
+            "sin_cambios": [],
             # Los batches que no se dejaron indexar, con su motivo: (carpeta,
             # nombre, detalle). No cortan a los demás.
             "fallos": [],
@@ -2006,6 +2007,7 @@ class TrabajoAirVaultWorker(QThread):
             )
             datos["carpetas"].extend(parte["carpetas"])
             datos["amarillas"].update(parte.get("amarillas") or {})
+            datos["sin_cambios"].extend(parte.get("sin_cambios") or [])
             if suyo.interrumpido:
                 # Sin sesión o sin red los siguientes fallarían igual; lo
                 # que falta se retoma en la siguiente revisión.
@@ -2039,6 +2041,9 @@ class TrabajoAirVaultWorker(QThread):
         # tanda sigue amarillo solo gastaba tiempo.
         por_batch: dict[str, tuple[int, int, list[str]]] = {}
         activos = list(trabajos)
+        # Batches que quedaron sin confirmar sin que el intento escribiera
+        # nada: lo que les falta es lo que el plan decidió no escribir.
+        sin_cambios: list[str] = []
         try:
             for intento in range(1, INTENTOS_INDEXADO + 1):
                 # Una página que sigue fallando tras sus reintentos se anota
@@ -2060,6 +2065,12 @@ class TrabajoAirVaultWorker(QThread):
                     )
                 resultado.detalles.extend(parcial.detalles)
                 resultado.interrumpido = parcial.interrumpido
+                # Si esta pasada no escribió ni intentó escribir nada, no hay
+                # guardado que AirVault esté tardando en reflejar: esperar y
+                # releer la misma página devolvería lo mismo.
+                sin_escribir = not (
+                    parcial.escritas or parcial.fallidas or parcial.interrumpido
+                )
                 self._avisar("Verificando batches", 0, 0)
                 # Una lectura sola no basta para dar una página por
                 # incompleta: recién escrito el batch, AirVault puede
@@ -2067,7 +2078,7 @@ class TrabajoAirVaultWorker(QThread):
                 for trabajo in activos:
                     por_batch[str(trabajo.carpeta)] = verificar_partes(
                         [trabajo], cliente, avisar=self._avisar,
-                        esperas=() if parcial.interrumpido
+                        esperas=() if parcial.interrumpido or sin_escribir
                         else ESPERAS_CONFIRMACION[intento - 1],
                         dormir=esperar_confirmacion,
                     )
@@ -2078,6 +2089,17 @@ class TrabajoAirVaultWorker(QThread):
                     for problema in cuenta[2]
                 ]
                 if validas == total:
+                    break
+                if sin_escribir:
+                    # Lo que falta es lo que el plan no escribe (una página
+                    # que AirVault tiene con otros datos, por ejemplo).
+                    # Volver a planificar daría el mismo plan, así que no se
+                    # reintenta ni aquí ni en las vueltas del reloj.
+                    sin_cambios = [
+                        str(trabajo.carpeta) for trabajo in activos
+                        if por_batch[str(trabajo.carpeta)][0]
+                        != por_batch[str(trabajo.carpeta)][1]
+                    ]
                     break
                 # Una escritura que se corto a la mitad es justo la que hay
                 # que retomar: lo escrito queda escrito y el plan siguiente
@@ -2200,6 +2222,7 @@ class TrabajoAirVaultWorker(QThread):
                 clave: cuenta[1] - cuenta[0]
                 for clave, cuenta in por_batch.items()
             },
+            "sin_cambios": sin_cambios,
         }
 
     def _completar(self) -> None:
@@ -6568,6 +6591,30 @@ class AirVaultWindow(QDialog):
                 self._reconfirmaciones[clave] = RECONFIRMACIONES_TRAS_INDEXAR
                 self._reintentos_espaciados.pop(clave, None)
 
+    def _agotar_reintentos(self, carpetas) -> None:
+        """Deja de reintentar solo el batch cuyo intento no escribió nada.
+
+        Los reintentos existen para lo que AirVault tarda en reflejar o
+        rechaza un rato. Si el intento no escribió ninguna página, lo que
+        falta es lo que el plan no escribe, y repetirlo en cada vuelta del
+        reloj solo gastaba la espera en volver a leer lo mismo. El batch
+        queda incompleto y a la vista; «Indexar» lo retoma cuando alguien
+        lo pida, y la revisión lo da por indexado si AirVault cambia.
+        """
+        for clave in carpetas or ():
+            clave = str(clave)
+            self._reconfirmaciones[clave] = 0
+            self._reintentos_espaciados[clave] = (
+                REINTENTOS_AMARILLOS_ESPACIADOS, time.monotonic(),
+            )
+
+    def _le_quedan_reintentos(self, clave: str) -> bool:
+        """Si el programa todavía va a reescribir solo ese batch incompleto."""
+        if self._reconfirmaciones.get(clave) != 0:
+            return True
+        hechos, _ultimo = self._reintentos_espaciados.get(clave, (0, 0.0))
+        return hechos < REINTENTOS_AMARILLOS_ESPACIADOS
+
     def _por_completar(self, automatico: bool = False) -> list:
         """Batches verificados que pueden cerrarse sin volver a escribir."""
         from app.airvault.flujo import INDEXADO
@@ -6620,9 +6667,10 @@ class AirVaultWindow(QDialog):
         Una alerta de duplicados solo bloquea cuando está activada la
         preferencia de detener la subida.
 
-        Un indexado incompleto sigue bajo vigilancia aunque agote las
-        relecturas inmediatas. Un indexado confirmado también sigue si
-        falta completar el batch y esa opción está activada.
+        Un indexado incompleto sigue bajo vigilancia mientras le queden
+        reintentos; agotados, deja de sostener la espera. Un indexado
+        confirmado también sigue si falta completar el batch y esa opción
+        está activada.
 
         Un batch listo para escribir también, si el indexado va solo: lo
         escribe la cadena, y si esa escritura se corta (la sesión, la red,
@@ -6643,6 +6691,12 @@ class AirVaultWindow(QDialog):
             and not self._omitida(parte)
             and not (parte.estado == INDEXADO
                      and self._cierres_fallidos.get(str(parte.trabajo.carpeta), (0, 0))[0] >= 3)
+            # El incompleto al que ya no le quedan reintentos no mantiene la
+            # espera: no hay nada que AirVault vaya a cambiar ni que el
+            # programa vaya a hacer solo. El que otro usuario tiene abierto
+            # sí, porque se retoma en cuanto lo cierre.
+            and not (parte.estado == INCOMPLETO and parte.se_puede_indexar
+                     and not self._le_quedan_reintentos(str(parte.trabajo.carpeta)))
             and (
                 not parte.se_puede_indexar
                 or indexa_solo
@@ -8355,6 +8409,7 @@ class AirVaultWindow(QDialog):
         if datos.get("incompleto"):
             self._programar_reconfirmaciones(datos.get("carpetas"))
         self._anotar_intentos(datos.get("amarillas"))
+        self._agotar_reintentos(datos.get("sin_cambios"))
         # También si se cortó: lo que quede sin escribir lo retoma el reloj.
         self._ajustar_vigilancia()
         self._pintar_lotes()
@@ -8565,6 +8620,7 @@ class AirVaultWindow(QDialog):
                 "separadoras."
             )
         self._anotar_intentos(datos.get("amarillas"))
+        self._agotar_reintentos(datos.get("sin_cambios"))
         if resultado.interrumpido:
             if not acotado:
                 # Sin sesión o sin red no se puede seguir ahora, pero la

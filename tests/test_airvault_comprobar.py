@@ -1320,6 +1320,42 @@ def test_worker_reenvia_la_fecha_si_airvault_no_la_conservo(tmp_path):
     assert cli.escrituras[-1][1][CAMPO_END_DATE] == "08/12/2026"
 
 
+def test_worker_no_espera_ni_repite_cuando_el_intento_no_escribe_nada(tmp_path):
+    """Se esperaban 5, 15 y 30 s y se replanificaba por una pagina intocable.
+
+    Si el plan no escribe ninguna pagina, no hay guardado que AirVault este
+    tardando en reflejar: releer y volver a planificar devuelve lo mismo.
+    """
+    from app.gui.airvault_window import TrabajoAirVaultWorker
+
+    trabajo, base = trabajo_subido(tmp_path)
+    trabajo.fijar_lote("003SRO")
+    # La primera ya esta escrita y en verde; la segunda la valido alguien
+    # con otro numero, y esa no se pisa.
+    cli = ClienteFalso(paginas=base.paginas, picklist=base.picklist, page_count=2)
+    primero = trabajo.planificar(cli)
+    trabajo.indexar(primero[1], primero[0])
+    cli.paginas[2] = pagina(2, estado=0, valores={
+        **cli.paginas[2].valores, CAMPO_LOG_NUMBER: "9999999",
+    })
+    cli.escrituras.clear()
+    plan = trabajo.planificar(cli)
+    abiertos_antes = len(cli.abiertos)
+    esperas = []
+    worker = TrabajoAirVaultWorker("indexar", {"tanda_hecha": True})
+    worker._dormir = esperas.append
+
+    datos = worker._ejecutar_indexado([trabajo], [plan], cli)
+
+    assert datos["incompleto"]
+    assert (datos["validas"], datos["total"]) == (1, 2)
+    assert cli.escrituras == []
+    assert esperas == []
+    # Ni una replanificacion: el batch no se vuelve a abrir para leerlo.
+    assert len(cli.abiertos) == abiertos_antes
+    assert datos["sin_cambios"] == [str(trabajo.carpeta)]
+
+
 def test_worker_completa_aunque_el_mapa_tarde_en_ver_la_pagina_verde(tmp_path):
     """Recién verificado, el mapa del batch puede traer aún una amarilla.
 

@@ -170,36 +170,45 @@ def confirmadas_sin_cambios(cliente, manifiesto) -> Dict[int, object]:
     return iguales
 
 
-# ── el numero que REVISAR deja a quien revisa ──────────────────────
+# ── la pagina suelta que AirVault tiene con otro numero ────────────
 #
-# Por cada pagina de REVISAR que AirVault tenga con otro numero de bitacora
-# hacen falta estas coincidencias en el resto del batch para tomarla por
-# una pagina suelta y no por un PDF corrido, y nunca menos del minimo.
+# Por cada pagina que AirVault tenga con otro numero de bitacora hacen falta
+# estas coincidencias en el resto del batch para tomarla por una pagina
+# suelta y no por un PDF corrido, y nunca menos del minimo.
 COINCIDENCIAS_POR_LOG_DISTINTO = 10
 MINIMO_DE_COINCIDENCIAS = 3
 
 
-def logs_por_revisar(manifiesto: Manifiesto, remotas: Mapping[int, object]) -> Dict[int, str]:
-    """Bitacoras de REVISAR que AirVault tiene con otro numero, por ``seq``.
+def logs_sueltos(manifiesto: Manifiesto, remotas: Mapping[int, object]) -> Dict[int, str]:
+    """Paginas sueltas que AirVault tiene con otro numero, por ``seq``.
 
-    AirVault lee la letra por su cuenta y quien revisa corrige lo que ve,
-    asi que en un batch REVISAR puede haber una pagina con un Log Page
-    Number distinto al del manifiesto. El plan no la escribe (no se pisa un
-    numero que puede ser el bueno) y, como nunca iba a coincidir, la
-    verificacion la daba por pendiente para siempre: el batch volvia a
-    «Listo para indexar» en cada revision, se releia y se reescribia sin
-    cambiar nada, cientos de veces por una sola pagina.
+    AirVault lee la letra por su cuenta al recibir el archivo, y quien
+    revisa corrige lo que ve, asi que una pagina puede traer un Log Page
+    Number distinto al del manifiesto. La guarda de alineacion la tomaba
+    por la prueba de un PDF subido en otro orden y no la escribia: era la
+    unica pagina amarilla del batch y, como nunca iba a coincidir, el
+    indexado se repetia entero en cada revision sin cambiar nada.
 
-    Esa pagina es justo lo que REVISAR deja a una persona. Se reconoce
-    cuando el resto del batch coincide con el manifiesto, que es lo que
-    distingue una pagina suelta de un PDF subido en otro orden, y cuando el
-    numero remoto no es el de otra bitacora de este mismo batch.
+    Un PDF en otro orden no deja una pagina distinta: las deja casi todas.
+    Aqui se reconoce la suelta porque el resto del batch coincide con el
+    manifiesto. Con ella se hacen dos cosas distintas segun como este en
+    AirVault. Si no esta en verde, nadie la ha dado por buena: el plan
+    escribe los datos del manifiesto como en cualquier otra pagina. Si esta
+    en verde, alguien la valido con ese numero: no se pisa, y en un batch
+    REVISAR la verificacion la cuenta como dejada a quien revisa.
+
+    Si el numero remoto es el de otra bitacora de este mismo batch hay dos
+    casos. Si esa otra bitacora tiene en su propia pagina ese mismo numero,
+    AirVault leyo el numero dos veces y sigue siendo una pagina suelta. Si
+    no, son dos paginas con los numeros cruzados, que es un PDF en otro
+    orden, y no se deja pasar.
     """
     propios = {
         registro.log_number for registro in manifiesto.bitacoras()
         if registro.log_number
     }
     coinciden = 0
+    en_su_pagina: set[str] = set()
     distintas: Dict[int, str] = {}
     for registro in manifiesto.bitacoras():
         valores = getattr(remotas.get(registro.seq), "valores", None)
@@ -210,6 +219,7 @@ def logs_por_revisar(manifiesto: Manifiesto, remotas: Mapping[int, object]) -> D
             continue
         if log_remoto == normalizar_log_number(registro.log_number):
             coinciden += 1
+            en_su_pagina.add(log_remoto)
         else:
             distintas[registro.seq] = log_remoto
     if (
@@ -220,7 +230,7 @@ def logs_por_revisar(manifiesto: Manifiesto, remotas: Mapping[int, object]) -> D
         return {}
     return {
         seq: log_remoto for seq, log_remoto in distintas.items()
-        if log_remoto not in propios
+        if log_remoto not in propios or log_remoto in en_su_pagina
     }
 
 
@@ -445,6 +455,10 @@ class Indexador:
             registros, matriculas_por_libro(remotas.values())
         ))
 
+        # La pagina suelta que AirVault tiene con otro numero y que nadie ha
+        # dado por buena se escribe como las demas (ver `logs_sueltos`).
+        sueltas = logs_sueltos(self.manifiesto, remotas)
+
         plan = Plan(batch_id=batch_id)
         por_seq: Dict[int, List[Aviso]] = {}
         for aviso in globales:
@@ -493,9 +507,20 @@ class Indexador:
             else:
                 from app.airvault.ecn import conservar_razones
                 valores = conservar_razones(valores, remota.valores)
+                suelta = (
+                    registro.seq in sueltas and remota.estado != ESTADO_VALIDO
+                )
+                if suelta:
+                    logger.info(
+                        "Batch {}: la pagina {} tiene en AirVault el log {} y "
+                        "el manifiesto {}; el resto del batch coincide, asi "
+                        "que se escribe la del manifiesto",
+                        batch_id, pagina, sueltas[registro.seq],
+                        registro.log_number,
+                    )
                 avisos.extend(verificar_alineacion(
-                    registro, remota.valores, self.permitir_log_distinto,
-                    remota.estado,
+                    registro, remota.valores,
+                    self.permitir_log_distinto or suelta, remota.estado,
                 ))
                 work_location = str(
                     remota.valores.get(CAMPO_WORK_LOCATION, "") or ""
@@ -1038,23 +1063,27 @@ def _con_relecturas_varias(cliente, revisores, esperas=(), dormir=None):
         and (numero, grupo[pagina].seq) not in revisiones
     ]
     leer_todas(tareas, relectura=False)
-    # En REVISAR, la pagina suelta que AirVault tiene con otro numero de
-    # bitacora no se escribe ni se espera: queda para quien revisa. Va antes
-    # de las relecturas porque releerla no la iba a cambiar.
+    # En REVISAR, la pagina suelta que alguien valido en AirVault con otro
+    # numero de bitacora no se escribe ni se espera: queda para quien
+    # revisa. Va antes de las relecturas porque releerla no la iba a cambiar.
     for numero, (manifiesto, _, _) in enumerate(revisores):
         if not getattr(manifiesto, "solo_subir", False):
             continue
-        sueltas = logs_por_revisar(manifiesto, lecturas[numero])
+        sueltas = logs_sueltos(manifiesto, lecturas[numero])
         for registro in registros[numero]:
             if (
                 registro.seq not in sueltas
                 or revisiones[numero, registro.seq].valida
+                # La que no esta en verde no se deja: el plan la escribe.
+                or getattr(lecturas[numero].get(registro.seq), "estado", None)
+                != ESTADO_VALIDO
             ):
                 continue
             revisiones[numero, registro.seq] = _Revision(True)
             logger.info(
-                "Batch {}: la pagina {} tiene en AirVault el log {} y el "
-                "manifiesto {}; no se escribe y queda para revision humana",
+                "Batch {}: la pagina {} esta en verde en AirVault con el log "
+                "{} y el manifiesto trae {}; no se pisa y queda para "
+                "revision humana",
                 manifiesto.batch_id, registro.pagina_batch or registro.seq,
                 sueltas[registro.seq], registro.log_number,
             )

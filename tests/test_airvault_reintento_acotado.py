@@ -260,19 +260,23 @@ def test_la_verificacion_conjunta_lee_solo_lo_pendiente_de_cada_batch():
     assert avances[-1] == (4, 4)
 
 
-# ── la pagina de REVISAR que AirVault tiene con otro numero ────────
+# ── la pagina suelta que AirVault tiene con otro numero ────────────
 
 
-def revisar_con_un_log_distinto(cuantos: int = 12, distinta: int = 5):
-    """Un batch REVISAR escrito, con una pagina que trae otro numero."""
-    m = manifiesto(cuantos, revisar=True)
+def con_un_log_distinto(cuantos: int = 12, distinta: int = 5,
+                        revisar: bool = True, estado: int = 3):
+    """Un batch escrito, con una pagina que AirVault trae con otro numero.
+
+    En la primera pasada las demas paginas estan vacias en AirVault, asi
+    que no hay con que saber si es una suelta o un PDF corrido: se bloquea.
+    """
+    m = manifiesto(cuantos, revisar=revisar)
     for registro in m.registros:
         registro.log_number = f"22873{registro.seq:02d}"
     cliente = ClienteConMapa(
         page_count=cuantos,
         paginas={distinta: pagina(
-            distinta, estado=ESTADO_NECESITA_CORRECCION,
-            valores={CAMPO_LOG_NUMBER: "2297399"},
+            distinta, estado=estado, valores={CAMPO_LOG_NUMBER: "2297399"},
         )},
     )
     indexador = Indexador(cliente, m, PICKLIST, dormir=lambda _s: None)
@@ -281,7 +285,19 @@ def revisar_con_un_log_distinto(cuantos: int = 12, distinta: int = 5):
     return m, cliente, plan
 
 
-def test_revisar_no_escribe_la_pagina_que_trae_otro_numero():
+def revisar_con_un_log_distinto(cuantos: int = 12, distinta: int = 5):
+    return con_un_log_distinto(cuantos, distinta)
+
+
+def reintentar(m, cliente):
+    """La segunda pasada, ya con el resto del batch escrito."""
+    indexador = Indexador(cliente, m, PICKLIST, dormir=lambda _s: None)
+    plan = indexador.planificar(len(m.registros))
+    indexador.aplicar(plan, detener_en_error=False)
+    return plan
+
+
+def test_sin_el_resto_del_batch_la_pagina_con_otro_numero_no_se_escribe():
     _m, cliente, plan = revisar_con_un_log_distinto()
 
     assert [p.seq for p in plan.bloqueadas] == [5]
@@ -289,15 +305,40 @@ def test_revisar_no_escribe_la_pagina_que_trae_otro_numero():
     assert cliente.paginas[5].valores[CAMPO_LOG_NUMBER] == "2297399"
 
 
-def test_revisar_termina_aunque_una_pagina_traiga_otro_numero():
-    """Esa pagina queda para quien revisa: no deja el batch sin confirmar."""
-    m, cliente, _plan = revisar_con_un_log_distinto()
+def test_la_pagina_amarilla_suelta_se_escribe_cuando_el_resto_coincide():
+    """Era la unica amarilla del batch y nunca se llegaba a escribir.
+
+    AirVault leyo otro numero en esa pagina y nadie la dio por buena. Con
+    el resto del batch coincidiendo no es un PDF corrido: se escribe lo del
+    manifiesto y el batch termina.
+    """
+    for revisar in (True, False):
+        m, cliente, _plan = con_un_log_distinto(revisar=revisar)
+        cliente.escrituras.clear()
+
+        plan = reintentar(m, cliente)
+
+        assert [p.seq for p in plan.escribibles if not p.ya_indexada] == [5]
+        assert [escritura[0] for escritura in cliente.escrituras] == [5]
+        assert cliente.paginas[5].valores[CAMPO_LOG_NUMBER] == "2287305"
+        verificar = verificar_revision if revisar else verificar_lote
+        assert verificar(cliente, m) == (12, 12, [])
+
+
+def test_la_pagina_que_alguien_valido_con_otro_numero_no_se_pisa():
+    """En verde la dejo una persona: se respeta, y REVISAR termina igual."""
+    m, cliente, _plan = con_un_log_distinto(estado=0)
+    cliente.escrituras.clear()
     esperas = []
 
+    plan = reintentar(m, cliente)
+
+    assert cliente.escrituras == []
+    assert [p.seq for p in plan.bloqueadas if not p.ya_indexada] == [5]
+    assert cliente.paginas[5].valores[CAMPO_LOG_NUMBER] == "2297399"
     resultado = verificar_revision(
         cliente, m, esperas=(5, 15), dormir=esperas.append,
     )
-
     assert resultado == (12, 12, [])
     # Releerla no la iba a cambiar: no se espera por ella.
     assert esperas == []
@@ -322,26 +363,44 @@ def test_un_batch_revisar_corrido_no_se_da_por_terminado():
     assert len(problemas) == 6
 
 
-def test_el_numero_de_otra_bitacora_del_batch_no_se_deja_pasar():
-    """Una pagina con el log de su vecina es un PDF en otro orden."""
+def test_dos_paginas_con_los_numeros_cruzados_no_se_dejan_pasar():
+    """Cada una con el log de la otra: es un PDF en otro orden."""
+    m, cliente, _plan = revisar_con_un_log_distinto(cuantos=24)
+    for numero, vecina in ((5, 6), (6, 5)):
+        cliente.paginas[numero] = pagina(
+            numero, estado=ESTADO_NECESITA_CORRECCION,
+            valores={CAMPO_LOG_NUMBER: m.registros[vecina - 1].log_number},
+        )
+
+    assert verificar_revision(cliente, m)[:2] == (22, 24)
+
+
+def test_un_numero_que_airvault_leyo_dos_veces_tambien_es_una_suelta():
+    """El numero remoto es el de otra bitacora que si lo tiene en su pagina.
+
+    No hay paginas cruzadas: AirVault leyo el mismo numero en dos paginas.
+    Sigue siendo una pagina suelta, y dejarla sin escribir hacia repetir el
+    indexado del batch entero en cada revision.
+    """
     m, cliente, _plan = revisar_con_un_log_distinto()
     cliente.paginas[5] = pagina(
         5, estado=ESTADO_NECESITA_CORRECCION,
         valores={CAMPO_LOG_NUMBER: m.registros[5].log_number},
     )
+    cliente.escrituras.clear()
 
-    assert verificar_revision(cliente, m)[:2] == (11, 12)
+    reintentar(m, cliente)
+
+    assert [escritura[0] for escritura in cliente.escrituras] == [5]
+    assert verificar_revision(cliente, m) == (12, 12, [])
 
 
-def test_en_el_batch_automatico_otro_numero_sigue_sin_confirmar():
-    m = manifiesto(12)
-    for registro in m.registros:
-        registro.log_number = f"22873{registro.seq:02d}"
-    cliente = ClienteConMapa(page_count=12, paginas={5: pagina(
-        5, estado=ESTADO_NECESITA_CORRECCION,
-        valores={CAMPO_LOG_NUMBER: "2297399"},
-    )})
-    indexador = Indexador(cliente, m, PICKLIST, dormir=lambda _s: None)
-    indexador.aplicar(indexador.planificar(12), detener_en_error=False)
+def test_en_el_batch_automatico_la_validada_con_otro_numero_no_se_confirma():
+    """Alguien la dejo en verde con otro numero: ni se pisa ni se da por buena."""
+    m, cliente, _plan = con_un_log_distinto(revisar=False, estado=0)
+    cliente.escrituras.clear()
 
+    reintentar(m, cliente)
+
+    assert cliente.escrituras == []
     assert verificar_lote(cliente, m)[:2] == (11, 12)

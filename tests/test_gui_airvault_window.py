@@ -692,11 +692,38 @@ def test_un_amarillo_agotado_se_reintenta_espaciado_y_con_tope(ventana):
         # Recién intentado, el siguiente espera otra vez.
         assert ventana._listos_automaticos() == []
 
-    # Gastado el tope, se sigue vigilando pero ya no se reescribe solo.
+    # Gastado el tope ya no se reescribe solo, y tampoco sostiene la espera:
+    # no queda nada que AirVault vaya a cambiar ni que el programa haga.
     hechos, _ = ventana._reintentos_espaciados["amarillo"]
     ventana._reintentos_espaciados["amarillo"] = (hechos, vencido)
     assert ventana._listos_automaticos() == []
+    assert not ventana._falta_esperar()
+
+
+def test_el_intento_que_no_escribe_nada_no_se_repite_en_cada_vuelta(ventana):
+    """Se repetia el indexado entero, con sus esperas, sin poder cambiar nada.
+
+    Lo que le falta a ese batch es lo que el plan no escribe. Reintentarlo
+    en cada vuelta del reloj gastaba la espera en releer la misma pagina.
+    """
+    from app.airvault.flujo import INCOMPLETO
+
+    amarillo = parte(INCOMPLETO, "Amarillo", carpeta="amarillo")
+    ventana._trabajos = [amarillo.trabajo]
+    ventana._estados = [amarillo]
+    ventana._estado["planes"] = {"amarillo": (PlanFalso(), None)}
+    assert ventana._listos_automaticos() == [amarillo.trabajo]
     assert ventana._falta_esperar()
+
+    ventana._agotar_reintentos(["amarillo"])
+
+    assert ventana._listos_automaticos() == []
+    assert ventana._amarillos_en_espera() == {"amarillo"}
+    assert not ventana._falta_esperar()
+    # Y una revisión posterior no le devuelve los reintentos.
+    ventana._programar_reconfirmaciones(["amarillo"])
+    ventana._descontar_reconfirmaciones([amarillo])
+    assert ventana._listos_automaticos() == []
 
 
 def test_mientras_reescribir_sirva_se_sigue_reintentando(ventana):
