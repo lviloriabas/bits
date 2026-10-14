@@ -141,8 +141,12 @@ def papel_de_estado(estado: str, indexando: bool = False) -> Optional[str]:
         return "STATUS_ERROR"
     # El indexado de un batch REVISAR va en el mismo acento que los demás:
     # el estado es el mismo, y que es REVISAR ya lo dice su nombre.
-    if indexando or estado in (INDEXADO, INCOMPLETO):
+    if indexando or estado == INDEXADO:
         return "acento"
+    if estado == INCOMPLETO:
+        # El mismo ámbar de las páginas que le quedan en amarillo. Mientras
+        # se le escribe dice «Indexando» y va en el acento, como los demás.
+        return "STATUS_WARNING"
     if estado in (SIN_SUBIR, CANCELADO, POSIBLE_DUPLICADO):
         # Gris es lo que la cola no va a mover por su cuenta: el archivo que
         # Quick Upload aún no aceptó, el batch que alguien sacó de la cola y

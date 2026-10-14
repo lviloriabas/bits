@@ -1017,6 +1017,7 @@ def test_gris_solo_significa_sin_subir_y_subido_queda_blanco(ventana):
 def test_azul_hasta_completar_y_verde_al_terminar(ventana):
     from app.airvault.flujo import COMPLETADO, INDEXADO, INCOMPLETO, LISTO
     from app.gui.airvault_window import color_indexando
+    from app.gui.tokens import paleta
 
     activo = parte(LISTO)
     terminado = parte(COMPLETADO, carpeta="terminado")
@@ -1027,10 +1028,13 @@ def test_azul_hasta_completar_y_verde_al_terminar(ventana):
         assert ventana.lotes.item(1, columna).foreground().color() == QColor(color_indexado())
     ventana._al_batch_indexando(activo.trabajo, False)
     assert ventana.lotes.item(0, 0).foreground().style() is Qt.BrushStyle.NoBrush
-    for estado in (INDEXADO, INCOMPLETO):
+    # El incompleto va en ámbar, como las páginas que le quedan en amarillo.
+    for estado, color in (
+        (INDEXADO, color_indexando()), (INCOMPLETO, paleta().STATUS_WARNING),
+    ):
         ventana._estados = [parte(estado)]
         ventana._pintar_lotes()
-        assert ventana.lotes.item(0, 0).foreground().color() == QColor(color_indexando())
+        assert ventana.lotes.item(0, 0).foreground().color() == QColor(color)
 
 
 def test_cambiar_tema_repinta_estados_sin_perder_las_filas(ventana, app, monkeypatch):
@@ -2376,6 +2380,7 @@ def test_la_leyenda_explica_cada_estado_con_el_color_de_la_cola(ventana):
     papeles = {rotulo: papel for rotulo, papel, _texto in filas}
     assert papeles["Confirmado en Web Search"] == "STATUS_OK"
     assert papeles["No encontrado en AirVault"] == "STATUS_ERROR"
+    assert papeles["Indexado incompleto"] == "STATUS_WARNING"
 
     html = leyenda_de_estados_html()
     assert ventana.leyenda_estados.texto() == html
@@ -2383,7 +2388,8 @@ def test_la_leyenda_explica_cada_estado_con_el_color_de_la_cola(ventana):
     assert f"color: {tonos.STATUS_OK};" in html.split("Completado")[0]
     assert f"color: {tonos.TEXT_TERTIARY};" in html.split("Sin subir")[0]
     assert f"color: {link_text_color()};" in html.split("Indexando")[0]
-    assert f"color: {tonos.STATUS_WARNING};" not in html
+    assert f"color: {tonos.STATUS_WARNING};" in html.split("Indexado incompleto")[0]
+    assert html.count(f"color: {tonos.STATUS_WARNING};") == 1
     assert "REVISAR" not in html
     assert "«Complete»" in html
     assert "Web Index" in html
