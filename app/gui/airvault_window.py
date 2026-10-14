@@ -122,6 +122,31 @@ def abierto_por_otro(parte) -> str:
     return str(getattr(lote, "bloqueado_por", "") or "").strip()
 
 
+def se_sabe_el_usuario(parte) -> bool:
+    """Si el programa ya averiguó cuál es su usuario en AirVault.
+
+    Sin saberlo no puede decir que un batch abierto es de otro usuario:
+    solo que está abierto y por quién.
+    """
+    from app.airvault import identidad
+    from app.airvault.flujo import carpeta_del_libro
+
+    try:
+        return identidad.conocida(carpeta_del_libro(parte.trabajo)) is not None
+    except Exception:  # noqa: BLE001 - sin carpeta no hay nada guardado
+        return False
+
+
+def marca_de_abierto(parte) -> str:
+    """Lo que la cola añade al estado de un batch que alguien tiene abierto."""
+    if not abierto_por_otro(parte):
+        return ""
+    return (
+        "abierto por otro usuario" if se_sabe_el_usuario(parte)
+        else "abierto en AirVault"
+    )
+
+
 def papel_de_estado(estado: str, indexando: bool = False) -> Optional[str]:
     """El color con el que la cola escribe un estado, por su papel en el tema.
 
@@ -6291,7 +6316,7 @@ class AirVaultWindow(QDialog):
             # leyenda ni sale de `papel_de_estado`.
             de_otro = "" if indexando else abierto_por_otro(parte)
             if de_otro and parte.estado != TOMADO:
-                estado += ", abierto por otro usuario"
+                estado += f", {marca_de_abierto(parte)}"
             celdas = (parte.batch_id, nombre, str(esperadas), estado)
             papel = (
                 "STATUS_WARNING" if de_otro
@@ -6314,9 +6339,14 @@ class AirVaultWindow(QDialog):
                 if columna == 3:
                     ayuda = self._ayuda_de_estado(parte, confirmado, revision)
                     if de_otro:
+                        sin_saber = (
+                            "" if se_sabe_el_usuario(parte) else
+                            " No se pudo comprobar si es su propio usuario: "
+                            "hace falta otro batch libre en la cola."
+                        )
                         ayuda = (
                             f"Lo tiene abierto {de_otro} en AirVault. No se "
-                            "toca hasta que lo cierre.\n" + ayuda
+                            f"toca hasta que lo cierre.{sin_saber}\n" + ayuda
                         ).strip()
                     item.setToolTip(ayuda)
                 if papel:
@@ -8247,7 +8277,7 @@ class AirVaultWindow(QDialog):
                 return parte.titulo
             if parte.estado == TOMADO:
                 return f"{parte.titulo} ({quien})"
-            return f"{parte.titulo}, abierto por otro usuario ({quien})"
+            return f"{parte.titulo}, {marca_de_abierto(parte)} ({quien})"
 
         # El batch abierto por otro usuario no se toca, y sin decirlo la
         # espera se leía como un proceso parado con trabajo por hacer.
@@ -8275,11 +8305,14 @@ class AirVaultWindow(QDialog):
         # Lo que alguien tiene abierto en AirVault va en su propio renglón:
         # está en Web Index, pero no se indexa hasta que lo cierren.
         clave_abiertos = "abiertos"
+        abiertos = [p for p in grupos.get(EN_WEB_INDEX, ()) if abierto_por(p)]
         titulos[clave_abiertos] = (
             "En Web Index, abiertos por otro usuario; no se tocan hasta que "
             "los cierre"
+            if all(se_sabe_el_usuario(p) for p in abiertos) else
+            "En Web Index, abiertos en AirVault; no se pudo comprobar si es "
+            "su propio usuario y no se tocan"
         )
-        abiertos = [p for p in grupos.get(EN_WEB_INDEX, ()) if abierto_por(p)]
         if abiertos:
             libres = [p for p in grupos[EN_WEB_INDEX] if not abierto_por(p)]
             reparto = {}

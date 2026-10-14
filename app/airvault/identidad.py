@@ -102,6 +102,11 @@ def guardar(carpeta: Path | str, identidad: Identidad) -> None:
         logger.warning("No se pudo guardar el usuario de AirVault: {}", exc)
 
 
+def averiguada(carpeta: Path | str) -> bool:
+    """Si esta sesion ya averiguo el usuario preguntando a AirVault."""
+    return str(carpeta) in _DE_ESTA_SESION
+
+
 def conocida(carpeta: Path | str) -> Optional[Identidad]:
     """Lo que se sabe sin preguntar nada a AirVault."""
     return _DE_ESTA_SESION.get(str(carpeta)) or cargar(carpeta)
@@ -125,14 +130,38 @@ def averiguar(
 ) -> Optional[Identidad]:
     """Toma un batch libre, lee quien figura como dueno y lo suelta.
 
-    ``candidatos`` son pares ``(batch_id, nombre)`` de la propia cola. Solo
-    se toma uno que la cola muestre libre: abrir uno ocupado deja la
+    ``candidatos`` son pares ``(batch_id, nombre)`` de los batches propios.
+    Solo se toma uno que la cola muestre libre: abrir uno ocupado deja la
     peticion colgada. ``None`` si no hay ninguno libre o no se pudo leer.
+
+    Se lee la cola entera una vez para saber cuales siguen en ella y estan
+    libres. Probar los primeros de la lista sin mirar eso no servia: los
+    mas antiguos ya habian salido de la cola y se agotaban los intentos
+    antes de llegar a uno que si estaba.
     """
-    for batch_id, nombre in list(candidatos)[:CANDIDATOS_MAXIMOS]:
-        fila = _fila(cliente, batch_id, nombre)
-        if fila is None or str(fila.bloqueado_por or "").strip():
-            continue
+    propios = {
+        str(batch_id).strip().upper(): nombre for batch_id, nombre in candidatos
+    }
+    if not propios:
+        logger.info(
+            "No se pudo averiguar el usuario de AirVault: no hay otro batch "
+            "propio con que comprobarlo"
+        )
+        return None
+    libres = [
+        fila for fila in cliente.listar_lotes()
+        if str(fila.batch_id).strip().upper() in propios
+        and not str(fila.bloqueado_por or "").strip()
+    ]
+    if not libres:
+        logger.info(
+            "No se pudo averiguar el usuario de AirVault: ninguno de los {} "
+            "batches propios esta libre en la cola", len(propios),
+        )
+        return None
+    for libre in libres[:CANDIDATOS_MAXIMOS]:
+        batch_id = libre.batch_id
+        nombre = propios[str(batch_id).strip().upper()]
         dueno = None
         try:
             cliente.abrir_lote(batch_id)
@@ -140,8 +169,8 @@ def averiguar(
         except _FALLOS_DE_CAMINO:
             raise
         except Exception as exc:  # noqa: BLE001 - se prueba con otro
-            logger.debug("No se pudo tomar el batch {} para saber el usuario: {}",
-                         batch_id, exc)
+            logger.info("No se pudo tomar el batch {} para saber el usuario "
+                        "de AirVault: {}", batch_id, exc)
         finally:
             # Se suelta siempre: la apertura pudo tomar el batch aunque
             # despues fallara.
@@ -155,6 +184,10 @@ def averiguar(
         quien = str(getattr(dueno, "bloqueado_por", "") or "").strip()
         if quien:
             return Identidad(_id_util(getattr(dueno, "bloqueado_por_id", "")), quien)
+        logger.info(
+            "El batch {} se tomo para saber el usuario de AirVault, pero la "
+            "cola no dijo quien lo tenia", batch_id,
+        )
     return None
 
 

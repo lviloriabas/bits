@@ -2765,15 +2765,21 @@ def test_la_bitacora_lista_cada_batch_en_su_propia_linea(ventana):
     assert not lineas[1].startswith(" ")
 
 
-def test_la_bitacora_dice_que_batch_esta_abierto_en_airvault(ventana):
+def test_la_bitacora_dice_que_batch_esta_abierto_en_airvault(ventana, monkeypatch):
     """El batch abierto no se toca: sin decirlo, la espera parecia un fallo.
 
     Se anunciaba «se indexan y completan» para batches que AirVault tenia
     tomados, y despues el proceso esperaba sin indexar ninguno.
     """
+    from app.airvault import identidad
     from app.airvault.client import ResumenLote
     from app.airvault.flujo import INCOMPLETO, LISTO
 
+    # El programa ya sabe quien es su usuario, y no es quien lo tiene.
+    monkeypatch.setattr(
+        identidad, "conocida",
+        lambda _carpeta: identidad.Identidad("77", "Luis Viloria"),
+    )
     tomado = ResumenLote(
         batch_id="003TI2", nombre="DP | BITS REVISAR", paginas=78, repo_id=1,
         repositorio="", paso="", bloqueado_por="Diego Vargas", recibido="",
@@ -2822,6 +2828,39 @@ def test_la_bitacora_dice_que_batch_esta_abierto_en_airvault(ventana):
     libre = tarjetas["DP | BITS -2"]
     assert "abierto" not in libre.text()
     assert libre.foreground().color().name() != paleta().STATUS_WARNING.lower()
+
+
+def test_sin_saber_el_usuario_no_se_dice_que_el_batch_es_de_otro(ventana, monkeypatch):
+    """Decia «otro usuario» de batches que tenia abiertos la misma persona.
+
+    Sin haber averiguado cual es su usuario, el programa solo sabe que el
+    batch esta abierto y por quien.
+    """
+    from app.airvault import identidad
+    from app.airvault.client import ResumenLote
+    from app.airvault.flujo import INCOMPLETO
+
+    monkeypatch.setattr(identidad, "conocida", lambda _carpeta: None)
+    tomado = ResumenLote(
+        batch_id="003TI2", nombre="DP | BITS REVISAR", paginas=78, repo_id=1,
+        repositorio="", paso="", bloqueado_por="Luis Viloria", recibido="",
+    )
+    ventana._al_comprobar({
+        "estados": [
+            parte(INCOMPLETO, "DP | BITS REVISAR", carpeta="job-1", lote=tomado),
+        ],
+        "planes": {}, "partes": [],
+    })
+
+    tarjeta = ventana.lotes.item(0, 3)
+    assert tarjeta.text() == "Indexado incompleto, abierto en AirVault"
+    assert "otro usuario" not in tarjeta.text()
+    assert "Luis Viloria" in tarjeta.toolTip()
+    assert "No se pudo comprobar" in tarjeta.toolTip()
+    registro = [
+        ventana.bitacora.item(i).text() for i in range(ventana.bitacora.count())
+    ]
+    assert not any("otro usuario" in texto for texto in registro)
 
 
 def test_un_mensaje_de_error_se_muestra_sin_ayuda_al_pasar_el_cursor(ventana):

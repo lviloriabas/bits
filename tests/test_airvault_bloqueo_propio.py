@@ -99,6 +99,43 @@ def test_un_batch_abierto_a_nombre_propio_se_suelta_y_se_sigue(tmp_path):
     assert identidad.cargar(tmp_path) == identidad.Identidad(*YO)
 
 
+def test_el_usuario_se_averigua_aunque_los_primeros_batches_ya_no_esten(tmp_path):
+    """Los mas antiguos salen de la cola al completarse.
+
+    Se probaban solo los tres primeros de la lista, sin mirar si seguian en
+    la cola: con varias ejecuciones anteriores se agotaban los intentos, el
+    usuario no se averiguaba nunca y los batches abiertos por la misma
+    persona se quedaban sin soltar, marcados como de otro usuario.
+    """
+    (_a, b), cliente = dos_trabajos(tmp_path)
+    candidatos = [
+        ("003VIEJO1", "DP | YA COMPLETADO 1"),
+        ("003VIEJO2", "DP | YA COMPLETADO 2"),
+        ("003VIEJO3", "DP | YA COMPLETADO 3"),
+        ("003VIEJO4", "DP | YA COMPLETADO 4"),
+        (b.manifiesto.batch_id, b.manifiesto.nombre_batch),
+    ]
+
+    assert identidad.averiguar(cliente, candidatos) == identidad.Identidad(*YO)
+    assert cliente._fila("003BBB").bloqueado_por == ""
+
+
+def test_el_usuario_se_averigua_con_un_batch_que_no_viene_en_la_revision(tmp_path):
+    """La revision puede traer solo lo pendiente, y todo eso estar abierto.
+
+    Cualquier batch de la instalacion que siga libre en la cola sirve para
+    saber quien es el usuario, aunque no venga en la tanda que se revisa.
+    """
+    (a, _b), cliente = dos_trabajos(tmp_path)
+    cliente._poner("003AAA", YO)
+
+    partes = comprobar_partes([a], cliente)
+
+    assert cliente._fila("003AAA").bloqueado_por == ""
+    assert partes[0].estado == LISTO
+    assert identidad.cargar(tmp_path) == identidad.Identidad(*YO)
+
+
 def test_un_batch_abierto_por_otro_usuario_no_se_toca(tmp_path):
     (a, b), cliente = dos_trabajos(tmp_path)
     cliente._poner("003AAA", OTRO)

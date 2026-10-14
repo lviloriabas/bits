@@ -6652,10 +6652,26 @@ def _soltar_si_es_propio(
     """
     from app.airvault.indexer import FALLOS_DE_CAMINO
 
-    quien = identidad_airvault.del_usuario(
-        cliente, carpeta_del_libro(trabajo),
-        _candidatos_de_identidad(trabajos, salvo=trabajo),
-    )
+    carpeta = carpeta_del_libro(trabajo)
+    candidatos = _candidatos_de_identidad(trabajos, salvo=trabajo)
+    if not identidad_airvault.averiguada(carpeta):
+        # La revision puede traer solo los batches pendientes, y si todos
+        # estan abiertos no queda ninguno libre con que averiguar el
+        # usuario. Sirve cualquier batch de la instalacion que siga en la
+        # cola, tambien los de otras ejecuciones y los ya indexados.
+        try:
+            resto = cargar_todos_trabajos(trabajo.config, carpeta)
+        except Exception as exc:  # noqa: BLE001 - quedan los de la tanda
+            logger.debug("No se pudieron leer los demas batches locales: {}", exc)
+            resto = []
+        propio = str(trabajo.manifiesto.batch_id or "").strip().upper()
+        vistos = {batch_id.strip().upper() for batch_id, _nombre in candidatos}
+        vistos.add(propio)
+        for batch_id, nombre in _candidatos_de_identidad(resto):
+            if batch_id.strip().upper() not in vistos:
+                vistos.add(batch_id.strip().upper())
+                candidatos.append((batch_id, nombre))
+    quien = identidad_airvault.del_usuario(cliente, carpeta, candidatos)
     if quien is None or not quien.tiene(lote):
         return lote
     try:
