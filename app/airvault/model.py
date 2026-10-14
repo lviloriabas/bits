@@ -118,6 +118,11 @@ class Registro(BaseModel):
     # entregas antiguas que no detallaban el motivo.
     revision_pendiente: Optional[bool] = None
 
+    # El numero que se habia leido de la pagina cuando la comprobacion con
+    # AirVault dio por bueno el suyo (ver ``arbitrar_numero`` en el
+    # indexador). Vacio es lo normal: ``log_number`` es el que se leyo.
+    log_leido: str = ""
+
     pagina_batch: Optional[int] = None
     estado: EstadoRegistro = EstadoRegistro.PENDIENTE
     avisos: List[str] = Field(default_factory=list)

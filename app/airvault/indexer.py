@@ -47,9 +47,10 @@ from app.airvault.guards import (
 )
 from app.airvault.mapping import (
     ResolutorFlota, fecha_airvault, fecha_desde_airvault,
-    normalizar_log_number, valores_de_indice,
+    normalizar_log_number, normalizar_matricula, valores_de_indice,
 )
 from app.airvault.model import EstadoRegistro, Manifiesto, Registro
+from app.validation.book_memory import clave_de_libro
 from app.airvault.session import (
     ErrorDeAirVault,
     ErrorDeConexion,
@@ -191,11 +192,8 @@ def logs_sueltos(manifiesto: Manifiesto, remotas: Mapping[int, object]) -> Dict[
 
     Un PDF en otro orden no deja una pagina distinta: las deja casi todas.
     Aqui se reconoce la suelta porque el resto del batch coincide con el
-    manifiesto. Con ella se hacen dos cosas distintas segun como este en
-    AirVault. Si no esta en verde, nadie la ha dado por buena: el plan
-    escribe los datos del manifiesto como en cualquier otra pagina. Si esta
-    en verde, alguien la valido con ese numero: no se pisa, y en un batch
-    REVISAR la verificacion la cuenta como dejada a quien revisa.
+    manifiesto. Que sea suelta solo dice que el batch esta bien alineado;
+    cual de los dos numeros es el bueno lo decide :func:`arbitrar_numero`.
 
     Si el numero remoto es el de otra bitacora de este mismo batch hay dos
     casos. Si esa otra bitacora tiene en su propia pagina ese mismo numero,
@@ -232,6 +230,81 @@ def logs_sueltos(manifiesto: Manifiesto, remotas: Mapping[int, object]) -> Dict[
         seq: log_remoto for seq, log_remoto in distintas.items()
         if log_remoto not in propios or log_remoto in en_su_pagina
     }
+
+
+# Quien tiene el numero bueno de una pagina suelta.
+GANA_MANIFIESTO = "manifiesto"
+GANA_AIRVAULT = "airvault"
+
+
+def arbitrar_numero(
+    manifiesto: Manifiesto, remotas: Mapping[int, object],
+    registro: Registro, log_remoto: str, en_disputa: Mapping[int, str],
+) -> tuple[str, str]:
+    """Cual de los dos numeros de bitacora es el de esa pagina, y por que.
+
+    La pagina trae un numero en el manifiesto y otro en AirVault, y los dos
+    salen de leer la misma letra de mano: cualquiera puede ser el
+    equivocado. Lo que los separa es el libro. Un libro fisico tiene
+    cincuenta paginas y una sola aeronave, asi que el numero bueno cae en
+    un libro del avion de la pagina. La prueba sale del propio batch: las
+    demas bitacoras del manifiesto que estan en ese libro y las paginas
+    que AirVault ya tiene en verde.
+
+    Gana el numero cuyo libro es de ese avion cuando el del otro no lo es.
+    Si ninguno tiene esa prueba, o la tienen los dos, o la pagina no tiene
+    avion leido, no se decide: devuelve cadena vacia y la pagina se deja
+    para una persona. Un numero que ya es el de otra pagina del batch, o
+    cuyo libro es de otro avion, queda descartado.
+    """
+    avion = normalizar_matricula(registro.matricula)
+    propio = normalizar_log_number(registro.log_number)
+    remoto = normalizar_log_number(log_remoto)
+    if not avion:
+        return "", "la pagina no tiene avion leido con que comprobar el libro"
+    if not propio or not remoto:
+        return "", "uno de los dos numeros no es un numero de bitacora"
+
+    aviones: Dict[str, set] = {}
+    numeros_firmes: set = set()
+    for otro in manifiesto.bitacoras():
+        if otro.seq == registro.seq or otro.seq in en_disputa:
+            continue
+        numero = normalizar_log_number(otro.log_number)
+        if not numero:
+            continue
+        numeros_firmes.add(numero)
+        suyo = normalizar_matricula(otro.matricula)
+        if suyo:
+            aviones.setdefault(clave_de_libro(numero), set()).add(suyo)
+    for clave, suyo in matriculas_por_libro(
+        pagina for seq, pagina in remotas.items()
+        if seq != registro.seq and seq not in en_disputa
+    ).items():
+        aviones.setdefault(clave, set()).add(suyo)
+
+    def juzgar(numero: str) -> tuple[bool, bool]:
+        """Si el libro de ese numero es de este avion, y si queda descartado."""
+        del_libro = aviones.get(clave_de_libro(numero), set())
+        apoyado = del_libro == {avion}
+        descartado = bool(del_libro) and avion not in del_libro
+        return apoyado, descartado or numero in numeros_firmes
+
+    apoyo_propio, fuera_propio = juzgar(propio)
+    apoyo_remoto, fuera_remoto = juzgar(remoto)
+    vale_propio = apoyo_propio and not fuera_propio
+    vale_remoto = apoyo_remoto and not fuera_remoto
+    if vale_remoto and not vale_propio:
+        return GANA_AIRVAULT, (
+            f"el libro {clave_de_libro(remoto)} es de {avion} en este batch"
+        )
+    if vale_propio and not vale_remoto:
+        return GANA_MANIFIESTO, (
+            f"el libro {clave_de_libro(propio)} es de {avion} en este batch"
+        )
+    if vale_propio and vale_remoto:
+        return "", f"los dos libros son de {avion} en este batch"
+    return "", "ningun libro del batch dice cual de los dos es de ese avion"
 
 
 @dataclass
@@ -456,8 +529,39 @@ class Indexador:
         ))
 
         # La pagina suelta que AirVault tiene con otro numero y que nadie ha
-        # dado por buena se escribe como las demas (ver `logs_sueltos`).
+        # dado por buena: se comprueba cual de los dos es el suyo. Si es el
+        # del manifiesto se escribe como las demas; si es el de AirVault, el
+        # registro lo adopta y la pagina se escribe con ese; si no se puede
+        # decidir, sigue bloqueada y queda para una persona.
         sueltas = logs_sueltos(self.manifiesto, remotas)
+        fallos_numero: Dict[int, str] = {}
+        for registro in registros:
+            remota = remotas.get(registro.seq)
+            if (
+                registro.seq not in sueltas or remota is None
+                or remota.estado == ESTADO_VALIDO
+            ):
+                continue
+            fallos_numero[registro.seq], motivo = arbitrar_numero(
+                self.manifiesto, remotas, registro, sueltas[registro.seq],
+                sueltas,
+            )
+            logger.info(
+                "Batch {}: la pagina {} tiene en AirVault el log {} y el "
+                "manifiesto {}; {}: {}",
+                batch_id, registro.pagina_batch or registro.seq,
+                sueltas[registro.seq], registro.log_number,
+                {
+                    GANA_MANIFIESTO: "se escribe el del manifiesto",
+                    GANA_AIRVAULT: "se conserva el de AirVault",
+                }.get(fallos_numero[registro.seq],
+                      "no se decide y queda para revision humana"),
+                motivo,
+            )
+        for registro in registros:
+            if fallos_numero.get(registro.seq) == GANA_AIRVAULT:
+                registro.log_leido = registro.log_leido or registro.log_number
+                registro.log_number = sueltas[registro.seq]
 
         plan = Plan(batch_id=batch_id)
         por_seq: Dict[int, List[Aviso]] = {}
@@ -507,17 +611,7 @@ class Indexador:
             else:
                 from app.airvault.ecn import conservar_razones
                 valores = conservar_razones(valores, remota.valores)
-                suelta = (
-                    registro.seq in sueltas and remota.estado != ESTADO_VALIDO
-                )
-                if suelta:
-                    logger.info(
-                        "Batch {}: la pagina {} tiene en AirVault el log {} y "
-                        "el manifiesto {}; el resto del batch coincide, asi "
-                        "que se escribe la del manifiesto",
-                        batch_id, pagina, sueltas[registro.seq],
-                        registro.log_number,
-                    )
+                suelta = fallos_numero.get(registro.seq) == GANA_MANIFIESTO
                 avisos.extend(verificar_alineacion(
                     registro, remota.valores,
                     self.permitir_log_distinto or suelta, remota.estado,
@@ -1063,9 +1157,10 @@ def _con_relecturas_varias(cliente, revisores, esperas=(), dormir=None):
         and (numero, grupo[pagina].seq) not in revisiones
     ]
     leer_todas(tareas, relectura=False)
-    # En REVISAR, la pagina suelta que alguien valido en AirVault con otro
-    # numero de bitacora no se escribe ni se espera: queda para quien
-    # revisa. Va antes de las relecturas porque releerla no la iba a cambiar.
+    # En REVISAR, la pagina suelta con otro numero de bitacora que el plan
+    # no escribe (alguien la valido asi en AirVault, o no hay con que saber
+    # cual de los dos es el suyo) no se espera: queda para quien revisa. Va
+    # antes de las relecturas porque releerla no la iba a cambiar.
     for numero, (manifiesto, _, _) in enumerate(revisores):
         if not getattr(manifiesto, "solo_subir", False):
             continue
@@ -1074,16 +1169,21 @@ def _con_relecturas_varias(cliente, revisores, esperas=(), dormir=None):
             if (
                 registro.seq not in sueltas
                 or revisiones[numero, registro.seq].valida
-                # La que no esta en verde no se deja: el plan la escribe.
-                or getattr(lecturas[numero].get(registro.seq), "estado", None)
-                != ESTADO_VALIDO
             ):
+                continue
+            en_verde = getattr(
+                lecturas[numero].get(registro.seq), "estado", None
+            ) == ESTADO_VALIDO
+            if not en_verde and arbitrar_numero(
+                manifiesto, lecturas[numero], registro,
+                sueltas[registro.seq], sueltas,
+            )[0]:
+                # Se sabe cual es su numero: el plan la escribe.
                 continue
             revisiones[numero, registro.seq] = _Revision(True)
             logger.info(
-                "Batch {}: la pagina {} esta en verde en AirVault con el log "
-                "{} y el manifiesto trae {}; no se pisa y queda para "
-                "revision humana",
+                "Batch {}: la pagina {} tiene en AirVault el log {} y el "
+                "manifiesto {}; no se escribe y queda para revision humana",
                 manifiesto.batch_id, registro.pagina_batch or registro.seq,
                 sueltas[registro.seq], registro.log_number,
             )

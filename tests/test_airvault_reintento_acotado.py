@@ -404,3 +404,84 @@ def test_en_el_batch_automatico_la_validada_con_otro_numero_no_se_confirma():
 
     assert cliente.escrituras == []
     assert verificar_lote(cliente, m)[:2] == (11, 12)
+
+
+# ── cual de los dos numeros es el bueno ────────────────────────────
+
+
+def test_si_el_numero_bueno_es_el_de_airvault_se_conserva_el_de_airvault():
+    """El caso real: 2334732 en el manifiesto y 2324732 en AirVault.
+
+    Las demas bitacoras de ese avion en el batch son del libro de AirVault,
+    asi que el equivocado es el manifiesto. La pagina se escribe con el
+    numero de AirVault y el registro lo adopta, guardando el que se leyo.
+    """
+    for revisar in (True, False):
+        m, cliente, _plan = con_un_log_distinto(revisar=revisar)
+        # La lectura del programa cae en un libro que no es de ese avion.
+        m.registros[4].log_number = "2297305"
+        cliente.paginas[5] = pagina(
+            5, estado=ESTADO_NECESITA_CORRECCION,
+            valores={CAMPO_LOG_NUMBER: "2287305"},
+        )
+        cliente.escrituras.clear()
+
+        reintentar(m, cliente)
+
+        assert m.registros[4].log_number == "2287305"
+        assert m.registros[4].log_leido == "2297305"
+        assert [escritura[0] for escritura in cliente.escrituras] == [5]
+        assert cliente.paginas[5].valores[CAMPO_LOG_NUMBER] == "2287305"
+        verificar = verificar_revision if revisar else verificar_lote
+        assert verificar(cliente, m) == (12, 12, [])
+
+
+def test_sin_avion_leido_no_se_decide_y_la_pagina_no_se_toca():
+    """Sin avion no hay libro con que comprobar: no se escribe ninguno."""
+    m, cliente, _plan = con_un_log_distinto()
+    m.registros[4].matricula = ""
+    cliente.escrituras.clear()
+
+    plan = reintentar(m, cliente)
+
+    assert cliente.escrituras == []
+    assert [p.seq for p in plan.bloqueadas if not p.ya_indexada] == [5]
+    assert m.registros[4].log_number == "2287305"
+    assert cliente.paginas[5].valores[CAMPO_LOG_NUMBER] == "2297399"
+    # En REVISAR queda para quien revisa y el batch termina su parte.
+    assert verificar_revision(cliente, m) == (12, 12, [])
+
+
+def test_en_el_batch_automatico_la_que_no_se_decide_queda_amarilla():
+    m, cliente, _plan = con_un_log_distinto(revisar=False)
+    # Ninguna otra bitacora del batch es de su libro ni del de AirVault.
+    m.registros[4].log_number = "2291105"
+    cliente.escrituras.clear()
+
+    reintentar(m, cliente)
+
+    assert cliente.escrituras == []
+    assert verificar_lote(cliente, m)[:2] == (11, 12)
+
+
+def test_no_gana_un_numero_cuyo_libro_es_de_otro_avion():
+    from app.airvault.indexer import GANA_MANIFIESTO, arbitrar_numero, logs_sueltos
+
+    m, cliente, _plan = con_un_log_distinto()
+    # Dos bitacoras de otro avion ocupan el libro del numero de AirVault.
+    for registro, numero in zip(m.registros[10:12], ("2297350", "2297351")):
+        registro.log_number = numero
+        registro.matricula = "HP-1852CMP"
+    cliente.paginas[11] = pagina(11, estado=3, valores={CAMPO_LOG_NUMBER: "2297350"})
+    cliente.paginas[12] = pagina(12, estado=3, valores={CAMPO_LOG_NUMBER: "2297351"})
+    remotas = {
+        registro.seq: cliente.paginas[registro.seq] for registro in m.registros
+    }
+    sueltas = logs_sueltos(m, remotas)
+
+    ganador, motivo = arbitrar_numero(
+        m, remotas, m.registros[4], "2297399", sueltas,
+    )
+
+    assert ganador == GANA_MANIFIESTO
+    assert "22873A" in motivo
