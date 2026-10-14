@@ -116,6 +116,7 @@ from app.utils.important_fields import (
     IMPORTANT_FIELDS_FILENAME,
     ImportantFieldsStore,
 )
+from app.utils import ruta_remota
 from app.utils.io import PROCESSED_DIRNAME
 # El mismo recuento que dejan los correctores al tocar un reporte: quitarle
 # páginas cambia los totales y el JSON no puede quedar diciendo los de antes.
@@ -403,16 +404,29 @@ def _source_search_folders(csv_path: Path) -> list[Path]:
     no confundirse con lo que falta, y ahí es donde están desde entonces.
     """
     csv_path = Path(csv_path)
-    entrada = _PROGRAM_DIR / "input"
-    return [
-        csv_path.parent,
-        csv_path.parent.parent,
-        entrada / PROCESSED_DIRNAME,
-        # Una ejecución histórica debe preferir el archivo ya apartado. En
-        # input puede haber ahora otro PDF nuevo con exactamente el mismo
-        # nombre, y ese todavía no pertenece al CSV que se está consultando.
-        entrada,
-    ]
+    folders = [csv_path.parent, csv_path.parent.parent]
+    for entrada in _input_folders():
+        folders.extend((
+            entrada / PROCESSED_DIRNAME,
+            # Una ejecución histórica debe preferir el archivo ya apartado.
+            # En input puede haber ahora otro PDF nuevo con exactamente el
+            # mismo nombre, y ese todavía no pertenece al CSV que se está
+            # consultando.
+            entrada,
+        ))
+    return folders
+
+
+def _input_folders() -> list[Path]:
+    """Las entradas del programa: la de la ruta remota y la de este equipo.
+
+    Con la ruta remota activa se mira primero la compartida, que es donde
+    están los PDF de lo que se procesa ahora. La local se sigue mirando: las
+    ejecuciones anteriores a la ruta remota dejaron allí los suyos.
+    """
+    local = _PROGRAM_DIR / "input"
+    actual = ruta_remota.carpeta_input(_PROGRAM_DIR)
+    return [actual] if actual == local else [actual, local]
 
 
 def _archive_variant_index(candidate: Path, recorded: Path) -> int | None:
@@ -1993,6 +2007,15 @@ class CsvViewerWindow(QMainWindow):
             worker.wait(30000)
         super().closeEvent(event)
 
+    def set_start_folder(self, start_folder: Path) -> None:
+        """Cambia la carpeta de la que sale el historial.
+
+        Quien abre el visor la pasa de nuevo cada vez: con la ruta remota
+        las ejecuciones pueden estar en el servidor o en este equipo, y el
+        historial se rehace al mostrarse.
+        """
+        self._start_folder = Path(start_folder)
+
     def _refresh_history(self) -> None:
         """Rellena el historial con las últimas ejecuciones de la carpeta base.
 
@@ -2744,7 +2767,7 @@ class CsvViewerWindow(QMainWindow):
         return OutputOptions(
             skip_pdfs=skip_pdfs,
             template=template,
-            output_root=_PROGRAM_DIR / "output",
+            output_root=ruta_remota.carpeta_output(_PROGRAM_DIR),
             dpi=dpi,
             crop_padding=config.crop_padding,
             separar_por=tuple(self.export_options.separar_por() or ()),
@@ -2996,7 +3019,9 @@ class CsvViewerWindow(QMainWindow):
         query = self._pending_search
         self._pending_search = None
         roots = [
-            self._start_folder, _PROGRAM_DIR / "output", _PROGRAM_DIR / "input",
+            self._start_folder,
+            ruta_remota.carpeta_output(_PROGRAM_DIR),
+            *_input_folders(),
             *sorted(self._local_search_folders),
         ]
         current = self._loaded_csv_path

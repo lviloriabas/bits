@@ -157,17 +157,26 @@ def new_run_dir(output_root: Path) -> Path:
     línea de comandos necesita el sitio de los logs antes de procesar, y
     tiene que ser exactamente la misma carpeta donde luego se escriban las
     salidas.
+
+    El nombre se reserva creando la carpeta, no mirando antes si existe: con
+    la ruta remota dos personas pueden lanzar una ejecución en el mismo
+    minuto sobre la misma carpeta compartida, y entre mirar y crear cabía
+    que las dos se quedaran con el mismo nombre y mezclaran sus salidas.
     """
     output_root = Path(output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
     base = Path(run_csv_name()).stem
     corrida = base
     n = 2
-    while (output_root / corrida).exists():
-        corrida = f"{base}-{n}"
-        n += 1
-    run_dir = output_root / corrida
-    run_dir.mkdir(parents=True, exist_ok=True)
-    return run_dir
+    while True:
+        run_dir = output_root / corrida
+        try:
+            run_dir.mkdir()
+        except FileExistsError:
+            corrida = f"{base}-{n}"
+            n += 1
+            continue
+        return run_dir
 
 
 def _clean_stale_artifacts(run_dir: Path) -> None:

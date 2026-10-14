@@ -71,6 +71,7 @@ from app.gui.widgets import (ElidedLabel, IconoAyuda, SpinBoxWithButtons,
                              data_table_qss, pane_status_colors,
                              pintar_celda_del_tema, pintar_del_tema,
                              window_stylesheet)
+from app.utils import ruta_remota
 from app.utils.io import send_to_trash
 from app.utils.mensajes import mensaje_error
 
@@ -5217,8 +5218,11 @@ class AirVaultWindow(QDialog):
     def _refrescar_historial(self) -> None:
         corridas = [
             (carpeta, csv_de_corrida(carpeta))
+            # Con la ruta remota, las ejecuciones son las de la carpeta
+            # compartida. El registro de AirVault de cada una sigue siendo
+            # de este equipo.
             for carpeta in find_run_dirs(
-                self._raiz / "output", LIMITE_HISTORIAL
+                ruta_remota.carpeta_output(self._raiz), LIMITE_HISTORIAL
             )
         ]
         combo = self.historial
@@ -5550,13 +5554,19 @@ class AirVaultWindow(QDialog):
             str(trabajo.carpeta.resolve()).casefold()
             for trabajo in self._trabajos
         }
-        salida_local = (self._raiz / "output").resolve()
+        # Una ejecución del programa es la que cuelga de su output, sea el
+        # de este equipo o el de la ruta remota.
+        salidas = {
+            (self._raiz / "output").resolve(),
+            ruta_remota.carpeta_output(self._raiz).resolve(),
+        }
+        corrida = csv.resolve()
         pendientes_globales = (
             cargar_todos_trabajos(
                 self._config_actual(),
                 self._raiz / CARPETA_TRABAJOS,
             )
-            if csv.resolve().is_relative_to(salida_local)
+            if any(corrida.is_relative_to(salida) for salida in salidas)
             else []
         )
         self._trabajos.extend(

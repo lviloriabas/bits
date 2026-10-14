@@ -13,6 +13,7 @@ from app.gui.csv_utils import read_csv_file
 from app.models.schemas import ValidationReport
 from app.reports.exclusiones import turno_datos
 from app.reports.organize import escribir_entrega, escribir_indice_paginas
+from app.utils import ruta_remota
 from app.utils.io import resolve_processed_path, unique_path
 
 
@@ -49,9 +50,11 @@ def _reportes(csv: Path, raiz: Path, resolutor):
     for reporte in reportes:
         fuente = resolve_processed_path(Path(reporte.pdf_path))
         if not fuente.is_file():
-            candidatos = {p.resolve() for p in (
-                raiz / "input" / Path(reporte.pdf_path).name,
-                raiz / "input" / "processed" / Path(reporte.pdf_path).name,
+            # La entrada de este equipo y, con la ruta remota, la compartida.
+            entradas = {raiz / "input", ruta_remota.carpeta_input(raiz)}
+            candidatos = {p.resolve() for entrada in entradas for p in (
+                entrada / Path(reporte.pdf_path).name,
+                entrada / "processed" / Path(reporte.pdf_path).name,
             ) if p.is_file()}
             if len(candidatos) != 1:
                 raise ErrorPreparacionEntrega("No se encontró un original inequívoco para preparar la entrega. Ubique los PDF originales antes de continuar.")

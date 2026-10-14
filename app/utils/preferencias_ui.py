@@ -107,6 +107,13 @@ def guardar_opcion(
     return _escribir({clave: valor}, raiz)
 
 
+def guardar_opciones(
+    valores: Mapping[str, Any], raiz: Path | str | None = None
+) -> bool:
+    """Anota varias opciones de una vez, para que no quede una sin la otra."""
+    return _escribir(valores, raiz)
+
+
 def leer_tema(raiz: Path | str | None = None) -> str | None:
     """El tema guardado, o ``None`` si nadie ha elegido todavia."""
     valor = leer_opcion(_CLAVE_TEMA, raiz=raiz)

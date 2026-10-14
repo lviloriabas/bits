@@ -167,6 +167,7 @@ from app.utils.important_fields import (
     ImportantFieldsStore,
     default_important_columns,
 )
+from app.utils import ruta_remota
 from app.utils.io import (
     PROCESSED_DIRNAME,
     archive_processed_files,
@@ -1422,6 +1423,14 @@ class MainWindow(QMainWindow):
             "Mover todas las ejecuciones de output/ a la Papelera de reciclaje"
         )
         self.btn_clear_output.triggered.connect(self._clear_output_folder)
+
+        input_menu.addSeparator()
+        self.btn_ruta_remota = input_menu.addAction("Ruta remota…")
+        self.btn_ruta_remota.setToolTip(
+            "Elegir una carpeta compartida para la entrada, las ejecuciones "
+            "y la memoria de libros, y activarla o desactivarla"
+        )
+        self.btn_ruta_remota.triggered.connect(self._open_ruta_remota)
         self.input_actions_button = QToolButton()
         self.input_actions_button.setText("Carpetas")
         configure_menu_button(self.input_actions_button, input_menu)
@@ -2427,7 +2436,7 @@ class MainWindow(QMainWindow):
     # ── Entrada y estimación ────────────────────────────────────────────
 
     def _load_default_input(self) -> None:
-        folder = SCRIPT_DIR / "input"
+        folder = ruta_remota.carpeta_input(SCRIPT_DIR)
         if not folder.is_dir():
             self._set_input_paths([])
             return
@@ -2946,7 +2955,10 @@ class MainWindow(QMainWindow):
 
     def _browse_pdfs(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Seleccionar archivos", str(SCRIPT_DIR / "input"), "PDF (*.pdf)"
+            self,
+            "Seleccionar archivos",
+            str(ruta_remota.carpeta_input(SCRIPT_DIR)),
+            "PDF (*.pdf)",
         )
         if paths:
             self._set_input_paths([Path(p) for p in paths])
@@ -2963,6 +2975,53 @@ class MainWindow(QMainWindow):
             self.template_combo.setCurrentIndex(self.template_combo.count() - 1)
             logger.info(f"Plantilla seleccionada: {path}")
 
+    def _open_ruta_remota(self) -> None:
+        """Abre el cuadro de la ruta remota y aplica lo que se guarde."""
+        from app.gui.ruta_remota_dialog import RutaRemotaDialog
+
+        if not RutaRemotaDialog(self).exec():
+            return
+        ajustes = ruta_remota.leer_ajustes()
+        if not ajustes.activa:
+            logger.info(
+                "Ruta remota desactivada: se trabaja con las carpetas de "
+                "este equipo"
+            )
+        elif ruta_remota.en_uso():
+            # La primera sincronización es la que siembra el servidor con
+            # lo que este equipo ya sabía, o trae lo que sabían los demás.
+            from app.validation.memoria_remota import sincronizar
+
+            resumen = sincronizar(
+                SCRIPT_DIR / "book_matriculas.json",
+                SCRIPT_DIR / "book_fechas.json",
+            )
+            if resumen is not None and not resumen.hay_cambios:
+                logger.info(str(resumen))
+        # La entrada que se ve es la de la carpeta que manda ahora. Con una
+        # ejecución en marcha no se toca: sus archivos ya están elegidos.
+        if not (self._worker is not None and self._worker.isRunning()):
+            self._load_default_input()
+
+    def _vaciado_impedido_por_ruta_remota(self, titulo: str) -> bool:
+        """Avisa de que la carpeta compartida no se vacía desde aquí.
+
+        Allí trabajan otras personas y una carpeta de red no tiene
+        Papelera: lo que se quitara no se podría recuperar. Las carpetas de
+        este equipo se pueden seguir vaciando con la ruta desactivada.
+        """
+        if not ruta_remota.en_uso():
+            return False
+        QMessageBox.information(
+            self,
+            titulo,
+            "Con la ruta remota activa no se vacían las carpetas "
+            "compartidas: las usan otras personas y allí no hay Papelera "
+            "de reciclaje.\n\nDesactive la ruta remota para vaciar las "
+            "carpetas de este equipo.",
+        )
+        return True
+
     def _clear_input_folder(self) -> None:
         """Mueve todos los archivos de input/ a la Papelera tras confirmar."""
         processing = self._worker is not None and self._worker.isRunning()
@@ -2976,6 +3035,8 @@ class MainWindow(QMainWindow):
                 "No se puede vaciar input/ mientras se procesan archivos "
                 "o se generan salidas.",
             )
+            return
+        if self._vaciado_impedido_por_ruta_remota("Vaciar input"):
             return
 
         folder = SCRIPT_DIR / "input"
@@ -3043,6 +3104,8 @@ class MainWindow(QMainWindow):
                 "No se puede vaciar output/ mientras se procesan archivos "
                 "o se generan salidas.",
             )
+            return
+        if self._vaciado_impedido_por_ruta_remota("Vaciar output"):
             return
 
         folder = SCRIPT_DIR / "output"
@@ -3131,11 +3194,16 @@ class MainWindow(QMainWindow):
 
     def _open_csv_viewer(self) -> None:
         """Abre el visor de ejecuciones como una ventana independiente."""
+        salida = ruta_remota.carpeta_output(SCRIPT_DIR)
         if self._csv_viewer is None:
             # Independiente también a nivel nativo: parentarla a la principal
             # hace que Windows oculte su botón de la barra de tareas.
-            self._csv_viewer = CsvViewerWindow(SCRIPT_DIR / "output")
+            self._csv_viewer = CsvViewerWindow(salida)
             self._csv_viewer.setWindowIcon(self.windowIcon())
+        else:
+            # El historial se rehace al mostrarse; que lo haga sobre la
+            # carpeta que manda ahora, por si la ruta remota cambió.
+            self._csv_viewer.set_start_folder(salida)
         self._csv_viewer.show()
         self._csv_viewer.raise_()
         self._csv_viewer.activateWindow()
@@ -3225,7 +3293,7 @@ class MainWindow(QMainWindow):
 
         return OutputOptions(
             template=template,
-            output_root=SCRIPT_DIR / "output",
+            output_root=ruta_remota.carpeta_output(SCRIPT_DIR),
             dpi=self._processed_dpi or self._detected_dpi,
             crop_padding=(
                 self._config.crop_padding if self._config is not None else 0.01
@@ -4205,10 +4273,25 @@ class MainWindow(QMainWindow):
         archivos allí, así que la vista previa y volver a exportar siguen
         funcionando sin que el usuario tenga que buscarlos.
         """
-        moved, failed = archive_processed_files(
-            [Path(report.pdf_path) for report in self._reports],
-            SCRIPT_DIR / "input",
-        )
+        # La entrada puede ser la de este equipo o la de la ruta remota, y
+        # una ejecución empezada en una puede terminar con la otra al mando
+        # (la red se cayó, o volvió). Se aparta lo que esté suelto en
+        # cualquiera de las dos; cada archivo solo está en una.
+        entradas = {
+            str(carpeta).casefold(): carpeta
+            for carpeta in (
+                SCRIPT_DIR / "input",
+                ruta_remota.carpeta_input(SCRIPT_DIR),
+            )
+        }
+        moved: dict[Path, Path] = {}
+        failed: list[tuple[Path, Exception]] = []
+        for carpeta in entradas.values():
+            movidos, fallidos = archive_processed_files(
+                [Path(report.pdf_path) for report in self._reports], carpeta
+            )
+            moved.update(movidos)
+            failed.extend(fallidos)
         for path, error in failed:
             logger.warning(
                 f"No se pudo apartar {path.name} a "

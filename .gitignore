@@ -76,3 +76,9 @@ airvault.json
 # copias divergentes no se fusionan, se pisan.
 book_matriculas.json
 book_fechas.json
+
+# Lo que la carpeta compartida decia en la ultima sincronizacion de la
+# memoria de libros. Es la base con la que cada instalacion distingue una
+# correccion propia de una diferencia con el servidor; local por definicion.
+book_remoto.json
+book_remoto.json.tmp

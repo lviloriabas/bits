@@ -80,8 +80,9 @@ def parse_args() -> argparse.Namespace:
         help="PDF específico a procesar (default: todos los PDFs de input/)",
     )
     parser.add_argument(
-        "--input-dir", default="input",
-        help="Carpeta con los PDFs a analizar (default: input)",
+        "--input-dir", default=None,
+        help="Carpeta con los PDFs a analizar (default: input, o la de la "
+             "ruta remota si está activa)",
     )
     parser.add_argument(
         "--template",
@@ -92,7 +93,9 @@ def parse_args() -> argparse.Namespace:
         help="Plantilla JSON (default: aircraft_log.json)",
     )
     parser.add_argument(
-        "--output-dir", default="output", help="Carpeta de resultados"
+        "--output-dir", default=None,
+        help="Carpeta de resultados (default: output, o la de la ruta "
+             "remota si está activa)",
     )
     parser.add_argument("--dpi", type=int, default=150, help="DPI de renderizado")
     parser.add_argument(
@@ -322,6 +325,18 @@ def _run(args: argparse.Namespace) -> int:
         book_fechas_file=_ROOT / BOOK_DATES_FILENAME,
     )
 
+    # Sin carpeta explícita valen las del programa, o las de la ruta remota
+    # cuando está activa y responde. Se pregunta una sola vez: una ejecución
+    # no debe leer de un sitio y escribir en otro porque la red cambió a la
+    # mitad.
+    from app.utils import ruta_remota
+
+    datos = ruta_remota.raiz_de_datos(_ROOT)
+    if args.input_dir is None:
+        args.input_dir = str(datos / ruta_remota.CARPETA_INPUT)
+    if args.output_dir is None:
+        args.output_dir = str(datos / ruta_remota.CARPETA_OUTPUT)
+
     page_range = PageRange()
     if args.pages is not None:
         try:
@@ -461,6 +476,11 @@ def _run(args: argparse.Namespace) -> int:
     inferred = infer_log_numbers_from_pdf_order(reports)
     print(f"\nNúmeros de bitácora deducidos por sus páginas vecinas: {inferred}")
 
+    # Con ruta remota, la memoria de libros se pone al día con la del
+    # servidor antes de usarla y otra vez después de aprender.
+    from app.validation.memoria_remota import sincronizar
+
+    sincronizar(config.book_matriculas_file, config.book_fechas_file)
     stats = correct_matricula_by_book(
         reports, config.book_matriculas_file, fleet=fleet
     )
@@ -486,6 +506,7 @@ def _run(args: argparse.Namespace) -> int:
 
     learn_book_matriculas(reports, config.book_matriculas_file, fleet=fleet)
     learn_book_dates(reports, config.book_fechas_file)
+    sincronizar(config.book_matriculas_file, config.book_fechas_file)
 
     # ── Salidas de la ejecución ───────────────────────────────────────────
     # Se escriben con la misma función que usa la interfaz. Tenerlas

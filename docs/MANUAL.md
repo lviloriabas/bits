@@ -378,6 +378,34 @@ archivos de cada instalacion y no se suben al repositorio, asi que marcar
 una casilla en esta maquina no estorba al `git pull` de la otra; lo que
 cambia en una no se lleva a la otra.
 
+## Ruta remota
+
+Sirve para trabajar con otras personas a la vez sobre una carpeta compartida, por ejemplo la de un servidor que cada quien tiene montado con su usuario de Windows. Viene desactivada: mientras no la active, el programa trabaja como siempre con las carpetas que tiene al lado.
+
+Para usarla, abra **Carpetas**, **Ruta remota…**, escriba o elija la carpeta y marque **Usar la ruta remota**. Se escribe una sola ruta; dentro de ella el programa usa la misma forma que su propia carpeta y crea lo que falte:
+
+| En la carpeta compartida | Para qué                                                    |
+| ------------------------ | ----------------------------------------------------------- |
+| `input/`                 | Los PDF por procesar. Es lo que trae **Detectar input**.    |
+| `input/processed/`       | Los PDF que ya se procesaron.                               |
+| `output/`                | Las ejecuciones, visibles para todos en el visor de CSV.    |
+| `book_matriculas.json`   | La matrícula de cada libro, juntando lo de todos.           |
+| `book_fechas.json`       | Las fechas confirmadas de cada libro, juntando lo de todos. |
+
+La elección se guarda en `interfaz.json`, en este equipo, y se conserva al cerrar. Desactivarla no borra la ruta escrita: se vuelve a activar con la misma casilla.
+
+Qué sigue siendo de cada equipo: el usuario y las opciones de AirVault, las preferencias de la interfaz, los logs y el registro local de lo que se subió a AirVault. Como ese registro no se comparte, antes de indexar una ejecución que procesó otra persona conviene acordar quién la sube, o comprobarla con **Verificar subidas en Web Search**.
+
+La memoria de libros no se muda al servidor, se sincroniza con él antes de corregir y después de aprender, de modo que cada equipo conserva una copia completa:
+
+- Lo que solo sabe un lado pasa al otro. La primera persona que activa la ruta sube todo lo que su equipo ya había aprendido, así que conviene que sea quien más tiempo lleva usando el programa.
+- Si los dos lados tienen el mismo libro con datos distintos, se conserva el del servidor. Solo lo reemplaza una corrección hecha después de la última sincronización (la que sale de comprobar contra AirVault), y el valor anterior queda anotado en `book_cambios.jsonl`, con equipo, usuario y fecha.
+- El servidor nunca pierde entradas: descartar un libro en un equipo no lo borra para los demás, y un archivo del servidor dañado no se sobrescribe.
+
+Si la carpeta no responde, el programa lo avisa en el registro de la ventana y sigue con las carpetas y la memoria de este equipo; lo que aprenda mientras tanto se sube en la siguiente sincronización. Las ejecuciones hechas sin conexión quedan en el `output/` local y no se copian solas al servidor.
+
+Con la ruta remota activa, **Vaciar input** y **Vaciar output** no actúan sobre la carpeta compartida, y una ejecución compartida no se elimina desde AirVault: allí trabajan otras personas y una carpeta de red no tiene Papelera.
+
 ## Resolver problemas frecuentes
 
 | Problema                                          | Acción                                                                                                                                                  |

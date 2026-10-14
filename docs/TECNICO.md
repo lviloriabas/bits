@@ -277,7 +277,9 @@ El modelo sigue reutilizándose por proceso y la etapa puede repartirse en el po
 
 `book_matriculas.json` y `book_fechas.json` conservan anclas entre ejecuciones. El plan de AirVault las contrasta con páginas remotas válidas; reemplazarlas exige respaldo coherente de dos bitácoras distintas. Con `buscar_publicadas` activado, una ronda posterior consulta libros antiguos en Web Search y guarda su turno en `book_ronda.json`.
 
-Código: `app/validation/`, `app/utils/date_window.py`, `app/vision/void_mark.py` y `app/airvault/memoria.py`.
+Con la ruta remota activa (`remota.activa` y `remota.ruta` en `interfaz.json`, apagada de fábrica), `app/utils/ruta_remota.py` resuelve `input/` y `output/` contra la carpeta compartida y vuelve a las locales si no responde; la consulta tiene límite de tiempo y se recuerda unos segundos para no detener la ventana. Las dos memorias no se mudan: `app/validation/memoria_remota.py` las concilia con las del servidor antes de corregir y después de aprender, comparando lo local, lo remoto y lo que el servidor decía en la sincronización anterior (`book_remoto.json`, local). Manda el servidor salvo en una corrección local posterior a esa base; nunca se borra una entrada remota, un archivo remoto ilegible no se sobrescribe, los reemplazos se anotan en `book_cambios.jsonl` y las escrituras se serializan con `book_memoria.lock`. `output/airvault` (manifiestos, libro de envíos y candado de cargas) sigue siendo local.
+
+Código: `app/validation/`, `app/utils/date_window.py`, `app/vision/void_mark.py`, `app/airvault/memoria.py` y `app/utils/ruta_remota.py`.
 
 ### 4. Paralelismo y cancelación
 

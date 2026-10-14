@@ -204,6 +204,15 @@ class PipelineWorker(QThread):
                 if self.config.verify_fleet else []
             )
             infer_log_numbers_from_pdf_order(reports)
+            # Con ruta remota, la memoria de libros se pone al día con la
+            # del servidor antes de usarla y otra vez después de aprender,
+            # para que lo de esta ejecución les sirva a los demás. Apagada
+            # o sin conexión no hace nada y se sigue con la memoria local.
+            from app.validation.memoria_remota import sincronizar
+
+            sincronizar(
+                self.config.book_matriculas_file, self.config.book_fechas_file
+            )
             correct_matricula_by_book(
                 reports, self.config.book_matriculas_file, fleet=fleet
             )
@@ -219,6 +228,9 @@ class PipelineWorker(QThread):
                 reports, self.config.book_matriculas_file, fleet=fleet
             )
             learn_book_dates(reports, self.config.book_fechas_file)
+            sincronizar(
+                self.config.book_matriculas_file, self.config.book_fechas_file
+            )
             self.reports = reports
             self.succeeded.emit(reports)
         except Exception as exc:  # noqa: BLE001 - la GUI muestra el error

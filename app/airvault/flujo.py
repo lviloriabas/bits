@@ -3006,10 +3006,15 @@ def comprobar_memoria_de_libros(indexador, raiz: Path | str):
     plan, porque esto ayuda a las ejecuciones siguientes y no es el trabajo
     de esta.
     """
-    from app.airvault.memoria import verificar_con_el_batch
+    from app.airvault.memoria import (sincronizar_con_la_ruta_remota,
+                                      verificar_con_el_batch)
 
     try:
-        return verificar_con_el_batch(indexador.remotas.values(), raiz)
+        sincronizar_con_la_ruta_remota(raiz)
+        informe = verificar_con_el_batch(indexador.remotas.values(), raiz)
+        if informe.hay_cambios:
+            sincronizar_con_la_ruta_remota(raiz)
+        return informe
     except Exception as exc:  # noqa: BLE001 - comprobar no es escribir
         logger.warning("No se pudo comprobar la memoria de libros: {}", exc)
         return None
@@ -3028,12 +3033,17 @@ def comprobar_tanda_de_libros(buscador, raiz: Path | str, avisar=None):
     del plan, ayuda a las ejecuciones siguientes y no puede tumbar la que la
     llama.
     """
-    from app.airvault.memoria import verificar_por_tandas
+    from app.airvault.memoria import (sincronizar_con_la_ruta_remota,
+                                      verificar_por_tandas)
 
     if buscador is None or not raiz:
         return None
     try:
-        return verificar_por_tandas(buscador, raiz, al_avanzar=avisar)
+        sincronizar_con_la_ruta_remota(raiz)
+        informe = verificar_por_tandas(buscador, raiz, al_avanzar=avisar)
+        if informe is not None and informe.hay_cambios:
+            sincronizar_con_la_ruta_remota(raiz)
+        return informe
     except Exception as exc:  # noqa: BLE001 - comprobar no es escribir
         logger.warning("No se pudo comprobar la tanda de libros: {}", exc)
         return None

@@ -227,6 +227,20 @@ def _rutas(raiz: Path | str) -> Dict[str, Path]:
     }
 
 
+def sincronizar_con_la_ruta_remota(raiz: Path | str):
+    """Pone la memoria de esta instalacion al dia con la carpeta compartida.
+
+    La comprobacion contra AirVault es la que corrige una entrada
+    equivocada, asi que conviene hacerla sobre lo ultimo que sabe el
+    servidor y subir despues lo que cambie. Con la ruta remota apagada o
+    sin conexion no hace nada.
+    """
+    from app.validation.memoria_remota import sincronizar
+
+    rutas = _rutas(raiz)
+    return sincronizar(rutas["matriculas"], rutas["fechas"])
+
+
 def libros_de_la_memoria(raiz: Path | str) -> List[str]:
     """Las claves de libro que la memoria de esta instalacion conoce."""
     rutas = _rutas(raiz)
