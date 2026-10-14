@@ -38,7 +38,7 @@ class RutaRemotaDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(TITULO)
-        self._density = fit_to_screen(self, 540, 240)
+        self._density = fit_to_screen(self, 540, 200)
         self._aplicar_hoja()
         # La hoja lleva el fragmento de la densidad, así que la rehace el
         # propio cuadro cuando cambia el tema.
@@ -62,11 +62,8 @@ class RutaRemotaDialog(QDialog):
         layout.setSpacing(SPACE_S)
 
         intro = QLabel(
-            "Carpeta compartida para trabajar con otras personas a la vez. "
-            "Con ella activa, la entrada, lo ya procesado y las ejecuciones "
-            "se guardan allí, y la memoria de libros se junta con la de los "
-            "demás. Si la carpeta no responde, se sigue con las de este "
-            "equipo."
+            "Carpeta remota donde se guardan los archivos de bitácoras y la "
+            "memoria que se usa para inferir."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
