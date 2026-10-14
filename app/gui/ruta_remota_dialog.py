@@ -20,11 +20,12 @@ from PySide6.QtWidgets import (
 
 from app.gui.responsive import fit_to_screen
 from app.gui.theme import gestor_tema
-from app.gui.tokens import SPACE_S, paleta
-from app.gui.widgets import pintar_del_tema, window_stylesheet
+from app.gui.tokens import SPACE_S
+from app.gui.widgets import window_stylesheet
 from app.utils import ruta_remota
 
 TITULO = "Ruta remota"
+ANCHO = 460
 
 
 class RutaRemotaDialog(QDialog):
@@ -38,7 +39,7 @@ class RutaRemotaDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(TITULO)
-        self._density = fit_to_screen(self, 540, 200)
+        self._density = fit_to_screen(self, ANCHO, 200)
         self._aplicar_hoja()
         # La hoja lleva el fragmento de la densidad, así que la rehace el
         # propio cuadro cuando cambia el tema.
@@ -46,6 +47,7 @@ class RutaRemotaDialog(QDialog):
         self._guardados = ruta_remota.leer_ajustes()
         self._build_ui()
         self._pintar_estado()
+        self._ajustar_alto()
 
     def _aplicar_hoja(self) -> None:
         """La hoja del cuadro, con los tonos y las medidas de ahora."""
@@ -68,7 +70,7 @@ class RutaRemotaDialog(QDialog):
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
-        self.activa_check = QCheckBox("Usar la ruta remota")
+        self.activa_check = QCheckBox("Usar la carpeta remota")
         self.activa_check.setChecked(self._guardados.activa)
         self.activa_check.toggled.connect(self._pintar_estado)
         layout.addWidget(self.activa_check)
@@ -83,18 +85,15 @@ class RutaRemotaDialog(QDialog):
         self.ruta_edit.textChanged.connect(self._pintar_estado)
         fila.addWidget(self.ruta_edit, 1)
         self.examinar = QPushButton("Examinar…")
-        self.examinar.setToolTip("Elegir la carpeta compartida")
+        self.examinar.setToolTip("Elegir la carpeta remota")
         self.examinar.clicked.connect(self._examinar)
         fila.addWidget(self.examinar)
         layout.addLayout(fila)
 
+        # Con el color del resto del texto: es lo que dice qué está pasando
+        # con la carpeta, no una nota al margen.
         self.estado = QLabel()
-        self.estado.setWordWrap(True)
-        pintar_del_tema(
-            self.estado, lambda: f"color: {paleta().TEXT_SECONDARY};"
-        )
         layout.addWidget(self.estado)
-        layout.addStretch()
 
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
@@ -110,30 +109,37 @@ class RutaRemotaDialog(QDialog):
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
 
+    def _ajustar_alto(self) -> None:
+        """Deja el cuadro del alto de lo que contiene, sin hueco debajo.
+
+        El estado cabe siempre en una línea, así que el alto no cambia al
+        marcar la casilla ni al escribir la ruta.
+        """
+        self.ensurePolished()
+        fit_to_screen(
+            self, self.width(), self.layout().totalHeightForWidth(self.width())
+        )
+
     def _pintar_estado(self, *_args) -> None:
         """Dice en una línea qué va a pasar con lo que hay escrito."""
         ruta = self.ruta_edit.text().strip()
         if not self.activa_check.isChecked():
             texto = "Desactivada: se trabaja con las carpetas de este equipo."
         elif not ruta:
-            texto = "Escriba o elija la carpeta compartida."
+            texto = "Escriba o elija la carpeta remota."
         elif self._guardados.activa and ruta == self._guardados.ruta:
             texto = (
                 "Conectada."
                 if ruta_remota.conectada(Path(ruta))
-                else "Sin conexión: se trabaja con las carpetas de este "
-                     "equipo hasta que responda."
+                else "Sin conexión: se trabaja con las carpetas de este equipo."
             )
         else:
-            texto = (
-                "Al guardar se comprueba la conexión y se preparan allí las "
-                "carpetas de entrada y de salida."
-            )
+            texto = "Al guardar se comprueba la conexión."
         self.estado.setText(texto)
 
     def _examinar(self) -> None:
         elegida = QFileDialog.getExistingDirectory(
-            self, "Elegir la carpeta compartida", self.ruta_edit.text().strip()
+            self, "Elegir la carpeta remota", self.ruta_edit.text().strip()
         )
         if elegida:
             self.ruta_edit.setText(str(Path(elegida)))
@@ -144,7 +150,7 @@ class RutaRemotaDialog(QDialog):
         if activa and not ruta:
             QMessageBox.warning(
                 self, TITULO,
-                "Escriba o elija la carpeta compartida antes de activarla.",
+                "Escriba o elija la carpeta remota antes de activarla.",
             )
             return
         if activa:

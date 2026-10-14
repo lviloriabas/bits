@@ -382,7 +382,7 @@ cambia en una no se lleva a la otra.
 
 Sirve para trabajar con otras personas a la vez sobre una carpeta compartida, por ejemplo la de un servidor que cada quien tiene montado con su usuario de Windows. Viene desactivada: mientras no la active, el programa trabaja como siempre con las carpetas que tiene al lado.
 
-Para usarla, abra **Carpetas**, **Ruta remota…**, escriba o elija la carpeta y marque **Usar la ruta remota**. Se escribe una sola ruta; dentro de ella el programa usa la misma forma que su propia carpeta y crea lo que falte:
+Para usarla, abra **Carpetas**, **Ruta remota…**, escriba o elija la carpeta y marque **Usar la carpeta remota**. Se escribe una sola ruta; dentro de ella el programa usa la misma forma que su propia carpeta y crea lo que falte:
 
 | En la carpeta compartida | Para qué                                                    |
 | ------------------------ | ----------------------------------------------------------- |
