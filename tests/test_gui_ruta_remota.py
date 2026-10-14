@@ -228,7 +228,9 @@ def test_el_cuadro_abre_desactivado_y_sin_ruta(cuadro):
 
     assert not dialogo.activa_check.isChecked()
     assert dialogo.ruta_edit.text() == ""
-    assert dialogo.estado.text().startswith("Desactivada")
+    # Desactivada no hay nada que decir: la linea de estado no ocupa sitio.
+    assert dialogo.estado.isHidden()
+    assert dialogo.estado.text() == ""
 
 
 def test_el_cuadro_recuerda_lo_guardado(cuadro, carpetas):
@@ -239,7 +241,35 @@ def test_el_cuadro_recuerda_lo_guardado(cuadro, carpetas):
 
     assert dialogo.activa_check.isChecked()
     assert dialogo.ruta_edit.text() == str(servidor)
+    assert not dialogo.estado.isHidden()
     assert dialogo.estado.text() == "Conectada."
+
+
+def test_el_estado_solo_habla_de_la_ruta_guardada(cuadro, carpetas):
+    _local, servidor = carpetas
+    ruta_remota.guardar_ajustes(True, str(servidor))
+    dialogo = cuadro()
+    alto_con_estado = dialogo.height()
+
+    dialogo.activa_check.setChecked(False)
+
+    assert dialogo.estado.isHidden()
+    assert dialogo.height() < alto_con_estado
+
+    dialogo.activa_check.setChecked(True)
+    assert dialogo.estado.text() == "Conectada."
+    assert dialogo.height() == alto_con_estado
+
+    dialogo.ruta_edit.setText(str(servidor / "otra"))
+    assert dialogo.estado.isHidden()
+
+
+def test_sin_conexion_el_cuadro_lo_dice(cuadro, tmp_path):
+    ruta_remota.guardar_ajustes(True, str(tmp_path / "caida"))
+
+    dialogo = cuadro()
+
+    assert dialogo.estado.text().startswith("Sin conexión")
 
 
 def test_guardar_activa_la_ruta_y_prepara_la_carpeta(cuadro, tmp_path):

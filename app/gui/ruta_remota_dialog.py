@@ -45,6 +45,7 @@ class RutaRemotaDialog(QDialog):
         # propio cuadro cuando cambia el tema.
         gestor_tema().cambiado.connect(self._al_cambiar_tema)
         self._guardados = ruta_remota.leer_ajustes()
+        self._alto_ajustado = False
         self._build_ui()
         self._pintar_estado()
         self._ajustar_alto()
@@ -109,33 +110,42 @@ class RutaRemotaDialog(QDialog):
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
 
-    def _ajustar_alto(self) -> None:
-        """Deja el cuadro del alto de lo que contiene, sin hueco debajo.
+    def _alto_del_contenido(self) -> int:
+        self.layout().activate()
+        return self.layout().totalHeightForWidth(self.width())
 
-        El estado cabe siempre en una línea, así que el alto no cambia al
-        marcar la casilla ni al escribir la ruta.
-        """
+    def _ajustar_alto(self) -> None:
+        """Abre el cuadro del alto de lo que contiene, sin hueco debajo."""
         self.ensurePolished()
-        fit_to_screen(
-            self, self.width(), self.layout().totalHeightForWidth(self.width())
-        )
+        fit_to_screen(self, self.width(), self._alto_del_contenido())
+        self._alto_ajustado = True
 
     def _pintar_estado(self, *_args) -> None:
-        """Dice en una línea qué va a pasar con lo que hay escrito."""
+        """Dice si la carpeta guardada responde, y nada más.
+
+        Sin nada que decir (desactivada, o una ruta que todavía no se ha
+        guardado) la línea no se muestra ni ocupa sitio: la casilla ya dice
+        si está activa.
+        """
         ruta = self.ruta_edit.text().strip()
-        if not self.activa_check.isChecked():
-            texto = "Desactivada: se trabaja con las carpetas de este equipo."
-        elif not ruta:
-            texto = "Escriba o elija la carpeta remota."
-        elif self._guardados.activa and ruta == self._guardados.ruta:
+        texto = ""
+        if (
+            self.activa_check.isChecked()
+            and self._guardados.activa
+            and ruta
+            and ruta == self._guardados.ruta
+        ):
             texto = (
                 "Conectada."
                 if ruta_remota.conectada(Path(ruta))
                 else "Sin conexión: se trabaja con las carpetas de este equipo."
             )
-        else:
-            texto = "Al guardar se comprueba la conexión."
+        cambia = self.estado.isHidden() == bool(texto)
         self.estado.setText(texto)
+        self.estado.setVisible(bool(texto))
+        if cambia and self._alto_ajustado:
+            # Sin volver a centrar: el cuadro ya está donde la persona lo ve.
+            self.resize(self.width(), self._alto_del_contenido())
 
     def _examinar(self) -> None:
         elegida = QFileDialog.getExistingDirectory(
