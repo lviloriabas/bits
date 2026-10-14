@@ -2784,12 +2784,14 @@ def test_la_bitacora_dice_que_batch_esta_abierto_en_airvault(ventana):
         ventana.bitacora.item(i).text() for i in range(ventana.bitacora.count())
     ]
     revisado = [t for t in textos if "Revisado:" in t][-1].splitlines()
-    assert revisado[1].endswith("lo tiene abierto Diego Vargas")
+    assert revisado[1].endswith(
+        "Indexado incompleto, abierto por otro usuario (Diego Vargas)"
+    )
     assert "abierto" not in revisado[2]
     clasificacion = "\n".join(textos)
     abiertos = [
         linea for linea in clasificacion.splitlines()
-        if "abiertos en AirVault" in linea
+        if "abiertos por otro usuario" in linea
     ]
     indexables = [
         linea for linea in clasificacion.splitlines()
@@ -2799,6 +2801,21 @@ def test_la_bitacora_dice_que_batch_esta_abierto_en_airvault(ventana):
     numero_tomado = str(ventana._numero_de(ventana._estados[0].trabajo))
     assert numero_tomado in abiertos[0].split(":")[-1]
     assert numero_tomado not in indexables[0].split(":")[-1]
+    # En la barra lateral, la tarjeta lo dice y va en amarillo de aviso; la
+    # del batch libre conserva su color.
+    from app.gui.tokens import paleta
+
+    tarjetas = {
+        ventana.lotes.item(fila, 1).text(): ventana.lotes.item(fila, 3)
+        for fila in range(ventana.lotes.rowCount())
+    }
+    tomada = tarjetas["DP | BITS REVISAR"]
+    assert tomada.text() == "Indexado incompleto, abierto por otro usuario"
+    assert tomada.foreground().color().name() == paleta().STATUS_WARNING.lower()
+    assert "Diego Vargas" in tomada.toolTip()
+    libre = tarjetas["DP | BITS -2"]
+    assert "abierto" not in libre.text()
+    assert libre.foreground().color().name() != paleta().STATUS_WARNING.lower()
 
 
 def test_un_mensaje_de_error_se_muestra_sin_ayuda_al_pasar_el_cursor(ventana):

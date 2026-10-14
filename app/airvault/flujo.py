@@ -18,7 +18,7 @@ import os
 import re
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path, PureWindowsPath
 from typing import (
@@ -60,6 +60,7 @@ from app.airvault.mapping import (
 )
 from app.airvault import duplicados as libro_de_envios
 from app.airvault import envios_exactos
+from app.airvault import identidad as identidad_airvault
 from app.airvault import registro as registro_entrega
 from app.airvault.uploader import serializar_cargas
 from app.airvault import websearch
@@ -712,7 +713,7 @@ NOMBRE_ESTADO_PARTE = {
     DESCUADRADO: "Páginas no coinciden",
     LISTO: "Listo para indexar",
     INCOMPLETO: "Indexado incompleto",
-    TOMADO: "Abierto por otra persona",
+    TOMADO: "Abierto por otro usuario",
     SOLO_REVISAR: "Listo para indexar",
     INDEXADO: "Indexado",
     COMPLETADO: "Completado",
@@ -6283,6 +6284,17 @@ def comprobar_partes(
             lote for lote in encontrados
             if lote.batch_id.strip().upper() not in terminados
         ]
+        # El batch de este trabajo que figura abierto por el usuario del
+        # programa se suelta antes de mirar nada mas: es un bloqueo propio
+        # que quedo atras, y con el puesto no se podria leer ni indexar.
+        encontrados = [
+            _soltar_si_es_propio(trabajo, trabajos, cliente, lote, avisar)
+            if batch_id_anterior
+            and lote.bloqueado_por
+            and lote.batch_id.strip().upper() == batch_id_anterior
+            else lote
+            for lote in encontrados
+        ]
         dirigidos = [
             lote
             for lote in encontrados
@@ -6602,6 +6614,116 @@ def cerrar_partes(trabajos: Sequence["Trabajo"], cliente) -> None:
     """Suelta en AirVault todos los batches que el recorrido dejo abiertos."""
     for trabajo in trabajos:
         trabajo.cerrar(cliente)
+
+
+# ── los batches abiertos a nombre propio ───────────────────────────
+#
+# Un batch que la cola muestra abierto no se toca: AirVault deja colgada la
+# apertura. Pero si quien lo tiene es el usuario de este programa, es un
+# bloqueo que quedo atras (el programa se cerro a media escritura, o
+# AirVault tomo el batch y contesto con un error) y nadie mas lo va a
+# soltar. Ese se suelta y se sigue. El de otro usuario se deja como esta.
+
+
+def _candidatos_de_identidad(
+    trabajos: Sequence["Trabajo"], salvo: Optional["Trabajo"] = None,
+) -> List[Tuple[str, str]]:
+    """Batches propios que siguen en la cola, para averiguar el usuario."""
+    candidatos = []
+    for trabajo in trabajos:
+        manifiesto = trabajo.manifiesto
+        if (
+            trabajo is salvo or not manifiesto.batch_id
+            or manifiesto.cancelado or manifiesto.cierre_hecho()
+        ):
+            continue
+        candidatos.append((str(manifiesto.batch_id), manifiesto.nombre_batch))
+    return candidatos
+
+
+def _soltar_si_es_propio(
+    trabajo: "Trabajo", trabajos: Sequence["Trabajo"], cliente,
+    lote: ResumenLote, avisar: Optional[Aviso] = None,
+) -> ResumenLote:
+    """Suelta el batch si lo tiene abierto el usuario del programa.
+
+    Devuelve la fila como queda: libre si se solto, igual si es de otro
+    usuario, si no se sabe de quien es o si AirVault no dejo soltarlo.
+    """
+    from app.airvault.indexer import FALLOS_DE_CAMINO
+
+    quien = identidad_airvault.del_usuario(
+        cliente, carpeta_del_libro(trabajo),
+        _candidatos_de_identidad(trabajos, salvo=trabajo),
+    )
+    if quien is None or not quien.tiene(lote):
+        return lote
+    try:
+        cliente.cerrar_lote(lote.batch_id)
+    except FALLOS_DE_CAMINO:
+        raise
+    except Exception as exc:  # noqa: BLE001 - se queda como estaba
+        logger.warning(
+            "No se pudo soltar el batch {}, abierto a nombre propio: {}",
+            lote.batch_id, exc,
+        )
+        return lote
+    trabajo._tomado = False
+    logger.info(
+        "Batch {} estaba abierto a nombre propio ({}); se solto para seguir",
+        lote.batch_id, lote.bloqueado_por,
+    )
+    if avisar is not None:
+        avisar(
+            f"{_prefijo(trabajo)}Estaba abierto con su propio usuario en "
+            "AirVault; se soltó para seguir", 0, 0,
+        )
+    return replace(lote, bloqueado_por="", bloqueado_por_id="")
+
+
+def soltar_propios(trabajos: Sequence["Trabajo"], cliente) -> List[str]:
+    """Suelta todo lo que estos trabajos tengan tomado en AirVault.
+
+    Es lo que se hace al pausar, cancelar o cerrar. Primero lo que el
+    programa sabe que tomo y despues lo que la cola muestre abierto por su
+    usuario, que es lo que quedaba atras cuando AirVault tomaba un batch
+    sin que el programa se enterara. Solo mira los batches con trabajo
+    pendiente: uno ya indexado puede tenerlo abierto la misma persona
+    para revisarlo a mano. Devuelve los ID que solto por la cola.
+    """
+    cerrar_partes(trabajos, cliente)
+    pendientes = {
+        str(trabajo.manifiesto.batch_id).strip().upper(): trabajo
+        for trabajo in trabajos
+        if trabajo.manifiesto.batch_id and _pendiente_de_busqueda(trabajo)
+    }
+    if not pendientes:
+        return []
+    carpetas = {carpeta_del_libro(trabajo) for trabajo in pendientes.values()}
+    conocidas = [
+        quien for quien in map(identidad_airvault.conocida, carpetas)
+        if quien is not None
+    ]
+    if not conocidas:
+        return []
+    sueltos: List[str] = []
+    for lote in cliente.listar_lotes():
+        clave = lote.batch_id.strip().upper()
+        if clave not in pendientes or not any(q.tiene(lote) for q in conocidas):
+            continue
+        try:
+            cliente.cerrar_lote(lote.batch_id)
+        except Exception as exc:  # noqa: BLE001 - los demas se sueltan igual
+            logger.warning(
+                "No se pudo soltar el batch {} al detener el proceso: {}",
+                lote.batch_id, exc,
+            )
+            continue
+        pendientes[clave]._tomado = False
+        sueltos.append(lote.batch_id)
+        logger.info("Batch {} desbloqueado en AirVault al detener el proceso",
+                    lote.batch_id)
+    return sueltos
 
 
 def indexar_partes(

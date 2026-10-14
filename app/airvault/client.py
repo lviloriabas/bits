@@ -44,6 +44,9 @@ class ResumenLote:
     paso: str
     bloqueado_por: str
     recibido: str
+    # Identificador de quien lo tiene abierto. Dos personas pueden llamarse
+    # igual; el numero distingue al usuario de este programa de los demas.
+    bloqueado_por_id: str = ""
 
     @classmethod
     def desde_celdas(cls, celdas: Sequence[Any]) -> "ResumenLote":
@@ -68,6 +71,7 @@ class ResumenLote:
             paso=str(fila.get("eventlabel", "")).strip(),
             bloqueado_por=str(fila.get("lockedusername", "")).strip(),
             recibido=str(fila.get("batchreceivedate", "")).strip(),
+            bloqueado_por_id=str(fila.get("lockeduserid", "") or "").strip(),
         )
 
 

@@ -109,6 +109,19 @@ TEXTO_INDEXANDO = "Indexando"
 TEXTO_CHEQUEO_PENDIENTE = "chequeo pendiente"
 
 
+def abierto_por_otro(parte) -> str:
+    """Quién tiene abierto en AirVault un batch que sigue pendiente.
+
+    Lo que tenía abierto el usuario del programa ya lo soltó la revisión,
+    así que lo que llega aquí tomado es de otro usuario y no se toca. Vacío
+    si está libre o si el batch ya terminó su recorrido.
+    """
+    lote = getattr(parte, "lote", None)
+    if lote is None or getattr(parte, "se_acabo", False):
+        return ""
+    return str(getattr(lote, "bloqueado_por", "") or "").strip()
+
+
 def papel_de_estado(estado: str, indexando: bool = False) -> Optional[str]:
     """El color con el que la cola escribe un estado, por su papel en el tema.
 
@@ -181,8 +194,8 @@ def leyenda_de_estados() -> list[tuple[str, Optional[str], str]]:
         (DESCUADRADO, "El batch de Web Index tiene otra cantidad de páginas "
                       "u otro contenido. No se indexa ni se vuelve a subir "
                       "hasta revisarlo a mano."),
-        (TOMADO, "Alguien lo tiene abierto en Web Index. Se espera a que lo "
-                 "cierre."),
+        (TOMADO, "Otro usuario lo tiene abierto en Web Index. Se espera a "
+                 "que lo cierre."),
         (POSIBLE_DUPLICADO, "Sus bitácoras parecen estar ya en AirVault. No "
                             "se sube hasta decidirlo a mano."),
         (CANCELADO, "Se sacó de la cola. No entra en ningún proceso hasta "
@@ -246,7 +259,7 @@ def conteo_de_estados(partes) -> str:
         ((COMPLETADO, AUTOCOMPLETADO), "completado", "completados"),
         ((DESCUADRADO,), "con páginas que no coinciden",
          "con páginas que no coinciden"),
-        ((TOMADO,), "abierto por otra persona", "abiertos por otra persona"),
+        ((TOMADO,), "abierto por otro usuario", "abiertos por otro usuario"),
         ((POSIBLE_DUPLICADO,), "posible duplicado", "posibles duplicados"),
         ((CANCELADO,), "cancelado", "cancelados"),
     )
@@ -2190,11 +2203,20 @@ class TrabajoAirVaultWorker(QThread):
 
 
 def _soltar(trabajos, cliente) -> None:
-    """Suelta los batches y se calla si no puede: es limpieza, no trabajo."""
-    from app.airvault.flujo import cerrar_partes
+    """Suelta los batches y se calla si no puede: es limpieza, no trabajo.
+
+    También lo que la cola muestre abierto por el usuario del programa
+    aunque el programa no lo tenga anotado: al pausar, cancelar o cerrar no
+    puede quedar ningún batch tomado a su nombre.
+    """
+    from app.airvault.flujo import cerrar_partes, soltar_propios
 
     try:
         cerrar_partes(trabajos, cliente)
+    except Exception:  # noqa: BLE001 - soltando no se avisa de nada
+        pass
+    try:
+        soltar_propios(trabajos, cliente)
     except Exception:  # noqa: BLE001 - soltando no se avisa de nada
         pass
 
@@ -6248,7 +6270,7 @@ class AirVaultWindow(QDialog):
             # (cuántas páginas, por qué se paró) queda al posar el puntero.
             estado = TEXTO_INDEXANDO if indexando else parte.titulo
             from app.airvault.flujo import (AUTOCOMPLETADO, CANCELADO, COMPLETADO, NOMBRE_ESTADO_PARTE,
-                                            PUBLICADO, websearch_confirmacion_valida)
+                                            PUBLICADO, TOMADO, websearch_confirmacion_valida)
             confirmado = parte.trabajo.manifiesto.websearch_confirmado if websearch_confirmacion_valida(parte.trabajo.manifiesto) else ""
             # La confirmación es el último paso de un batch cerrado: ocupa el
             # rótulo entero en vez de colgarse detrás de «Completado».
@@ -6259,8 +6281,18 @@ class AirVaultWindow(QDialog):
             revision = getattr(parte.trabajo.manifiesto, "websearch_resultado", "")
             if revision == "error":
                 estado += f", {TEXTO_CHEQUEO_PENDIENTE}"
+            # El batch que otro usuario tiene abierto no se toca: se dice en
+            # la tarjeta y va en amarillo, tenga el estado que tenga. Es una
+            # marca de la tarjeta y no un estado más, así que no va en la
+            # leyenda ni sale de `papel_de_estado`.
+            de_otro = "" if indexando else abierto_por_otro(parte)
+            if de_otro and parte.estado != TOMADO:
+                estado += ", abierto por otro usuario"
             celdas = (parte.batch_id, nombre, str(esperadas), estado)
-            papel = papel_de_estado(parte.estado, indexando)
+            papel = (
+                "STATUS_WARNING" if de_otro
+                else papel_de_estado(parte.estado, indexando)
+            )
             id_anterior = self._id_de(parte)[1]
             for columna, texto in enumerate(celdas):
                 item = QTableWidgetItem(texto)
@@ -6276,7 +6308,13 @@ class AirVaultWindow(QDialog):
                         | Qt.AlignmentFlag.AlignVCenter
                     )
                 if columna == 3:
-                    item.setToolTip(self._ayuda_de_estado(parte, confirmado, revision))
+                    ayuda = self._ayuda_de_estado(parte, confirmado, revision)
+                    if de_otro:
+                        ayuda = (
+                            f"Lo tiene abierto {de_otro} en AirVault. No se "
+                            "toca hasta que lo cierre.\n" + ayuda
+                        ).strip()
+                    item.setToolTip(ayuda)
                 if papel:
                     pintar_celda_del_tema(item, papel)
                 tabla.setItem(fila, columna, item)
@@ -8194,20 +8232,25 @@ class AirVaultWindow(QDialog):
 
         # Una línea por batch con su rótulo, como la columna Estado. El
         # detalle entero de cada uno sigue en la ayuda de su celda.
-        def abierto_por(parte) -> str:
-            """Quién tiene abierto en AirVault un batch que sigue pendiente."""
-            lote = getattr(parte, "lote", None)
-            if lote is None or getattr(parte, "se_acabo", False):
-                return ""
-            return str(getattr(lote, "bloqueado_por", "") or "")
+        abierto_por = abierto_por_otro
 
-        # El batch abierto en AirVault no se toca, y sin decirlo la espera
-        # se leía como un proceso parado con trabajo por hacer.
+        def rotulo_de_estado(parte) -> str:
+            """El estado como en la tarjeta, con quién lo tiene abierto."""
+            from app.airvault.flujo import TOMADO
+
+            quien = abierto_por(parte)
+            if not quien:
+                return parte.titulo
+            if parte.estado == TOMADO:
+                return f"{parte.titulo} ({quien})"
+            return f"{parte.titulo}, abierto por otro usuario ({quien})"
+
+        # El batch abierto por otro usuario no se toca, y sin decirlo la
+        # espera se leía como un proceso parado con trabajo por hacer.
         self._anotar(
             "Revisado:",
             [
-                f"{self._rotulo(p.trabajo)}: {p.titulo}"
-                + (f", lo tiene abierto {abierto_por(p)}" if abierto_por(p) else "")
+                f"{self._rotulo(p.trabajo)}: {rotulo_de_estado(p)}"
                 for p in revisados
             ],
         )
@@ -8229,8 +8272,8 @@ class AirVaultWindow(QDialog):
         # está en Web Index, pero no se indexa hasta que lo cierren.
         clave_abiertos = "abiertos"
         titulos[clave_abiertos] = (
-            "En Web Index, abiertos en AirVault; no se tocan hasta que los "
-            "cierren allí"
+            "En Web Index, abiertos por otro usuario; no se tocan hasta que "
+            "los cierre"
         )
         abiertos = [p for p in grupos.get(EN_WEB_INDEX, ()) if abierto_por(p)]
         if abiertos:
