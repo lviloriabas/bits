@@ -28,6 +28,9 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QStyle,
+    QStyleOptionProgressBar,
+    QStylePainter,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -361,6 +364,30 @@ class _ActividadWebReports(QWidget):
             pintor.end()
 
 
+class _ProgresoWebReports(QProgressBar):
+    """Integra el arco en la barra y reserva espacio para que no tape el texto."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.actividad = _ActividadWebReports(self)
+        self.actividad.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.actividad.move(SPACE_S, (self.height() - self.actividad.height()) // 2)
+
+    def paintEvent(self, event) -> None:
+        opcion = QStyleOptionProgressBar()
+        self.initStyleOption(opcion)
+        margen = self.actividad.width() + SPACE_S * 2
+        opcion.text = self.fontMetrics().elidedText(
+            opcion.text, Qt.TextElideMode.ElideRight, max(0, self.width() - margen * 2),
+        )
+        pintor = QStylePainter(self)
+        pintor.drawControl(QStyle.ControlElement.CE_ProgressBar, opcion)
+        pintor.end()
+
+
 class WebReportsWindow(QDialog):
     """Suite de consulta para limpiar excepciones de Web Reports."""
 
@@ -558,9 +585,8 @@ class WebReportsWindow(QDialog):
         # barra se estira y las tres cifras conservan su ancho.
         fila_progreso = QHBoxLayout()
         fila_progreso.setSpacing(SPACE_S)
-        self.actividad = _ActividadWebReports(self)
-        fila_progreso.addWidget(self.actividad)
-        self.progreso = QProgressBar()
+        self.progreso = _ProgresoWebReports()
+        self.actividad = self.progreso.actividad
         self.progreso.setRange(0, 100)
         self.progreso.setValue(0)
         self.progreso.setTextVisible(True)
@@ -963,11 +989,15 @@ class WebReportsWindow(QDialog):
         worker.start()
 
     def _al_avanzar(self, texto: str) -> None:
-        self.resumen.setText(texto)
         logger.info("Web Reports: {}", texto)
         if isinstance(self._worker, WebReportsWorker):
+            self.resumen.clear()
+            self.resumen.hide()
             self.progreso.setFormat(f"%p% - {texto}")
             self.progreso.setToolTip(texto)
+        else:
+            self.resumen.show()
+            self.resumen.setText(texto)
 
     def _arrancar_cronometro(self, tarea: str, unidades: int) -> None:
         """Pone el reloj en marcha con lo que costó ese trabajo la vez pasada."""
@@ -1034,6 +1064,7 @@ class WebReportsWindow(QDialog):
 
     def _al_recibir(self, excepciones: object) -> None:
         self._cerrar_cronometro(aprender=True)
+        self.resumen.show()
         self._resultados = list(excepciones)
         self.progreso.setFormat("Consulta terminada: %p%")
         self.progreso.setToolTip("")
@@ -1235,6 +1266,7 @@ class WebReportsWindow(QDialog):
 
     def _al_fallar(self, mensaje: str) -> None:
         self._cerrar_cronometro(aprender=False)
+        self.resumen.show()
         self.resumen.setText(mensaje)
         self.progreso.setFormat("Consulta interrumpida: %p%")
         self.progreso.setToolTip(mensaje)
@@ -1242,6 +1274,7 @@ class WebReportsWindow(QDialog):
     def _al_cancelar(self) -> None:
         self._cerrar_revision()
         self._cerrar_cronometro(aprender=False)
+        self.resumen.show()
         self.resumen.setText("Corrección cancelada." if isinstance(self._worker, CorreccionWorker) else "Consulta cancelada.")
         if not isinstance(self._worker, CorreccionWorker):
             self.progreso.setFormat("Consulta cancelada: %p%")

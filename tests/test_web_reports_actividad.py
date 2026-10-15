@@ -50,7 +50,7 @@ def test_la_consulta_informa_en_terminal_y_barra_y_detiene_el_arco(
         texto = "Esperando que AirVault genere el reporte"
         ventana._al_avanzar(texto)
 
-        assert ventana.resumen.text() == texto
+        assert ventana.resumen.isHidden()
         assert ventana.progreso.text() == f"25% - {texto}"
         assert ventana.actividad._timer.isActive()
         assert mensajes == [f"Web Reports: {texto}"]
