@@ -1931,7 +1931,34 @@ class TrabajoAirVaultWorker(QThread):
             "cliente": cliente,
             "acotado": seleccionados is not None,
             "fallos_de_plan": fallos_de_plan,
+            "web_index": self._revisar_web_index(cliente),
         })
+
+    def _revisar_web_index(self, cliente):
+        """La cola entera de Web Index, para encontrar lo subido dos veces.
+
+        Mira todos los manifiestos de este equipo, también los terminados y
+        los omitidos: la copia de un batch completado hace días es la que
+        más urge borrar. Es una lectura más por revisión y no decide nada de
+        lo demás, así que si AirVault no la entrega la revisión sigue igual
+        y las copias se buscan en la siguiente.
+        """
+        from app.airvault.copias_en_index import revisar
+        from app.airvault.session import SesionCancelada
+
+        listar = getattr(cliente, "listar_lotes", None)
+        if not callable(listar):
+            return None
+        todos = self.estado.get("todos_los_trabajos") or self.estado.get("trabajos") or []
+        try:
+            self._avisar("Buscando batches repetidos en Web Index", 0, 0)
+            lotes = list(listar())
+            return revisar(todos, lotes, cliente, self.estado.setdefault("copias_vistas", {}))
+        except SesionCancelada:
+            raise
+        except Exception as exc:  # noqa: BLE001 - no tumba la revisión
+            logger.info("No se pudo revisar la cola entera de Web Index: {}", exc)
+            return None
 
     # ── indexar ────────────────────────────────────────────────────
 
@@ -2486,6 +2513,13 @@ class AirVaultWindow(QDialog):
         # Con qué pendientes y por qué motivo se dijo que el proceso quedó
         # detenido, para no repetirlo mientras nada cambie.
         self._detencion_anotada: Optional[tuple] = None
+        # Batches de Web Index que repiten otro: la línea que los explica,
+        # cuántos sobran, sus IDs y cómo nombrarlos cuando ya no estén. Es lo
+        # último que dijo la cola entera; ver `_anotar_web_index`.
+        self._copias_en_index: dict[str, tuple[str, int, tuple[str, ...], str]] = {}
+        # Batches indexados que salieron de Web Index y ya se dijo, para no
+        # repetirlo en cada revisión; ver `_anotar_salidos_de_index`.
+        self._salidos_anotados: set[str] = set()
         # Reintentos espaciados ya hechos de cada batch que gastó sus
         # comprobaciones, y cuándo fue el último (``time.monotonic``); ver
         # `MINUTOS_ENTRE_REINTENTOS_AMARILLOS`.
@@ -7398,6 +7432,9 @@ class AirVaultWindow(QDialog):
                 self._estado.pop(clave, None)
         self._recuperar_pendientes = False
         self._estado["trabajos"] = self._filtrar_trabajos(self._trabajos)
+        # Para reconocer en Web Index la copia de cualquier batch de este
+        # equipo, aunque sea de otra ejecución o ya esté completado.
+        self._estado["todos_los_trabajos"] = list(self._trabajos)
         if self.solo_ejecucion_check.isChecked():
             self._estado["recuperar_pendientes"] = False
         return self._estado
@@ -8450,6 +8487,127 @@ class AirVaultWindow(QDialog):
             )
         self._anotar(resumen_de_clasificacion(revisados) + ".", lineas)
 
+    def _anotar_web_index(self, revision) -> None:
+        """Dice en el registro qué batches están dos veces en Web Index.
+
+        Solo cuando cambia lo que hay: la revisión pasa cada pocos minutos y
+        repetir la misma lista en cada vuelta la escondía entre lo demás.
+        Lo que alguien ya borró se dice una vez, para que se vea que bastó.
+        Una copia que sigue en la cola y esta vez no se pudo leer (alguien
+        la abrió) se queda en la lista sin anunciarse otra vez. Sin
+        respuesta de la cola (``None``) se queda lo último que se supo.
+        """
+        from app.airvault.copias_en_index import COMPLETADO, EN_INDEX
+
+        if revision is None:
+            return
+        actuales: dict[str, tuple[str, int, tuple[str, ...], str]] = {}
+        for copia in revision.copias:
+            lote = copia.lote
+            if copia.situacion == EN_INDEX:
+                queda = f"que sigue en Web Index como {copia.original}"
+            elif copia.situacion == COMPLETADO:
+                queda = (f"que ya está completado como {copia.original}"
+                         if copia.original else "que ya está completado")
+            else:
+                queda = f"que ya se indexó como {copia.original} y salió de Web Index"
+            actuales[copia.batch_id] = (
+                f"{copia.batch_id} «{lote.nombre}», {lote.paginas} páginas: "
+                f"copia de «{copia.nombre}», {queda}. Se debe borrar.",
+                1, (copia.batch_id,), f"{copia.batch_id} «{lote.nombre}»",
+            )
+        for repetido in revision.repetidos:
+            ids = list(repetido.ids)
+            cuales = ", ".join(ids[:-1]) + f" y {ids[-1]}"
+            actuales[cuales] = (
+                f"{cuales} «{repetido.nombre}», {repetido.lotes[0].paginas} "
+                f"páginas cada uno: es el mismo batch {len(ids)} veces y "
+                "ningún batch de este equipo lo lleva. Se debe borrar el que "
+                "no lleve la barra lateral del equipo que lo subió.",
+                len(ids) - 1, tuple(ids), f"«{repetido.nombre}» ({cuales})",
+            )
+        llevados = {
+            str(trabajo.manifiesto.batch_id or "").strip().upper()
+            for trabajo in self._trabajos
+        }
+        anteriores = self._copias_en_index
+        borradas = []
+        for clave, entrada in anteriores.items():
+            if clave in actuales:
+                continue
+            ids = entrada[2]
+            if any(batch_id in llevados for batch_id in ids):
+                continue
+            if all(batch_id in revision.ids for batch_id in ids):
+                actuales[clave] = entrada
+            else:
+                borradas.append(entrada[3])
+        self._copias_en_index = actuales
+        if borradas:
+            self._anotar("Ya no sobra en Web Index:", borradas)
+        if any(clave not in anteriores for clave in actuales):
+            cuantos = self._copias_por_borrar()
+            self._anotar(
+                "En Web Index hay 1 batch repetido que se debe borrar:"
+                if cuantos == 1 else
+                f"En Web Index hay {cuantos} batches repetidos que se deben borrar:",
+                [entrada[0] for entrada in actuales.values()],
+            )
+
+    def _anotar_salidos_de_index(self, revision) -> None:
+        """Avisa del batch indexado que ya no está en Web Index.
+
+        Lo que el programa indexa y no completa (REVISAR, o todo sin
+        «Completar batch») lo completa una persona, y al hacerlo sale de la
+        cola. Una vez indexado el programa ya no lo busca en Web Index, así
+        que su fila seguía diciendo «Indexado». Se dice una vez por batch:
+        comprobarlo en Web Search lo marca como completado si sus bitácoras
+        ya están publicadas; si no lo están, alguien lo borró.
+        """
+        from app.airvault.flujo import INDEXADO
+
+        if revision is None:
+            return
+        completar = self.completar_check.isChecked()
+        salidos = [
+            parte.trabajo for parte in self._partes_del_alcance()
+            if parte.estado == INDEXADO and parte.batch_id
+            and (parte.trabajo.manifiesto.solo_subir or not completar)
+            and parte.batch_id.strip().upper() not in revision.ids
+            and str(parte.trabajo.carpeta) not in self._salidos_anotados
+        ]
+        if not salidos:
+            return
+        self._salidos_anotados.update(str(trabajo.carpeta) for trabajo in salidos)
+        self._anotar(
+            "Un batch indexado ya no está en Web Index: lo completaron o lo "
+            "borraron en AirVault. «Verificar subidas en Web Search», en sus "
+            "acciones, lo marca como completado si sus bitácoras ya están "
+            "publicadas:"
+            if len(salidos) == 1 else
+            f"{len(salidos)} batches indexados ya no están en Web Index: los "
+            "completaron o los borraron en AirVault. «Verificar subidas en Web "
+            "Search», en sus acciones, los marca como completados si sus "
+            "bitácoras ya están publicadas:",
+            [self._rotulo(trabajo) for trabajo in salidos],
+        )
+
+    def _copias_por_borrar(self) -> int:
+        """Cuántos batches sobran en Web Index según la última revisión."""
+        return sum(entrada[1] for entrada in self._copias_en_index.values())
+
+    def _aviso_de_copias(self) -> str:
+        """La frase que recuerda las copias pendientes al final del proceso."""
+        cuantos = self._copias_por_borrar()
+        if not cuantos:
+            return ""
+        return (
+            " En Web Index queda 1 batch repetido por borrar; está en el registro."
+            if cuantos == 1 else
+            f" En Web Index quedan {cuantos} batches repetidos por borrar; están "
+            "en el registro."
+        )
+
     def _al_batch_indexando(self, trabajo, activo: bool) -> None:
         clave = str(trabajo.carpeta)
         if activo:
@@ -8593,6 +8751,8 @@ class AirVaultWindow(QDialog):
             )
             self.estado_label.setText("Revisión terminada")
         self._anotar_confirmacion(revisados, acotado)
+        self._anotar_web_index(datos.get("web_index"))
+        self._anotar_salidos_de_index(datos.get("web_index"))
         for _clave, nombre, detalle in datos.get("fallos_de_plan") or ():
             motivo = mensaje_error(detalle, "AirVault no dejó leerlo.")
             self._anotar(
@@ -9023,7 +9183,7 @@ class AirVaultWindow(QDialog):
             lineas.append(linea)
         if len(pendientes) > len(lineas):
             lineas.append(f"Y {len(pendientes) - len(lineas)} más en la cola.")
-        texto = f"El proceso se detuvo con {cuantos}. {motivo}"
+        texto = f"El proceso se detuvo con {cuantos}. {motivo}{self._aviso_de_copias()}"
         self._anotar(texto, lineas)
         if self._resultado_fallido:
             # El motivo del fallo es lo primero que hay que leer: se le
@@ -9075,6 +9235,7 @@ class AirVaultWindow(QDialog):
         )
         if any(p.trabajo.manifiesto.solo_subir for p in partes):
             texto += " Las incidencias de REVISAR quedan para revisión manual."
+        texto += self._aviso_de_copias()
         self.resumen.setText(texto)
         self.estado_label.setText("Proceso terminado")
         self.estado_label.setToolTip(texto)
