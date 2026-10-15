@@ -692,12 +692,17 @@ def test_un_amarillo_agotado_se_reintenta_espaciado_y_con_tope(ventana):
         # Recién intentado, el siguiente espera otra vez.
         assert ventana._listos_automaticos() == []
 
-    # Gastado el tope ya no se reescribe solo, y tampoco sostiene la espera:
-    # no queda nada que AirVault vaya a cambiar ni que el programa haga.
+    # Gastado el tope ya no se reescribe solo, pero el proceso no lo da por
+    # perdido: lo que falta lo corrige alguien en Web Index, y se sigue
+    # mirando, más espaciado, hasta que quede indexado.
+    from app.gui.airvault_window import MINUTOS_ESPERANDO_A_UNA_PERSONA
+
     hechos, _ = ventana._reintentos_espaciados["amarillo"]
     ventana._reintentos_espaciados["amarillo"] = (hechos, vencido)
     assert ventana._listos_automaticos() == []
-    assert not ventana._falta_esperar()
+    assert ventana._falta_esperar()
+    assert ventana._solo_espera_a_una_persona()
+    assert ventana._minutos_de_vigilancia() >= MINUTOS_ESPERANDO_A_UNA_PERSONA
 
 
 def test_el_intento_que_no_escribe_nada_no_se_repite_en_cada_vuelta(ventana):
@@ -719,7 +724,10 @@ def test_el_intento_que_no_escribe_nada_no_se_repite_en_cada_vuelta(ventana):
 
     assert ventana._listos_automaticos() == []
     assert ventana._amarillos_en_espera() == {"amarillo"}
-    assert not ventana._falta_esperar()
+    # Sigue a la vista y vigilado, sin reescribirse, hasta que alguien lo
+    # corrija.
+    assert ventana._falta_esperar()
+    assert ventana._solo_espera_a_una_persona()
     # Y una revisión posterior no le devuelve los reintentos.
     ventana._programar_reconfirmaciones(["amarillo"])
     ventana._descontar_reconfirmaciones([amarillo])

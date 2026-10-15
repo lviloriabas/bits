@@ -8,7 +8,8 @@ from app.airvault.config import AirVaultConfig
 from app.airvault.flujo import (BUSCANDO, COMPLETADO, PUBLICADO, SIN_SUBIR,
                                EstadoParte, Trabajo, estado_local)
 from app.airvault.model import EstadoEtapa, Manifiesto, Registro
-from app.gui.airvault_window import AirVaultWindow, TrabajoAirVaultWorker
+from app.gui.airvault_window import (MINUTOS_ESPERANDO_A_UNA_PERSONA, AirVaultWindow,
+                                     TrabajoAirVaultWorker)
 
 
 def trabajo(raiz, nombre, cantidad=10):
@@ -244,7 +245,12 @@ def test_el_cierre_fallido_no_entra_en_un_ciclo_inmediato(app, tmp_path):
     assert ventana._falta_esperar()
     ventana._anotar_cierres(datos)
     ventana._anotar_cierres(datos)
-    assert not ventana._falta_esperar()
+    # Rechazado tres veces no se abandona: el proceso no termina hasta que
+    # quede completado, pero se mira y se reintenta espaciado.
+    assert ventana._falta_esperar()
+    assert ventana._solo_espera_a_una_persona()
+    assert ventana._minutos_de_vigilancia() >= MINUTOS_ESPERANDO_A_UNA_PERSONA
+    assert ventana._por_completar(automatico=True) == []
     assert ventana._firma_de_fin() is None
 
 

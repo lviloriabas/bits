@@ -219,13 +219,22 @@ def test_un_incompleto_que_gasto_sus_intentos_no_se_reescribe_antes_de_cada_subi
     assert ventana._por_atender_en_index() == [incompleto]
 
 
-def test_un_cierre_que_airvault_ya_rechazo_tres_veces_no_se_insiste(ventana, tmp_path):
+def test_un_cierre_que_airvault_ya_rechazo_tres_veces_se_espacia_sin_abandonarse(
+    ventana, tmp_path, monkeypatch,
+):
     (indexado,) = cola(ventana, tmp_path, [("indexado", INDEXADO, "003D", "")])
     ventana.completar_check.setChecked(True)
     assert ventana._por_atender_en_index() == [indexado]
 
-    ventana._cierres_fallidos[str(indexado.carpeta)] = (3, 0.0)
+    reloj = [10_000.0]
+    monkeypatch.setattr(modulo.time, "monotonic", lambda: reloj[0])
+    ventana._cierres_fallidos[str(indexado.carpeta)] = (3, reloj[0])
     assert ventana._por_atender_en_index() == []
+    reloj[0] += ventana.minutos_spin.value() * 60
+    assert ventana._por_atender_en_index() == []
+    # Pasado su plazo largo se vuelve a pedir: alguien pudo dejarlo en verde.
+    reloj[0] += modulo.MINUTOS_ENTRE_CIERRES_RECHAZADOS * 60
+    assert ventana._por_atender_en_index() == [indexado]
 
 
 @pytest.mark.parametrize("modo", ["subir_pendientes", "recuperar_ausentes"])

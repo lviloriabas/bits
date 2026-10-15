@@ -424,6 +424,19 @@ PASO_INICIAL = {
 HORAS_SIN_CAMBIOS_ANTES_DE_ESPACIAR = 2
 MINUTOS_SIN_CAMBIOS = 30
 
+# Cada cuánto se mira, como poco, cuando lo único que queda es lo que tiene
+# que corregir una persona en Web Index: el incompleto que gastó sus
+# reintentos y el cierre que AirVault ya rechazó tres veces. El proceso no
+# termina hasta que eso se arregle y quede indexado y completado, pero
+# mirarlo cada minuto no lo arregla antes.
+MINUTOS_ESPERANDO_A_UNA_PERSONA = 10
+
+# Cada cuánto se vuelve a pedir el cierre que AirVault ya rechazó tres veces.
+# Casi siempre son páginas en amarillo, y hasta que alguien las corrija el
+# cierre se rechaza igual; en cuanto quedan en verde, el intento siguiente
+# lo completa.
+MINUTOS_ENTRE_CIERRES_RECHAZADOS = 30
+
 # Cada cuánto se vuelve a preguntar en Web Search por una carga que AirVault
 # no publicó, cuando la consulta anterior no pudo contestar. La revisión de la
 # cola pasa cada pocos minutos, y sin este espacio cada vuelta abría otra
@@ -6478,7 +6491,8 @@ class AirVaultWindow(QDialog):
         eso hecho se sigue con el resto.
 
         El que alguien tiene abierto no entra, ni el incompleto que ya
-        gastó sus intentos: con ellos no hay nada que hacer ahora.
+        gastó sus intentos, ni el cierre rechazado al que todavía no le toca
+        otro intento: con ellos no hay nada que hacer ahora.
         """
         from app.airvault.flujo import (BUSCANDO, INCOMPLETO, INDEXADO, LISTO,
                                         SOLO_REVISAR)
@@ -6486,7 +6500,6 @@ class AirVaultWindow(QDialog):
         if not self._opciones.indexar:
             return []
         completar = self.completar_check.isChecked()
-        ahora = time.monotonic()
         elegidos = []
         for parte in self._partes_del_alcance():
             trabajo = parte.trabajo
@@ -6506,8 +6519,7 @@ class AirVaultWindow(QDialog):
                     elegidos.append(trabajo)
             elif (parte.estado == INDEXADO and completar
                   and not manifiesto.solo_subir):
-                intentos, cuando = self._cierres_fallidos.get(clave, (0, 0))
-                if intentos < 3 and ahora - cuando >= self.minutos_spin.value() * 60:
+                if self._toca_cerrar(clave):
                     elegidos.append(trabajo)
         return elegidos
 
@@ -6630,17 +6642,32 @@ class AirVaultWindow(QDialog):
         from app.airvault.flujo import INDEXADO
 
         partes = self._partes_del_proceso() if automatico else self._partes_del_alcance()
-        ahora = time.monotonic()
         return [
             parte.trabajo for parte in partes
             if parte.estado == INDEXADO and not parte.trabajo.manifiesto.solo_subir
             and not self._omitida(parte)
-            and (not automatico or (
-                self._cierres_fallidos.get(str(parte.trabajo.carpeta), (0, 0))[0] < 3
-                and ahora - self._cierres_fallidos.get(str(parte.trabajo.carpeta), (0, 0))[1]
-                >= self.minutos_spin.value() * 60
-            ))
+            and (not automatico or self._toca_cerrar(str(parte.trabajo.carpeta)))
         ]
+
+    def _cierre_rechazado(self, clave: str) -> bool:
+        """Si AirVault ya rechazó tres veces el cierre de ese batch."""
+        return self._cierres_fallidos.get(clave, (0, 0))[0] >= 3
+
+    def _toca_cerrar(self, clave: str) -> bool:
+        """Si el programa puede pedir ya, por su cuenta, el cierre de ese batch.
+
+        Tras un cierre que AirVault no aceptó se espera la revisión
+        siguiente. Tras tres seguidos ya no es un tropiezo (casi siempre son
+        páginas en amarillo que tiene que corregir alguien), así que se
+        espacia, pero no se abandona: en cuanto alguien deja el batch en
+        verde, el intento siguiente lo completa y el proceso termina.
+        """
+        intentos, cuando = self._cierres_fallidos.get(clave, (0, 0))
+        espera = (
+            MINUTOS_ENTRE_CIERRES_RECHAZADOS if intentos >= 3
+            else self.minutos_spin.value()
+        )
+        return time.monotonic() - cuando >= espera * 60
 
     def _anotar_cierres(self, datos: dict) -> None:
         for trabajo, resultado in datos.get("cierres") or []:
@@ -6650,9 +6677,10 @@ class AirVaultWindow(QDialog):
                 continue
             intentos = self._cierres_fallidos.get(clave, (0, 0))[0] + 1
             self._cierres_fallidos[clave] = (intentos, time.monotonic())
-            if intentos >= 3:
+            if intentos == 3:
                 self._anotar(f"Batch «{trabajo.manifiesto.nombre_batch}»: AirVault no confirmó el cierre tras tres intentos. "
-                             "Use Completar desde sus acciones para volver a intentarlo.")
+                             f"Se vuelve a intentar cada {MINUTOS_ENTRE_CIERRES_RECHAZADOS} min hasta completarlo; "
+                             "«Completar» en sus acciones lo intenta ya.")
 
     def _ejecucion(self) -> list:
         """Todas las partes de la ejecución, tal como están en la tabla.
@@ -6677,10 +6705,13 @@ class AirVaultWindow(QDialog):
         Una alerta de duplicados solo bloquea cuando está activada la
         preferencia de detener la subida.
 
-        Un indexado incompleto sigue bajo vigilancia mientras le queden
-        reintentos; agotados, deja de sostener la espera. Un indexado
-        confirmado también sigue si falta completar el batch y esa opción
-        está activada.
+        Un indexado incompleto sigue bajo vigilancia aunque gaste sus
+        reintentos, y un indexado confirmado también si falta completarlo y
+        esa opción está activada, aunque AirVault haya rechazado el cierre.
+        Lo que les falta lo corrige una persona en Web Index, y el proceso
+        no termina hasta que eso pase: la revisión siguiente lo da por
+        indexado o lo completa. Solo se espacia (ver `_espera_a_una_persona`).
+        Lo cancelado y lo omitido no esperan nada.
 
         Un batch listo para escribir también, si el indexado va solo: lo
         escribe la cadena, y si esa escritura se corta (la sesión, la red,
@@ -6688,33 +6719,49 @@ class AirVaultWindow(QDialog):
         paraba al ver todo listo, y un indexado cortado dejaba la ejecución
         quieta hasta que alguien volviera a pulsar.
         """
+        return bool(self._partes_que_esperan())
+
+    def _partes_que_esperan(self) -> list:
+        """Los batches del proceso que sostienen la revisión periódica."""
         from app.airvault.flujo import INDEXADO, INCOMPLETO, POSIBLE_DUPLICADO
 
         if self._firma_de_fin() is not None:
-            return False
+            return []
         indexa_solo = bool(self._opciones.indexar)
-        return any(
-            (not parte.se_acabo
-             or (parte.estado == INDEXADO and self.completar_check.isChecked()
-                 and not parte.trabajo.manifiesto.solo_subir))
+        return [
+            parte for parte in self._partes_del_proceso()
+            if (not parte.se_acabo
+                or (parte.estado == INDEXADO and self.completar_check.isChecked()
+                    and not parte.trabajo.manifiesto.solo_subir))
             and parte.estado != POSIBLE_DUPLICADO
             and not self._omitida(parte)
-            and not (parte.estado == INDEXADO
-                     and self._cierres_fallidos.get(str(parte.trabajo.carpeta), (0, 0))[0] >= 3)
-            # El incompleto al que ya no le quedan reintentos no mantiene la
-            # espera: no hay nada que AirVault vaya a cambiar ni que el
-            # programa vaya a hacer solo. El que otro usuario tiene abierto
-            # sí, porque se retoma en cuanto lo cierre.
-            and not (parte.estado == INCOMPLETO and parte.se_puede_indexar
-                     and not self._le_quedan_reintentos(str(parte.trabajo.carpeta)))
             and (
                 not parte.se_puede_indexar
                 or indexa_solo
                 or parte.estado == INCOMPLETO
                 or self._reconfirmaciones.get(str(parte.trabajo.carpeta), 0) > 0
             )
-            for parte in self._partes_del_proceso()
-        )
+        ]
+
+    def _espera_a_una_persona(self, parte) -> bool:
+        """Si ese batch solo avanza cuando alguien lo corrija en Web Index.
+
+        El incompleto que gastó sus reintentos y el indexado cuyo cierre
+        AirVault ya rechazó tres veces: el programa ya hizo lo que podía y
+        sigue mirando, pero reescribirlo o pedir el cierre otra vez no
+        cambia nada hasta que alguien deje sus páginas en verde.
+        """
+        from app.airvault.flujo import INCOMPLETO, INDEXADO
+
+        clave = str(parte.trabajo.carpeta)
+        if parte.estado == INCOMPLETO:
+            return parte.se_puede_indexar and not self._le_quedan_reintentos(clave)
+        return parte.estado == INDEXADO and self._cierre_rechazado(clave)
+
+    def _solo_espera_a_una_persona(self) -> bool:
+        """Si todo lo que sostiene la revisión depende de que alguien lo corrija."""
+        partes = self._partes_que_esperan()
+        return bool(partes) and all(self._espera_a_una_persona(p) for p in partes)
 
     def _subidas_perdidas(self) -> list:
         """Cargas que AirVault aceptó y ya se pueden dar por no publicadas.
@@ -7163,7 +7210,8 @@ class AirVaultWindow(QDialog):
     def _minutos_de_vigilancia(self) -> int:
         """Cada cuánto pregunta el reloj.
 
-        Más espaciado tras varios fallos seguidos, y más todavía cuando
+        Más espaciado tras varios fallos seguidos, cuando lo único que falta
+        lo tiene que corregir alguien en Web Index, y más todavía cuando
         lleva horas sin que nada cambie en la cola.
         """
         minutos = self.minutos_spin.value()
@@ -7171,6 +7219,8 @@ class AirVaultWindow(QDialog):
             return max(minutos, MINUTOS_SIN_CAMBIOS)
         if self._fallos_seguidos >= FALLOS_SEGUIDOS_ANTES_DE_ESPACIAR:
             return max(minutos, MINUTOS_TRAS_FALLOS)
+        if self._solo_espera_a_una_persona():
+            return max(minutos, MINUTOS_ESPERANDO_A_UNA_PERSONA)
         return minutos
 
     def _ms_de_vigilancia(self) -> int:
@@ -7640,10 +7690,11 @@ class AirVaultWindow(QDialog):
         # la ejecución entera, que necesita para no repetir bitácoras, y
         # esta lista le dice a cuáles no les hace nada.
         estado["omitidos"] = self._claves_omitidas()
-        # Cierres que AirVault ya rechazó tres veces: no se insisten solos.
+        # Cierres que AirVault ya rechazó tres veces: se vuelven a pedir solos,
+        # pero espaciados (ver `_toca_cerrar`).
         estado["no_completar"] = {
-            clave for clave, (intentos, _cuando) in self._cierres_fallidos.items()
-            if intentos >= 3
+            clave for clave in self._cierres_fallidos
+            if self._cierre_rechazado(clave) and not self._toca_cerrar(clave)
         }
         self._paso_visible = ""
         sesion = estado.get("sesion")
@@ -8522,6 +8573,12 @@ class AirVaultWindow(QDialog):
         elif self._subidas_perdidas():
             self.resumen.setText(
                 self._aviso_para_volver_a_subir().lstrip()
+            )
+        elif self._solo_espera_a_una_persona():
+            self.resumen.setText(
+                f"Falta que alguien deje en verde en Web Index lo que el programa "
+                f"no pudo: {conteo}. Se revisa cada {self._minutos_de_vigilancia()} "
+                "min hasta que quede indexado y completado."
             )
         elif self._falta_esperar():
             self.resumen.setText(
