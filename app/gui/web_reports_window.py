@@ -577,12 +577,8 @@ class WebReportsWindow(QDialog):
         size_columns_once(self.tabla, stretch_last=True)
         cuerpo.addWidget(self.tabla, 1)
 
-        # El mismo orden que la ventana de AirVault: la barra en su fila,
-        # debajo la frase de estado y al final los botones. Compartir fila
-        # con los botones dejaba la barra corta y ponía las acciones a media
-        # altura de la ventana, donde no las busca nadie. El reloj sí va con
-        # la barra, y con el mismo reparto que en la ventana principal: la
-        # barra se estira y las tres cifras conservan su ancho.
+        # La barra comparte fila con el reloj. Las acciones y la casilla
+        # quedan juntas debajo, sin reservar una fila para cada control.
         fila_progreso = QHBoxLayout()
         fila_progreso.setSpacing(SPACE_S)
         self.progreso = _ProgresoWebReports()
@@ -610,13 +606,6 @@ class WebReportsWindow(QDialog):
         pintar_del_tema(
             self.resumen, lambda: f"color: {color_ayuda()};"
         )
-        # Con el sitio reservado, como allá: los motivos de fallo de esta
-        # consulta son igual de largos («Complete el acceso en Edge con la
-        # cuenta de trabajo…») y sin el hueco la ventana pegaba un salto
-        # cada vez que aparecía uno.
-        self.resumen.setMinimumHeight(
-            self._densidad.airvault_summary_min_height
-        )
         self.resumen.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
         )
@@ -630,7 +619,6 @@ class WebReportsWindow(QDialog):
         recordar(WEB_REPORTS, "revisar_imagenes", self.mostrar_previas)
         self.mostrar_previas.toggled.connect(self._cambiar_revision)
         self._cache_previa = {}
-        cuerpo.addWidget(self.mostrar_previas)
         cuerpo.addLayout(self._fila_botones())
         # Después de los botones: lo que hace al cambiar la selección es
         # encenderlos o apagarlos, y hasta aquí no existen.
@@ -647,6 +635,7 @@ class WebReportsWindow(QDialog):
         fila = QHBoxLayout()
         fila.setContentsMargins(0, 0, 0, 0)
         fila.setSpacing(SPACE_S)
+        fila.addWidget(self.mostrar_previas, alignment=Qt.AlignmentFlag.AlignVCenter)
         fila.addStretch()
 
         self.boton_consultar = QPushButton("Consultar")
