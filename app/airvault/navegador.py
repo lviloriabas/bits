@@ -169,6 +169,12 @@ def _recordar_navegador(sesion: "SesionDeNavegador") -> None:
     _NAVEGADORES_ABIERTOS[clave] = sesion
 
 
+def hay_navegadores_abiertos() -> bool:
+    """Si la GUI tiene navegadores propios pendientes de cerrar."""
+    with _CANDADO_NAVEGADORES:
+        return bool(_NAVEGADORES_ABIERTOS)
+
+
 def cerrar_navegadores_al_salir() -> None:
     """Cierra de una vez los Edge que la GUI mantuvo durante su sesion."""
     global _CIERRE_DIFERIDO

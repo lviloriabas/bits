@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from threading import Event, get_ident
 
-from PySide6.QtCore import QThread
+from PySide6.QtCore import QThread, QTimer
 from PySide6.QtWidgets import QApplication
 
 from app.gui.main_window import _TABLE_CELL_CHUNK, MainWindow
@@ -98,6 +99,160 @@ def test_a_closing_window_does_not_queue_another_export():
     assert not window.btn_preprocess.isEnabled()
     window.close()
     app.processEvents()
+
+
+class _WaitingWorker(QThread):
+    """Simula una consulta de Git que solo termina al recibir la respuesta."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.liberar = Event()
+
+    def run(self):
+        self.liberar.wait(2)
+
+
+def test_el_cierre_espera_a_git_atendiendo_eventos(window, app):
+    consulta = _WaitingWorker(window)
+    ajeno = _WaitingWorker()
+    window._buscar_actualizacion_worker = consulta
+    consulta.start()
+    ajeno.start()
+    window.show()
+    try:
+        inicio = time.monotonic()
+        window.close()
+        assert time.monotonic() - inicio < .5
+        assert window.isVisible()
+        QTimer.singleShot(20, consulta.liberar.set)
+        assert _until(app, lambda: not window.isVisible())
+        assert ajeno.isRunning()
+        assert not ajeno.isInterruptionRequested()
+    finally:
+        consulta.liberar.set()
+        ajeno.liberar.set()
+        consulta.wait()
+        ajeno.wait()
+
+
+def test_el_cierre_del_navegador_no_bloquea_qt(window, app, monkeypatch):
+    from app.airvault import navegador
+
+    liberar = Event()
+    iniciada = Event()
+    hilos = []
+
+    def cerrar():
+        hilos.append(get_ident())
+        iniciada.set()
+        liberar.wait(2)
+
+    monkeypatch.setattr(navegador, "hay_navegadores_abiertos", lambda: True)
+    monkeypatch.setattr(navegador, "cerrar_navegadores_al_salir", cerrar)
+    window.show()
+    try:
+        inicio = time.monotonic()
+        window.close()
+        assert time.monotonic() - inicio < .5
+        assert window.isVisible()
+        assert iniciada.wait(1)
+        QTimer.singleShot(20, liberar.set)
+        assert _until(app, lambda: not window.isVisible())
+        assert len(hilos) == 1
+        assert hilos[0] != get_ident()
+    finally:
+        liberar.set()
+        if window._browser_shutdown_worker is not None:
+            window._browser_shutdown_worker.wait()
+
+
+def test_cancela_la_sesion_y_libera_batches_antes_del_navegador(
+    window, app, tmp_path, monkeypatch,
+):
+    from app.airvault import navegador
+    from app.gui.airvault_window import AirVaultWindow, TrabajoAirVaultWorker
+
+    cancelada = Event()
+    liberaciones = []
+    orden = []
+
+    class Sesion:
+        def cancelar(self):
+            cancelada.set()
+
+    class Trabajo(TrabajoAirVaultWorker):
+        def run(self):
+            cancelada.wait(2)
+
+    airvault = AirVaultWindow(tmp_path)
+    trabajo = Trabajo("comprobar", {"sesion": Sesion()}, airvault)
+    airvault._worker = trabajo
+    window._airvault_windows.append(airvault)
+    liberar = _WaitingWorker(airvault)
+
+    def soltar(esperar=False):
+        assert not esperar
+        assert not trabajo.isRunning()
+        liberaciones.append(True)
+        airvault._soltando.append(liberar)
+        liberar.start()
+
+    def cerrar():
+        assert liberar.liberar.is_set()
+        assert not liberar.isRunning()
+        orden.append("navegador")
+
+    monkeypatch.setattr(airvault, "_soltar_lotes", soltar)
+    monkeypatch.setattr(navegador, "hay_navegadores_abiertos", lambda: True)
+    monkeypatch.setattr(navegador, "cerrar_navegadores_al_salir", cerrar)
+    trabajo.start()
+    window.show()
+    try:
+        window.close()
+        assert trabajo._parar
+        assert cancelada.is_set()
+        assert _until(app, liberar.isRunning)
+        assert window.isVisible()
+        assert not orden
+        QTimer.singleShot(20, liberar.liberar.set)
+        assert _until(app, lambda: not window.isVisible())
+        assert liberaciones == [True]
+        assert orden == ["navegador"]
+    finally:
+        cancelada.set()
+        liberar.liberar.set()
+        trabajo.wait()
+        liberar.wait()
+
+
+def test_el_cierre_no_libera_el_mismo_batch_dos_veces(app, tmp_path, monkeypatch):
+    from app.gui import airvault_window
+
+    airvault = airvault_window.AirVaultWindow(tmp_path)
+    liberar = Event()
+    llamadas = []
+
+    def soltar(trabajos, cliente):
+        llamadas.append((trabajos, cliente))
+        liberar.wait(2)
+
+    monkeypatch.setattr(airvault_window, "_soltar", soltar)
+    monkeypatch.setattr(airvault, "_actualizar_botones_proceso", lambda: None)
+    airvault._deteniendo = True
+    airvault._trabajos = [object()]
+    airvault._estado = {"cliente": object()}
+    try:
+        # Simula el resultado de cancelacion y el sondeo del cierre juntos.
+        airvault._soltar_lotes()
+        airvault._soltar_lotes()
+        assert len(airvault._soltando) == 1
+        liberar.set()
+        assert _until(app, lambda: not airvault._soltando)
+        assert len(llamadas) == 1
+    finally:
+        liberar.set()
+        for hilo in airvault._soltando:
+            hilo.wait()
 
 
 def test_the_table_chunk_is_a_budget_of_cells_not_of_rows():

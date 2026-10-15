@@ -26,14 +26,16 @@ def setup_logging(
     log_dir.mkdir(parents=True, exist_ok=True)
 
     logger.remove()
-    logger.add(
-        sys.stderr,
-        level=level,
-        format=("<green>{time:HH:mm:ss}</green> | "
-                "<level>{level: <8}</level> | "
-                "<cyan>{name}</cyan>:<cyan>{function}</cyan> | "
-                "{message}"),
-    )
+    # pythonw no tiene consola y deja stderr en None.
+    if sys.stderr is not None:
+        logger.add(
+            sys.stderr,
+            level=level,
+            format=("<green>{time:HH:mm:ss}</green> | "
+                    "<level>{level: <8}</level> | "
+                    "<cyan>{name}</cyan>:<cyan>{function}</cyan> | "
+                    "{message}"),
+        )
     logger.add(
         log_dir / "app_{time:YYYY-MM-DD}.log",
         level="DEBUG",

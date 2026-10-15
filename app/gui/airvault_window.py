@@ -9443,6 +9443,23 @@ class AirVaultWindow(QDialog):
         self.estado_label.setText("Cancelando…")
         self._anotar("Cancelando: se espera a desbloquear los batches abiertos")
 
+    def preparar_cierre(self) -> list[QThread]:
+        """Cancela y libera batches con eventos activos hasta que termine todo."""
+        if not self._deteniendo:
+            self._deteniendo = True
+            self._cancelar()
+            self._websearch_pendientes.clear()
+            self._parar_reintento_del_chequeo()
+            self._parar_vigilancia()
+            if self._confirmador is not None:
+                self._confirmador.stop()
+        vivos = [worker for worker in (self._worker, self._worker_websearch)
+                 if worker is not None and worker.isRunning()]
+        if not vivos and not getattr(self, "_cierre_lotes_solicitado", False):
+            self._soltar_lotes()
+            self._cierre_lotes_solicitado = True
+        return vivos + [hilo for hilo in self._soltando if hilo.isRunning()]
+
     def detener(self) -> None:
         """Pide al hilo que pare; la llama la ventana principal al cerrarse."""
         self._deteniendo = True
@@ -9459,7 +9476,8 @@ class AirVaultWindow(QDialog):
             self._worker_websearch.wait(7000)
         # Aquí sí se espera: el programa se está cerrando y un batch que
         # queda tomado deja colgada la próxima apertura.
-        self._soltar_lotes(esperar=True)
+        if not getattr(self, "_cierre_lotes_solicitado", False):
+            self._soltar_lotes(esperar=True)
         # Y a los que ya estuvieran soltando en su propio hilo: destruirlos
         # a media petición deja el batch tomado, que es lo que se venía a
         # evitar.
@@ -9480,6 +9498,12 @@ class AirVaultWindow(QDialog):
         contestar, y hacerlo en el hilo de la ventana la dejaba congelada
         justo al cambiar de ejecución o al cancelar.
         """
+        # El resultado de cancelacion y el sondeo del cierre pueden llegar
+        # juntos. No deben liberar los mismos batches en dos hilos a la vez.
+        if self._deteniendo:
+            if getattr(self, "_cierre_lotes_solicitado", False):
+                return
+            self._cierre_lotes_solicitado = True
         trabajos = self._trabajos
         cliente = self._estado.get("cliente")
         if not trabajos or cliente is None:

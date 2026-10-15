@@ -601,6 +601,15 @@ class PreviewLoader(QObject):
             self.previewReady.emit(page_number, pdf_path, None)
 
 
+class _BrowserShutdownWorker(QThread):
+    """Espera el cierre del navegador propio sin bloquear los eventos de Qt."""
+
+    def run(self) -> None:
+        from app.airvault.navegador import cerrar_navegadores_al_salir
+
+        cerrar_navegadores_al_salir()
+
+
 class MainWindow(QMainWindow):
     """Ventana principal de la aplicación."""
 
@@ -773,6 +782,7 @@ class MainWindow(QMainWindow):
         self._forzado = False
         self._cancel_pedido = False
         self._torn_down = False
+        self._browser_shutdown_worker: QThread | None = None
         self._shutdown_timer = QTimer(self)
         self._shutdown_timer.setInterval(_SHUTDOWN_POLL_MS)
         self._shutdown_timer.timeout.connect(self._on_shutdown_tick)
@@ -833,7 +843,8 @@ class MainWindow(QMainWindow):
 
     def load_initial_data(self) -> None:
         """Carga los datos del disco después de mostrar la ventana."""
-        self._load_default_input()
+        if not self._closing and not self._torn_down:
+            self._load_default_input()
 
     # ── Versión nueva ───────────────────────────────────────────────────
 
@@ -848,12 +859,14 @@ class MainWindow(QMainWindow):
 
     def vigilar_actualizaciones(self) -> None:
         """Pregunta ahora si hay versión nueva y luego cada media hora."""
+        if self._closing or self._torn_down:
+            return
         self._buscar_actualizacion()
         self._actualizacion_timer.start()
 
     def _buscar_actualizacion(self) -> None:
         """Lanza la consulta al repositorio si no hay otra en curso."""
-        if self._closing or self._actualizar_worker is not None:
+        if self._closing or self._torn_down or self._actualizar_worker is not None:
             return
         previa = self._buscar_actualizacion_worker
         if previa is not None and previa.isRunning():
@@ -865,7 +878,7 @@ class MainWindow(QMainWindow):
 
     def _on_actualizacion_encontrada(self, pendientes: int) -> None:
         """Muestra u oculta el botón según haya commits nuevos."""
-        if self._actualizar_worker is not None:
+        if self._closing or self._torn_down or self._actualizar_worker is not None:
             return
         self.btn_actualizar.setToolTip(
             f"Hay {pendientes} cambio(s) nuevo(s) en el repositorio. Al hacer "
@@ -5454,7 +5467,7 @@ class MainWindow(QMainWindow):
         se rompen los pools de OCR, con lo que los hilos terminan solos, y
         se cierra sin destruir ninguno.
         """
-        running = self._running_workers()
+        running = self._shutdown_workers()
         if running:
             # Volver a cerrar mientras ya se estaba cerrando es la senal de
             # que la espera se hizo larga. Entonces se ofrece cortar: sin
@@ -5466,17 +5479,46 @@ class MainWindow(QMainWindow):
                 "curso para cerrarse sin perderlas.",
             ):
                 self._cortar_trabajo_en_curso()
-                running = self._running_workers()
-                if running:
-                    self._esperar_a_los_hilos(running)
-                self._teardown()
-                super().closeEvent(event)
+                running = self._shutdown_workers()
+                # Incluso tras el corte se espera con eventos: destruir un
+                # hilo que siga vivo puede abortar el proceso entero.
+                self._begin_shutdown(running)
+                event.ignore()
                 return
             self._begin_shutdown(running)
             event.ignore()
             return
         self._teardown()
         super().closeEvent(event)
+
+    def _shutdown_workers(self) -> list[QThread]:
+        """Incluye consultas y limpieza que no son trabajo de procesamiento."""
+        running = self._running_workers()
+        for ventana in self._airvault_windows:
+            try:
+                running.extend(ventana.preparar_cierre())
+            except RuntimeError:
+                pass
+        for worker in (
+            self._buscar_actualizacion_worker, self._browser_shutdown_worker,
+        ):
+            if worker is not None:
+                try:
+                    if worker.isRunning() and worker not in running:
+                        running.append(worker)
+                except RuntimeError:
+                    pass
+        # Edge se cierra solo cuando ningun trabajo ni liberacion de batches
+        # lo necesita. El hilo conserva la ventana hasta que termina.
+        if not running and self._browser_shutdown_worker is None:
+            from app.airvault.navegador import hay_navegadores_abiertos
+
+            if hay_navegadores_abiertos():
+                worker = _BrowserShutdownWorker(self)
+                self._browser_shutdown_worker = worker
+                worker.start()
+                running.append(worker)
+        return running
 
     def _confirmar_corte(self, titulo: str, situacion: str) -> bool:
         """Pregunta si se corta el trabajo en curso, avisando de lo que cuesta."""
@@ -5525,7 +5567,12 @@ class MainWindow(QMainWindow):
                 f"Cierre solicitado: deteniendo {len(running)} tarea(s) en curso"
             )
             for worker in running:
-                worker.requestInterruption()
+                cancelar = getattr(worker, "cancelar", None)
+                if callable(cancelar):
+                    cancelar()
+                else:
+                    worker.requestInterruption()
+            self._actualizacion_timer.stop()
             for button in (
                 self.btn_process, self.btn_preprocess,
                 self.btn_export, self.btn_cancel,
@@ -5541,7 +5588,7 @@ class MainWindow(QMainWindow):
 
     def _on_shutdown_tick(self) -> None:
         """Cierra de verdad en cuanto el último hilo termina."""
-        if self._running_workers():
+        if self._shutdown_workers():
             return
         self._shutdown_timer.stop()
         self.close()
@@ -5590,6 +5637,8 @@ class MainWindow(QMainWindow):
                 pass
         self._preview_thread.quit()
         self._preview_thread.wait(5000)
+        if self._browser_shutdown_worker is not None:
+            self._browser_shutdown_worker.wait()
         # Red de seguridad: si algún hilo llegara vivo hasta aquí, esperarlo
         # es preferible a que Qt lo destruya en marcha y aborte el proceso.
         for worker in self._running_workers():
@@ -5598,8 +5647,9 @@ class MainWindow(QMainWindow):
         # AirVault y Web Reports comparten un Edge durante toda la sesion.
         # Ya sin hilos que lo usen, se cierra una sola vez y sin recorrer sus
         # pestanas individualmente.
-        from app.airvault.navegador import cerrar_navegadores_al_salir
-        cerrar_navegadores_al_salir()
+        if self._browser_shutdown_worker is None:
+            from app.airvault.navegador import cerrar_navegadores_al_salir
+            cerrar_navegadores_al_salir()
 
 
 def _hoja_de_actualizar() -> str:
