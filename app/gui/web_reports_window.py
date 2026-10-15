@@ -595,8 +595,9 @@ class WebReportsWindow(QDialog):
         )
         self.cronometro = Cronometro(alto)
         self.cronometro.setToolTip(
-            "El tiempo restante se recalcula con las bitácoras terminadas "
-            "y el ritmo observado."
+            "El tiempo restante se ajusta con las páginas leídas y las bitácoras "
+            "terminadas. Si AirVault tarda más de lo previsto, queda por calcular "
+            "hasta recibir un nuevo avance."
         )
         fila_progreso.addWidget(self.cronometro)
         cuerpo.addLayout(fila_progreso)
@@ -1009,6 +1010,9 @@ class WebReportsWindow(QDialog):
 
     def _al_leer_paginas(self, leidas: int, total: int, reporte: int, reportes: int) -> None:
         self._paginas_leidas[reporte] = leidas
+        if self._estimacion is not None:
+            self._estimacion.leyo_paginas(leidas, total, reporte, reportes)
+            self._al_latir()
         # Un total provisional de SSRS no autoriza a dar la lectura por terminada.
         fraccion = leidas / total if total > 0 else 0
         porcentaje = int(100 * (reporte - 1 + fraccion) / reportes)
@@ -1027,7 +1031,9 @@ class WebReportsWindow(QDialog):
         transcurrido = estimacion.transcurrido()
         restante = estimacion.restante()
         self.cronometro.actualizar(
-            transcurrido, restante, transcurrido + restante
+            transcurrido, restante,
+            transcurrido + restante if restante is not None else None,
+            sin_estimacion=restante is None,
         )
 
     def _cerrar_cronometro(self, aprender: bool) -> None:

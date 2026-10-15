@@ -195,3 +195,27 @@ def test_abrir_una_busqueda_se_mide_como_apertura_y_nada_mas(
         assert ventana._estimacion is None
     finally:
         ventana.close()
+
+
+def test_el_reloj_recalcula_al_leer_paginas_y_distingue_un_tiempo_desconocido(
+    app, tmp_path, medidas, monkeypatch,
+) -> None:
+    ahora = [0.0]
+    monkeypatch.setattr(tiempos.time, "monotonic", lambda: ahora[0])
+    ventana = WebReportsWindow(tmp_path)
+    try:
+        ventana._arrancar_cronometro(TAREA_CONSULTA, 1)
+        ahora[0] = 1.0
+        ventana._al_pasar(0, 1)
+        ahora[0] = 301.0
+        ventana._al_latir()
+        assert _cifras(ventana)["remaining"] == "Por calcular"
+        assert _cifras(ventana)["total"] == "Por calcular"
+        ventana._al_leer_paginas(1, 10, 1, 1)
+        ahora[0] = 303.0
+        ventana._al_leer_paginas(2, 10, 1, 1)
+        assert _cifras(ventana)["remaining"] == "00:00:16"
+        assert _cifras(ventana)["total"] == "00:05:19"
+    finally:
+        ventana._al_cancelar()
+        ventana.close()

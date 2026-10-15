@@ -22,9 +22,9 @@ from __future__ import annotations
 
 import json
 import time
+from collections import deque
 from dataclasses import dataclass
 
-from app.gui.eta import estimate_remaining_seconds
 from app.utils.portable import app_root
 
 # Junto al del rendimiento del OCR y por lo mismo: son medidas de este equipo,
@@ -35,12 +35,6 @@ ARCHIVO = app_root() / "output" / ".web_reports.json"
 TAREA_CONSULTA = "consulta"
 TAREA_CORRECCION = "correccion"
 TAREA_BUSQUEDA = "busqueda"
-
-# Ritmo al que el tiempo observado le gana al guardado. Aquí una unidad es un
-# reporte o una bitácora entera, no una página: con tres ya se sabe a qué
-# velocidad va esta corrida, y esperar a veinte sería no mirarla nunca,
-# porque casi ninguna corrida tiene tantas.
-CALENTAMIENTO = 3.0
 
 # Entre qué valores se admite una medida, en segundos. Fuera de ahí no es el
 # ritmo del equipo sino un trabajo que se quedó esperando algo, y guardarlo
@@ -140,6 +134,14 @@ class Estimacion:
         self._inicio = _ahora(inicio)
         self._abierto: float | None = None
         self._hechas = 0
+        self._ultimo_avance: float | None = None
+        self._ritmo_s: float | None = None
+        self._muestras: deque[tuple[float, int]] = deque(maxlen=5)
+        self._reporte = 0
+        self._paginas = 0
+        self._total_paginas = 0
+        self._ultima_pagina: float | None = None
+        self._ritmo_pagina_s: float | None = None
 
     @property
     def hechas(self) -> int:
@@ -150,6 +152,15 @@ class Estimacion:
         """La apertura quedó atrás: desde aquí se cuentan las unidades."""
         if self._abierto is None:
             self._abierto = _ahora(ahora)
+            self._ultimo_avance = self._abierto
+
+    @staticmethod
+    def _ajustar_ritmo(anterior: float | None, muestra: float) -> float:
+        """Adopta la primera medida y responde antes cuando el trabajo acelera."""
+        if anterior is None:
+            return muestra
+        peso = 0.8 if muestra < anterior else 0.5
+        return anterior * (1.0 - peso) + muestra * peso
 
     def avanzo(
         self,
@@ -165,36 +176,85 @@ class Estimacion:
         piezas tenía de verdad: el plan de la ventana incluye filas que solo
         se pueden revisar a mano, y esas no se abren en Edge.
         """
-        self.abrio(ahora)
+        momento = _ahora(ahora)
+        self.abrio(momento)
         if total is not None:
             self.unidades = max(int(total), int(hechas))
-        self._hechas = max(self._hechas, int(hechas))
+        if hechas > self._hechas:
+            assert self._ultimo_avance is not None
+            duracion = momento - self._ultimo_avance
+            self._muestras.append((max(0.0, duracion), int(hechas) - self._hechas))
+            duracion_reciente = sum(s for s, _n in self._muestras)
+            if duracion_reciente > 0:
+                muestra = duracion_reciente / sum(n for _s, n in self._muestras)
+                self._ritmo_s = self._ajustar_ritmo(self._ritmo_s, muestra)
+            self._ultimo_avance = momento
+            self._hechas = int(hechas)
+
+    def leyo_paginas(
+        self, leidas: int, total: int, reporte: int, reportes: int,
+        ahora: float | None = None,
+    ) -> None:
+        """Mide la lectura sin confundirla con la generacion del reporte."""
+        momento = _ahora(ahora)
+        self.abrio(momento)
+        self.unidades = max(self.unidades, reportes)
+        if reporte <= self._hechas or reporte < self._reporte:
+            return
+        if reporte != self._reporte:
+            self._reporte = reporte
+            self._paginas = 0
+            self._ritmo_pagina_s = None
+            self._ultima_pagina = None
+        if leidas > self._paginas:
+            if self._ultima_pagina is not None:
+                duracion = momento - self._ultima_pagina
+                if duracion > 0:
+                    muestra = duracion / (leidas - self._paginas)
+                    self._ritmo_pagina_s = self._ajustar_ritmo(self._ritmo_pagina_s, muestra)
+            self._paginas = leidas
+            self._ultima_pagina = momento
+        self._total_paginas = total
 
     def transcurrido(self, ahora: float | None = None) -> float:
         """Lo que lleva corriendo el trabajo, desde que se lanzó el hilo."""
         return max(0.0, _ahora(ahora) - self._inicio)
 
-    def restante(self, ahora: float | None = None) -> float:
+    def restante(self, ahora: float | None = None) -> float | None:
         """Lo que falta: lo que quede de apertura más lo que quede de trabajo.
 
-        Mientras la sesión se levanta no hay nada medido todavía, así que se
-        cuenta con lo guardado. Ya abierta, el ritmo de esta corrida manda
-        sobre el histórico en cuanto hay unidades terminadas que mirar.
+        Descuenta el tiempo de la unidad en curso y usa las duraciones de
+        las unidades terminadas, sin sumar esa espera al ritmo observado.
+        Una espera que supera lo previsto deja el restante por calcular.
         """
         momento = _ahora(ahora)
         if self._abierto is None:
-            falta_abrir = max(
-                0.0, self.tiempos.apertura_s - self.transcurrido(momento)
-            )
+            falta_abrir = self.tiempos.apertura_s - self.transcurrido(momento)
+            if falta_abrir < 0:
+                return None
             return falta_abrir + self.unidades * self.tiempos.unidad_s
-        pendiente = estimate_remaining_seconds(
-            total_pages=self.unidades,
-            completed_pages=self._hechas,
-            elapsed_seconds=momento - self._abierto,
-            cached_ms_per_page=self.tiempos.unidad_s * 1000.0,
-            warmup_units=CALENTAMIENTO,
-        )
-        return pendiente or 0.0
+        pendientes = max(0, self.unidades - self._hechas)
+        if not pendientes:
+            return 0.0
+        ritmo = self._ritmo_s if self._ritmo_s is not None else self.tiempos.unidad_s
+        if self.tarea == TAREA_CONSULTA and self._reporte == self._hechas + 1:
+            if self._total_paginas <= 0:
+                return None
+            faltan_paginas = max(0, self._total_paginas - self._paginas)
+            if not faltan_paginas:
+                return max(0, pendientes - 1) * ritmo
+            if self._ritmo_pagina_s is None:
+                return None
+            assert self._ultima_pagina is not None
+            lectura = faltan_paginas * self._ritmo_pagina_s - (momento - self._ultima_pagina)
+            if lectura <= 0:
+                return None
+            return lectura + max(0, pendientes - 1) * ritmo
+        assert self._ultimo_avance is not None
+        en_curso = momento - self._ultimo_avance
+        if en_curso >= ritmo:
+            return None
+        return pendientes * ritmo - en_curso
 
     def medido(self, ahora: float | None = None) -> Tiempos | None:
         """Lo que costó de verdad, o nada si no llegó ni a abrir la sesión.
@@ -208,9 +268,7 @@ class Estimacion:
         apertura_s = self._abierto - self._inicio
         if not self._hechas:
             return Tiempos(apertura_s, self.tiempos.unidad_s)
-        return Tiempos(
-            apertura_s, (_ahora(ahora) - self._abierto) / self._hechas
-        )
+        return Tiempos(apertura_s, self._ritmo_s or self.tiempos.unidad_s)
 
     def aprender(self, ahora: float | None = None) -> Tiempos | None:
         """Guarda lo medido. Solo lo llama quien vio terminar el trabajo."""

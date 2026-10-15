@@ -139,3 +139,86 @@ def test_cada_trabajo_guarda_lo_suyo_sin_pisar_al_otro(medidas) -> None:
     datos = json.loads(medidas.read_text(encoding="utf-8"))
 
     assert sorted(datos) == [TAREA_CONSULTA, TAREA_CORRECCION]
+
+
+def test_el_restante_desciende_mientras_se_genera_el_primer_reporte():
+    estimacion = Estimacion(TAREA_CONSULTA, 2, Tiempos(1.0, 90.0), inicio=0.0)
+    estimacion.avanzo(0, 2, ahora=1.0)
+    assert estimacion.restante(ahora=1.0) == 180.0
+    assert estimacion.restante(ahora=31.0) == 150.0
+    assert estimacion.restante(ahora=61.0) == 120.0
+
+
+def test_el_primer_reporte_terminado_sustituye_un_historico_lento():
+    estimacion = Estimacion(TAREA_CONSULTA, 2, Tiempos(1.0, 455.0), inicio=0.0)
+    estimacion.avanzo(0, 2, ahora=1.0)
+    estimacion.avanzo(1, 2, ahora=31.0)
+    assert estimacion.restante(ahora=31.0) == 30.0
+    assert estimacion.restante(ahora=41.0) == 20.0
+
+
+def test_una_espera_mayor_a_la_prevista_queda_por_calcular():
+    estimacion = Estimacion(TAREA_CONSULTA, 2, Tiempos(1.0, 30.0), inicio=0.0)
+    assert estimacion.restante(ahora=2.0) is None
+    estimacion.avanzo(0, 2, ahora=3.0)
+    assert estimacion.restante(ahora=40.0) is None
+    estimacion.avanzo(1, 2, ahora=43.0)
+    assert estimacion.restante(ahora=43.0) == 40.0
+
+
+def test_la_lectura_no_proyecta_la_espera_de_generacion_sobre_cada_pagina():
+    estimacion = Estimacion(TAREA_CONSULTA, 1, Tiempos(1.0, 455.0), inicio=0.0)
+    estimacion.avanzo(0, 1, ahora=1.0)
+    estimacion.leyo_paginas(1, 10, 1, 1, ahora=301.0)
+    assert estimacion.restante(ahora=301.0) is None
+    estimacion.leyo_paginas(2, 10, 1, 1, ahora=303.0)
+    assert estimacion.restante(ahora=303.0) == 16.0
+    assert estimacion.restante(ahora=304.0) == 15.0
+    estimacion.leyo_paginas(3, 10, 1, 1, ahora=304.0)
+    assert estimacion.restante(ahora=304.0) == pytest.approx(8.4)
+
+
+def test_un_total_de_paginas_provisional_no_da_un_restante_inventado():
+    estimacion = Estimacion(TAREA_CONSULTA, 1, Tiempos(1.0, 90.0), inicio=0.0)
+    estimacion.avanzo(0, 1, ahora=1.0)
+    estimacion.leyo_paginas(1, 0, 1, 1, ahora=20.0)
+    estimacion.leyo_paginas(2, 0, 1, 1, ahora=22.0)
+    assert estimacion.restante(ahora=22.0) is None
+    estimacion.leyo_paginas(3, 4, 1, 1, ahora=24.0)
+    assert estimacion.restante(ahora=24.0) == 2.0
+    estimacion.leyo_paginas(4, 4, 1, 1, ahora=26.0)
+    assert estimacion.restante(ahora=26.0) == 0.0
+
+
+def test_el_segundo_reporte_mide_su_lectura_sin_heredar_el_ritmo_del_primero():
+    estimacion = Estimacion(TAREA_CONSULTA, 2, Tiempos(1.0, 90.0), inicio=0.0)
+    estimacion.avanzo(0, 2, ahora=1.0)
+    estimacion.leyo_paginas(1, 2, 1, 2, ahora=20.0)
+    estimacion.leyo_paginas(2, 2, 1, 2, ahora=21.0)
+    estimacion.avanzo(1, 2, ahora=21.0)
+    estimacion.leyo_paginas(1, 4, 2, 2, ahora=40.0)
+    assert estimacion.restante(ahora=40.0) is None
+    estimacion.leyo_paginas(2, 4, 2, 2, ahora=43.0)
+    assert estimacion.restante(ahora=43.0) == 6.0
+
+
+def test_el_ritmo_reciente_reemplaza_las_unidades_iniciales_lentas(medidas):
+    estimacion = Estimacion(TAREA_CORRECCION, 20, Tiempos(1.0, 60.0), inicio=0.0)
+    estimacion.avanzo(0, 20, ahora=1.0)
+    estimacion.avanzo(1, 20, ahora=61.0)
+    for hechas in range(2, 9):
+        estimacion.avanzo(hechas, 20, ahora=61.0 + (hechas - 1) * 5.0)
+    assert estimacion.restante(ahora=96.0) < 65.0
+    estimacion.avanzo(20, 20, ahora=156.0)
+    estimacion.aprender(ahora=156.0)
+    assert tiempos.cargar(TAREA_CORRECCION).unidad_s < 5.5
+
+
+def test_las_finalizaciones_simultaneas_no_se_miden_como_trabajo_instantaneo():
+    estimacion = Estimacion(TAREA_CORRECCION, 9, Tiempos(1.0, 60.0), inicio=0.0)
+    estimacion.avanzo(0, 9, ahora=1.0)
+    estimacion.avanzo(1, 9, ahora=31.0)
+    estimacion.avanzo(2, 9, ahora=31.0)
+    estimacion.avanzo(3, 9, ahora=31.0)
+    restante = estimacion.restante(ahora=31.0)
+    assert 60.0 <= restante <= 90.0

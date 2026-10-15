@@ -130,6 +130,7 @@ class Cronometro(QFrame):
         transcurrido: float | None = None,
         restante: float | None = None,
         total: float | None = None,
+        sin_estimacion: bool = False,
     ) -> None:
         """Las tres cifras a la vez, sin mezclar estados o estimaciones."""
         valores = {
@@ -139,5 +140,7 @@ class Cronometro(QFrame):
         }
         for clave, valor in valores.items():
             self.etiquetas[clave].setText(
-                formato_reloj(valor) if valor is not None else EN_CERO
+                formato_reloj(valor) if valor is not None else (
+                    "Por calcular" if sin_estimacion and clave != "elapsed" else EN_CERO
+                )
             )
