@@ -1740,20 +1740,30 @@ class TrabajoAirVaultWorker(QThread):
                 "estados": list(estados), "trabajos": list(trabajos),
             })
 
-        # ``or []``: la suite sustituye subir_partes por dobles que no
-        # devuelven nada, y esto no es motivo para tumbar una subida.
-        fallos = subir_partes(
-            list(por_subir), estado["sesion"], avisar=self._avisar,
-            cliente=cliente, dormir=self._dormir,
-            al_finalizar_subidas=self._notificar_subidas,
-            al_encontrar=al_encontrar,
-            en_la_ejecucion=trabajos,
-            forzados=estado.get("forzados") or (),
-            buscador=estado.get("buscador"),
-            ya_confirmados=ya_confirmados,
-            al_clasificar=al_clasificar,
-            tambien_confirmar=tambien_confirmar,
-        ) or []
+        # Antes de cada carga se pregunta a Web Search si sus bitácoras ya
+        # están publicadas (ver app.airvault.antes_de_subir). Solo se pasa
+        # cuando hay una sesión de AirVault de verdad.
+        consulta = self._consulta_antes_de_subir(estado.get("sesion"))
+        extra = {"consultar_websearch": consulta} if consulta is not None else {}
+        try:
+            # ``or []``: la suite sustituye subir_partes por dobles que no
+            # devuelven nada, y esto no es motivo para tumbar una subida.
+            fallos = subir_partes(
+                list(por_subir), estado["sesion"], avisar=self._avisar,
+                cliente=cliente, dormir=self._dormir,
+                al_finalizar_subidas=self._notificar_subidas,
+                al_encontrar=al_encontrar,
+                en_la_ejecucion=trabajos,
+                forzados=estado.get("forzados") or (),
+                buscador=estado.get("buscador"),
+                ya_confirmados=ya_confirmados,
+                al_clasificar=al_clasificar,
+                tambien_confirmar=tambien_confirmar,
+                **extra,
+            ) or []
+        finally:
+            if consulta is not None:
+                consulta.cerrar()
         self.subido.emit({
             "trabajos": estado["trabajos"], "cliente": cliente,
             "sesion": estado.get("sesion"),
@@ -1766,6 +1776,24 @@ class TrabajoAirVaultWorker(QThread):
             ],
             "fallos_indexado": fallos_indexado,
         })
+
+    def _consulta_antes_de_subir(self, sesion):
+        """La pregunta a Web Search que precede a cada carga, o ``None``.
+
+        Usa su propia copia de la sesión, como «Verificar subidas en Web
+        Search», para no tocar la de la subida. Abre Web Search solo si
+        llega a hacer falta.
+        """
+        from app.airvault.antes_de_subir import ConsultaPorPaginas
+        from app.airvault.session import SesionAirVault
+
+        if not isinstance(sesion, SesionAirVault):
+            return None
+        return ConsultaPorPaginas(
+            self.estado["config"],
+            sesion.clonar(renovable=True, cancelacion_independiente=True),
+            cancelado=self.hay_que_parar,
+        )
 
     def _indexar_batch_encontrado(self, trabajo, cliente, raiz: Path) -> dict:
         """Planifica, escribe, verifica y cierra un batch recién confirmado."""

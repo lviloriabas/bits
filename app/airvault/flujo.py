@@ -58,6 +58,7 @@ from app.airvault.mapping import (
     normalizar_matricula,
     valores_de_indice,
 )
+from app.airvault import antes_de_subir
 from app.airvault import duplicados as libro_de_envios
 from app.airvault import envios_exactos
 from app.airvault import identidad as identidad_airvault
@@ -3195,6 +3196,7 @@ def subir_partes(
     ya_confirmados: Sequence["Trabajo"] = (),
     al_clasificar: Optional[Callable[[Sequence[EstadoParte]], None]] = None,
     tambien_confirmar: Sequence["Trabajo"] = (),
+    consultar_websearch: Optional[antes_de_subir.Consultar] = None,
 ) -> List[Tuple["Trabajo", str]]:
     """Confirma todos los batches y sube solamente los que falten.
 
@@ -3256,11 +3258,14 @@ def subir_partes(
     es solo el subconjunto que falta por subir. Sirve para comprobar que
     ninguna bitacora que se va a mandar viaja ya en un batch subido.
 
-    ``buscador`` consulta Web Search antes de cada carga. Es la unica
-    comprobacion que ve un batch ya completado, porque completar lo saca de
-    la cola de Web Index y a partir de ahi ninguna consulta a la cola lo
-    encuentra. Sin buscador queda el libro de envios, que es local y
-    tambien decide.
+    ``consultar_websearch`` pregunta a Web Search, por su pagina, si las
+    bitacoras de cada batch ya estan publicadas, justo antes de subirlo (ver
+    :mod:`app.airvault.antes_de_subir`). Es la unica comprobacion que ve un
+    batch ya completado, porque completar lo saca de la cola de Web Index y a
+    partir de ahi ninguna consulta a la cola lo encuentra. Con ella no se usa
+    ``buscador``, la ruta directa de Web Search que AirVault ya no contesta.
+    Sin ninguna de las dos queda el libro de envios, que es local y tambien
+    decide.
 
     ``forzados`` son las carpetas que alguien mando subir a mano. Esas se
     saltan la comprobacion completa (que es la que tarda, por abrir cada
@@ -3607,12 +3612,36 @@ def subir_partes(
         # Ultimo filtro, y el unico por el que pasan las dos formas de
         # llegar aqui: la carga nueva y la orden dada a mano. Todo lo
         # anterior mira la cola de Web Index; esto mira lo que ya esta
-        # publicado.
+        # publicado (las tres preguntas estan en app.airvault.antes_de_subir).
         motivo = ""
         if not getattr(trabajo, "_duplicado_permitido", False):
             motivo = trabajo.manifiesto.posible_duplicado or revisar_duplicado(
-                trabajo, buscador
+                trabajo, None if consultar_websearch is not None else buscador
             )
+            if not motivo and consultar_websearch is not None:
+                if avisar is not None:
+                    avisar(f"{cabeza}Buscando sus bitácoras en Web Search antes de subir", 0, 0)
+                revision = antes_de_subir.en_web_search(trabajo, consultar_websearch)
+                decision = antes_de_subir.decidir(
+                    revision, trabajo.config.porcentaje_duplicados, orden_a_mano=forzado,
+                )
+                if decision.accion == antes_de_subir.ESPERAR:
+                    fallos.append((trabajo, f"No se subió todavía: {decision.motivo}."))
+                    if avisar is not None:
+                        avisar(f"{cabeza}No se sube todavía: {decision.motivo}", 0, 0)
+                    continue
+                if decision.carga_publicada:
+                    # Un batch entero ya publicado no lo sube ninguna
+                    # preferencia: solo una persona que miro AirVault.
+                    trabajo.manifiesto.duplicado_exacto = True
+                motivo = decision.motivo
+                if not motivo and revision.total and avisar is not None:
+                    avisar(
+                        f"{cabeza}Web Search no lo tiene publicado "
+                        f"({len(revision.publicadas)} de {revision.consultadas} "
+                        "bitácoras buscadas); se sube",
+                        0, 0,
+                    )
         if motivo:
             marcar_posible_duplicado(trabajo, motivo)
         if motivo and not duplicado_bloquea(trabajo):
