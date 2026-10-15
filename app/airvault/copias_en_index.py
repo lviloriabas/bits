@@ -407,3 +407,54 @@ def revisar(
             ", ".join(revision.por_borrar),
         )
     return revision
+
+
+def copias_de_la_carga(
+    manifiesto, lotes: Sequence[ResumenLote], cliente,
+) -> Tuple[List[ResumenLote], List[ResumenLote]]:
+    """Los batches de la cola que ya son esta carga con otro titulo.
+
+    Antes de subir un archivo que no tiene batch se mira si alguien ya lo
+    subio: por la web, que le pone «-Batch» al titulo, o desde otro equipo,
+    que lo deja como ``Empty-Batch`` con su nombre por dentro. La
+    identificacion de siempre solo reconoce el titulo exacto y el
+    Empty-Batch que llego despues de la carga propia, asi que esa copia se
+    quedaba sin ver y el archivo se subia otra vez.
+
+    Devuelve ``(iguales, dudosos)``: los primeros tienen sus paginas y su
+    contenido; los segundos, el titulo y las paginas, pero estan abiertos
+    por alguien o lo leido no alcanza para decirlo. El titulo exacto no
+    entra: ese lo resuelve la identificacion de siempre.
+    """
+    nombre = normalizar_nombre(manifiesto.nombre_batch)
+    if not nombre:
+        return [], []
+    compatibles = manifiesto.cantidades_paginas_compatibles()
+    descartados = {_clave_id(valor) for valor in manifiesto.batches_descartados}
+    lector = _Lector(cliente)
+    iguales: List[ResumenLote] = []
+    dudosos: List[ResumenLote] = []
+    for lote in lotes:
+        if not lote.batch_id or _clave_id(lote.batch_id) in descartados:
+            continue
+        if lote.repo_id and manifiesto.repo_id and lote.repo_id != manifiesto.repo_id:
+            continue
+        if lote.paginas not in compatibles or normalizar_nombre(lote.nombre) == nombre:
+            continue
+        if titulo_base(lote.nombre) != nombre:
+            # Sin titulo, el nombre esta dentro de la primera pagina. El
+            # abierto por alguien no se lee: no hay de donde sacarlo.
+            if not _es_temporal(lote.nombre) or lote.bloqueado_por:
+                continue
+            interno = lector.nombre(lote.batch_id)
+            if not interno or titulo_base(interno) != nombre:
+                continue
+        if lote.bloqueado_por:
+            dudosos.append(lote)
+            continue
+        veredicto = _mismo_contenido_que(lector, lote, manifiesto)
+        if veredicto:
+            iguales.append(lote)
+        elif veredicto is None:
+            dudosos.append(lote)
+    return iguales, dudosos

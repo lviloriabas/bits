@@ -1889,9 +1889,11 @@ def test_cada_faltante_se_busca_se_sube_y_el_proceso_continua(
     ]
     for trabajo in (segundo, tercero):
         carga = eventos.index(("subir", trabajo.manifiesto.nombre_batch))
-        assert eventos[carga - 1] == (
-            "buscar", trabajo.manifiesto.nombre_batch
-        )
+        # Su nombre y, detrás, la cola entera: la misma carga puede estar
+        # con otro título, subida por la web o desde otro equipo.
+        assert eventos[carga - 2:carga] == [
+            ("buscar", trabajo.manifiesto.nombre_batch), ("buscar", ""),
+        ]
 
 
 def test_subir_confirma_todos_y_carga_solo_la_division_pendiente(

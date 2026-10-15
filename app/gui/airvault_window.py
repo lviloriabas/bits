@@ -1412,7 +1412,7 @@ class TrabajoAirVaultWorker(QThread):
         """
         from app.airvault.confirmacion import numeros_de_batch
         from app.airvault.flujo import (REENVIOS_AUTOMATICOS_MAXIMOS,
-                                        anotar_reenvio,
+                                        CopiaEnLaCola, anotar_reenvio,
                                         autorizar_posible_duplicado,
                                         reenvios_automaticos,
                                         ya_esta_en_airvault)
@@ -1450,6 +1450,9 @@ class TrabajoAirVaultWorker(QThread):
                 autorizados.append(trabajo)
             except (SesionCancelada, TrabajoCancelado):
                 raise
+            except CopiaEnLaCola as exc:
+                # Lo escribe el programa y dice qué copia es y qué hacer.
+                fallos.append((trabajo.manifiesto.nombre_batch, str(exc)))
             except Exception as exc:
                 # El motivo completo queda en el registro: en la ventana
                 # solo cabe su versión corta y sin él no se sabía por qué

@@ -52,6 +52,8 @@ _MOTIVOS = (
      "Estas bitácoras pueden estar duplicadas. Revise AirVault antes de reenviarlas."),
     (("batches nuevos que podrian", "batches que coinciden", "batches sin nombre"),
      "Hay varios batches que podrían ser esta carga. Revise cuál corresponde en AirVault."),
+    (("web index ya tiene",),
+     "Web Index ya tiene esta carga con otro título y no se subió otra vez. El registro dice cuál es y qué hacer."),
     (("batch cambio desde",), "El batch cambió. Vuelva a revisarlo antes de indexar."),
     (("batch esta abierto", "esta abierto por"),
      "El batch está abierto en AirVault. Ciérrelo y vuelva a intentarlo."),

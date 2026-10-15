@@ -3526,8 +3526,9 @@ def subir_partes(
                 fallos.append((trabajo, str(exc)))
                 if avisar is not None:
                     avisar(
-                        f"{cabeza}Hay varios batches que podrían ser esta "
-                        "carga; no se sube otra vez",
+                        f"{cabeza}{exc}" if isinstance(exc, CopiaEnLaCola)
+                        else f"{cabeza}Hay varios batches que podrían ser "
+                        "esta carga; no se sube otra vez",
                         0,
                         0,
                     )
@@ -3541,10 +3542,7 @@ def subir_partes(
                 publicar(trabajo)
                 if avisar is not None:
                     avisar(
-                        f"{cabeza}AirVault ya lo tiene en Web Index; no se "
-                        "sube otra vez",
-                        0,
-                        0,
+                        f"{cabeza}{_ya_lo_tiene(publicado, trabajo)}", 0, 0,
                     )
                 continue
 
@@ -3574,6 +3572,37 @@ def subir_partes(
                         0,
                         0,
                     )
+                continue
+            # Lo que la busqueda por nombre no ve: la misma carga subida por
+            # la web o desde otro equipo, con otro titulo.
+            copia = None
+            try:
+                copia = copia_en_la_cola(trabajo, cliente, _listar_cola(cliente))
+                if copia is not None:
+                    trabajo._duplicado_permitido = False
+                    trabajo.anotar_lote(cliente, copia)
+            except LoteAmbiguo as exc:
+                fallos.append((trabajo, str(exc)))
+                if avisar is not None:
+                    avisar(f"{cabeza}{exc}", 0, 0)
+                continue
+            except ErrorDeCorrida as exc:
+                if copia is None:
+                    raise
+                fallos.append((trabajo, str(exc)))
+                if avisar is not None:
+                    avisar(
+                        f"{cabeza}Web Index ya lo tiene como "
+                        f"{copia.batch_id} «{copia.nombre}», pero AirVault no "
+                        "confirmó su título; no se sube otra vez",
+                        0,
+                        0,
+                    )
+                continue
+            if copia is not None:
+                publicar(trabajo)
+                if avisar is not None:
+                    avisar(f"{cabeza}{_ya_lo_tiene(copia, trabajo)}", 0, 0)
                 continue
         # Ultimo filtro, y el unico por el que pasan las dos formas de
         # llegar aqui: la carga nueva y la orden dada a mano. Todo lo
@@ -3960,6 +3989,10 @@ def ya_esta_en_airvault(trabajo: "Trabajo", cliente):
     except LoteNoEncontrado:
         pass
 
+    copia = copia_en_la_cola(trabajo, cliente, lotes)
+    if copia is not None:
+        return copia
+
     if not _subida_rastreable(trabajo):
         # Nunca se subio: no hay ninguna carga nuestra que AirVault pueda
         # estar mostrando sin nombre. Cualquier Empty-Batch de la cola es
@@ -3980,6 +4013,67 @@ def ya_esta_en_airvault(trabajo: "Trabajo", cliente):
             "vuelva a dar la orden."
         )
     return candidatos[0] if candidatos else None
+
+
+def _ya_lo_tiene(lote: ResumenLote, trabajo: "Trabajo") -> str:
+    """Lo que dice el registro de una carga que no se sube porque ya esta."""
+    nombre = trabajo.manifiesto.nombre_batch
+    if _nombre_visible_compatible(lote.nombre, nombre):
+        return "AirVault ya lo tiene en Web Index; no se sube otra vez"
+    return (
+        f"Web Index ya lo tiene como {lote.batch_id} «{lote.nombre}»; se toma "
+        "con su título y no se sube otra vez"
+    )
+
+
+class CopiaEnLaCola(LoteAmbiguo):
+    """Web Index ya tiene esta carga con otro titulo y no se puede tomar sola.
+
+    Su texto es del programa y dice que hacer, asi que va entero al
+    registro.
+    """
+
+
+def copia_en_la_cola(
+    trabajo: "Trabajo", cliente, lotes: Sequence[ResumenLote],
+) -> Optional[ResumenLote]:
+    """La carga que alguien ya subio con otro titulo, si hay una sola.
+
+    Es el batch con el titulo de esta carga y «-Batch» al final (subido por
+    la web) o el ``Empty-Batch`` con su nombre por dentro (subido desde otro
+    equipo), con sus paginas y su contenido (ver
+    :func:`app.airvault.copias_en_index.copias_de_la_carga`). Con varias, o
+    con una cuyo contenido aun no se puede comprobar, levanta
+    :class:`CopiaEnLaCola` con lo que hay que hacer: subir otra vez dejaria
+    la misma bitacora publicada dos veces.
+    """
+    from app.airvault.copias_en_index import copias_de_la_carga
+
+    nombre = trabajo.manifiesto.nombre_batch
+    iguales, dudosos = copias_de_la_carga(trabajo.manifiesto, lotes, cliente)
+    if len(iguales) == 1:
+        return iguales[0]
+    if not iguales and not dudosos:
+        return None
+    cuales = ", ".join(
+        f"{lote.batch_id} «{lote.nombre}»" for lote in (iguales or dudosos)
+    )
+    if iguales:
+        raise CopiaEnLaCola(
+            f"Web Index ya tiene {len(iguales)} copias de «{nombre}» con otro "
+            f"título: {cuales}. No se subió otra vez para no dejar la misma "
+            "bitácora publicada por duplicado. Deje una sola en Web Index y "
+            "vuelva a revisar."
+        )
+    raise CopiaEnLaCola(
+        f"Web Index ya tiene {cuales} con el título y las páginas de "
+        f"«{nombre}», pero su contenido todavía no se puede comprobar: está "
+        "abierto o AirVault aún no lee sus páginas. No se subió otra vez para "
+        "no dejar la misma bitácora publicada por duplicado. Si es esta "
+        f"carga, póngale en Web Index el título «{nombre}» y el programa la "
+        "toma; si no lo es, bórrela o cámbiele el título y vuelva a dar la "
+        "orden."
+    )
 
 
 def _empty_batches_que_podrian_ser(
