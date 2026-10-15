@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
-from threading import Barrier, Event, Lock
+from dataclasses import replace
+from threading import Barrier, Event, Lock, get_ident
 
 import pytest
 from PySide6.QtCore import Qt
@@ -11,7 +13,8 @@ from PySide6.QtCore import Qt
 from app.airvault import correcciones, web_reports
 from app.airvault.config import AirVaultConfig
 from app.airvault.correcciones import (
-    ACCION_BORRAR, Correccion, CorrectorLogPageAudit, Resultado,
+    ACCION_BORRAR, ACCION_REINDEXAR, ControlNoEncontrado, Correccion,
+    CorrectorLogPageAudit, Resultado,
 )
 from app.airvault.mapping import ResolutorFlota
 from app.airvault.web_reports import (
@@ -145,6 +148,191 @@ def test_nunca_abre_dos_tareas_para_la_misma_bitacora(monkeypatch):
     monkeypatch.setattr(corrector, "_un_caso", atender)
     assert [r.correccion for r in _aplicar(corrector, plan)] == plan
     assert not ocupadas
+
+
+@pytest.mark.parametrize("primera,segunda", [
+    (ACCION_BORRAR, ACCION_REINDEXAR),
+    (ACCION_REINDEXAR, ACCION_BORRAR),
+])
+def test_ambas_correcciones_empiezan_sin_esperar_a_agotar_el_otro_tipo(
+    monkeypatch, primera, segunda,
+):
+    plan = [
+        replace(_caso(n), accion=primera if n < 4 else segunda)
+        for n in range(8)
+    ]
+    corrector = CorrectorLogPageAudit(AirVaultConfig(), ResolutorFlota())
+    barrera = Barrier(2, timeout=3)
+    candado = Lock()
+    iniciadas = []
+
+    def atender(_navegador, _version, caso, _cancelar, _ensayo):
+        with candado:
+            iniciadas.append(caso)
+            primeras = len(iniciadas) <= 2
+        if primeras:
+            barrera.wait()
+            assert {c.accion for c in iniciadas[:2]} == {primera, segunda}
+        return Resultado(caso, hecho=True)
+
+    monkeypatch.setattr(correcciones, "_paralelismo_correcciones", lambda _n: 2)
+    monkeypatch.setattr(corrector, "_un_caso", atender)
+    resultados = _aplicar(corrector, plan)
+    assert all(r.hecho for r in resultados)
+    assert [r.correccion for r in resultados] == plan
+
+
+def test_con_un_solo_hilo_conserva_el_orden_del_plan_mixto(monkeypatch):
+    plan = [_caso(0), _caso(1), replace(_caso(2), accion=ACCION_REINDEXAR)]
+    corrector = CorrectorLogPageAudit(AirVaultConfig(), ResolutorFlota())
+    iniciadas = []
+
+    def atender(_navegador, _version, caso, _cancelar, _ensayo):
+        iniciadas.append(caso)
+        return Resultado(caso, hecho=True)
+
+    monkeypatch.setattr(correcciones, "_paralelismo_correcciones", lambda _n: 1)
+    monkeypatch.setattr(corrector, "_un_caso", atender)
+    assert len(_aplicar(corrector, plan)) == 3
+    assert iniciadas == plan
+
+
+def test_borrado_y_reindexado_de_la_misma_bitacora_no_se_solapan(monkeypatch):
+    plan = [_caso(0), replace(_caso(0), accion=ACCION_REINDEXAR), _caso(1)]
+    corrector = CorrectorLogPageAudit(AirVaultConfig(), ResolutorFlota())
+    barrera = Barrier(2, timeout=3)
+    terminada = Event()
+
+    def atender(_navegador, _version, caso, _cancelar, _ensayo):
+        if caso is plan[1]:
+            assert terminada.is_set()
+        else:
+            barrera.wait()
+        if caso is plan[0]:
+            terminada.set()
+        return Resultado(caso, hecho=True)
+
+    monkeypatch.setattr(correcciones, "_paralelismo_correcciones", lambda _n: 2)
+    monkeypatch.setattr(corrector, "_un_caso", atender)
+    assert all(r.hecho for r in _aplicar(corrector, plan))
+
+
+def test_el_reparto_mixto_no_adelanta_una_correccion_de_la_misma_bitacora(monkeypatch):
+    plan = [_caso(0), _caso(1), replace(_caso(1), accion=ACCION_REINDEXAR)]
+    corrector = CorrectorLogPageAudit(AirVaultConfig(), ResolutorFlota())
+    barrera = Barrier(2, timeout=3)
+    borrada = Event()
+    reindexada = Event()
+
+    def atender(_navegador, _version, caso, _cancelar, _ensayo):
+        if caso is plan[0]:
+            barrera.wait()
+            assert reindexada.wait(3)
+        elif caso is plan[1]:
+            barrera.wait()
+            borrada.set()
+        else:
+            assert borrada.is_set()
+            reindexada.set()
+        return Resultado(caso, hecho=True)
+
+    monkeypatch.setattr(correcciones, "_paralelismo_correcciones", lambda _n: 2)
+    monkeypatch.setattr(corrector, "_un_caso", atender)
+    assert all(r.hecho for r in _aplicar(corrector, plan))
+
+
+@pytest.mark.parametrize("fallo_borrado", [False, True])
+def test_el_flujo_mixto_aisla_documentos_fallos_y_cierra_sus_pestanas(
+    monkeypatch, tmp_path, fallo_borrado,
+):
+    plan = [_caso(0), _caso(1), replace(
+        _caso(2), accion=ACCION_REINDEXAR,
+        matricula_actual="HP-1523CMP", matricula_correcta="HP-9913CMP",
+    )]
+    por_url = {c.url_busqueda: c for c in plan}
+    barrera = Barrier(2, timeout=3)
+    candado = Lock()
+    paginas = {}
+    hilo_principal = get_ident()
+
+    class Navegador:
+        def abrir_pestana(self, url, version):
+            return por_url[url].log_number
+
+    class Pagina:
+        def __init__(self, _version, target_id, _cancelar):
+            self.caso = next(c for c in plan if c.log_number == target_id)
+            self.hilo = get_ident()
+            self.cerrada = False
+            self.liberada = False
+            self.confirmada = False
+            cantidad = 2 if self.caso.accion == ACCION_BORRAR else 1
+            self.filas = [{
+                "clave": f"{target_id}_{n}", "documento": f"{target_id}{n}",
+                "log": target_id, "matricula": self.caso.matricula_actual or "HP-9913CMP",
+                "cuando": f"2025-01-0{n + 1}", "imagenes": "1", "tipo": "LOG PAGE",
+            } for n in range(cantidad)]
+            with candado:
+                assert target_id not in paginas
+                paginas[target_id] = self
+
+        def esperar(self, *_args):
+            return True
+
+        def evaluar(self, expresion):
+            assert get_ident() == self.hilo
+            if expresion == correcciones._LEER_REJILLA:
+                return [dict(f) for f in self.filas]
+            if expresion == correcciones._MENSAJE:
+                return ""
+            if expresion.startswith(correcciones._CANCELAR_CUADRO.splitlines()[0]):
+                self.liberada = True
+            borrar = expresion.startswith(correcciones._CONFIRMAR_BORRADO.splitlines()[0])
+            reindexar = expresion.startswith(correcciones._CONFIRMAR_REINDEXADO.splitlines()[0])
+            if borrar or reindexar:
+                if self.caso is not plan[1]:
+                    barrera.wait()
+                if borrar:
+                    assert self.caso.accion == ACCION_BORRAR
+                    assert all(json.dumps(f["clave"]) in expresion for f in self.filas)
+                    if fallo_borrado and self.caso is plan[0]:
+                        raise ControlNoEncontrado("La bitácora está bloqueada por otro usuario.")
+                    self.filas.pop()
+                else:
+                    assert self.caso.accion == ACCION_REINDEXAR
+                    assert json.dumps(self.caso.matricula_correcta) in expresion
+                    assert '"MAX"' in expresion
+                    self.filas[0]["matricula"] = self.caso.matricula_correcta
+                self.confirmada = True
+            return "OK"
+
+        def cerrar(self, forzar=False):
+            assert forzar
+            self.cerrada = True
+
+    monkeypatch.setattr(correcciones, "_Pagina", Pagina)
+    monkeypatch.setattr(correcciones, "_paralelismo_correcciones", lambda _n: 2)
+    corrector = CorrectorLogPageAudit(AirVaultConfig(), ResolutorFlota())
+    corrector.auditoria = tmp_path / "auditoria.jsonl"
+    resultados = corrector._aplicar_pendientes(
+        Navegador(), {}, plan, lambda _: None, lambda: False, False, lambda *_: None,
+    )
+    assert [r.hecho for r in resultados] == [not fallo_borrado, True, True]
+    assert [r.correccion for r in resultados] == plan
+    assert [paginas[c.log_number].confirmada for c in plan] == [not fallo_borrado, True, True]
+    assert all(p.cerrada and p.hilo != hilo_principal for p in paginas.values())
+    assert len({p.hilo for p in paginas.values()}) == 2
+    assert len(paginas[plan[0].log_number].filas) == (2 if fallo_borrado else 1)
+    assert len(paginas[plan[1].log_number].filas) == 1
+    assert paginas[plan[2].log_number].filas[0]["matricula"] == "HP-9913CMP"
+    if fallo_borrado:
+        assert paginas[plan[0].log_number].liberada
+        assert "bloqueada" in resultados[0].detalle
+    registros = [
+        json.loads(linea)
+        for linea in corrector.auditoria.read_text(encoding="utf-8").splitlines()
+    ]
+    assert sum(r["evento"] == "borrado_verificado" for r in registros) == (1 if fallo_borrado else 2)
 
 
 def test_si_baja_la_ram_las_siguientes_bitacoras_van_de_una_en_una(monkeypatch):

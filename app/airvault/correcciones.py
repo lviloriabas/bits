@@ -48,6 +48,7 @@ import json
 import re
 import time
 import unicodedata
+from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -803,7 +804,7 @@ def por_antiguedad(
 
 
 class CorrectorLogPageAudit:
-    """Aplica el plan en el cliente de AirVault, caso por caso."""
+    """Aplica casos independientes en paralelo, cada uno en su pestaña."""
 
     def __init__(
         self,
@@ -900,7 +901,7 @@ class CorrectorLogPageAudit:
         ensayo: bool,
         avanzar: Callable[[int, int], None],
     ) -> list[Resultado]:
-        """Reparte casos completos y reduce nuevas aperturas si baja la RAM."""
+        """Reparte ambos tipos de caso y reduce aperturas si baja la RAM."""
         if not pendientes:
             return []
         sin_empezar = list(enumerate(pendientes))
@@ -931,16 +932,29 @@ class CorrectorLogPageAudit:
                         raise ConsultaCancelada()
                     limite = min(techo, _paralelismo_correcciones(len(en_curso)))
                     ocupadas = {c.log_number for _i, c in en_curso.values()}
-                    for indice, correccion in list(sin_empezar):
-                        if len(en_curso) >= limite:
-                            break
-                        if correccion.log_number in ocupadas:
-                            continue
+                    activas = Counter(c.accion for _i, c in en_curso.values())
+                    disponibles: dict[str, tuple[int, Correccion]] = {}
+                    for indice, correccion in sin_empezar:
+                        if correccion.log_number not in ocupadas:
+                            # Conserva el orden de las correcciones de una
+                            # misma bitácora, aunque sean de distinto tipo.
+                            disponibles.setdefault(
+                                correccion.log_number, (indice, correccion),
+                            )
+                    while disponibles and len(en_curso) < limite:
+                        # El plan agrupa primero las duplicadas. Dar turno
+                        # al tipo menos ocupado permite reindexar sin esperar
+                        # a que se agote toda la cola de borrados.
+                        indice, correccion = min(
+                            disponibles.values(),
+                            key=lambda caso: (activas[caso[1].accion], caso[0]),
+                        )
                         if cancelado():
                             raise ConsultaCancelada()
                         futuro = pool.submit(atender, correccion)
                         en_curso[futuro] = (indice, correccion)
-                        ocupadas.add(correccion.log_number)
+                        activas[correccion.accion] += 1
+                        del disponibles[correccion.log_number]
                         sin_empezar.remove((indice, correccion))
                     listas, _ = wait(
                         en_curso, timeout=0.2, return_when=FIRST_COMPLETED,
