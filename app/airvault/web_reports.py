@@ -696,8 +696,7 @@ class ClienteLogPageAudit:
                     return
             ahora = time.monotonic()
             if avisar is not None and ahora >= siguiente_aviso:
-                minutos, segundos = divmod(int(ahora - inicio), 60)
-                avisar(f"{descripcion} ({minutos}:{segundos:02d} de espera)")
+                avisar(descripcion)
                 siguiente_aviso = ahora + 15.0
             pagina._dormir(0.5)
         raise RuntimeError(f"Log Page Audit no terminó de cargar la página {pagina_esperada}")

@@ -29,10 +29,7 @@ def test_la_espera_informa_cada_quince_segundos_hasta_recibir_el_reporte(monkeyp
     avisos = []
     ClienteLogPageAudit._esperar_reporte(Pagina(), avisar=avisos.append)
 
-    assert avisos == [
-        f"Esperando que AirVault genere el reporte (0:{segundos:02d} de espera)"
-        for segundos in (0, 15, 30)
-    ]
+    assert avisos == ["Esperando que AirVault genere el reporte"] * 3
     assert ahora[0] == 31
 
 
@@ -50,7 +47,7 @@ def test_la_consulta_informa_en_terminal_y_barra_y_detiene_el_arco(
     try:
         ventana._arrancar_cronometro("consulta", 1)
         ventana.progreso.setValue(25)
-        texto = "Esperando que AirVault genere el reporte (0:15 de espera)"
+        texto = "Esperando que AirVault genere el reporte"
         ventana._al_avanzar(texto)
 
         assert ventana.resumen.text() == texto
