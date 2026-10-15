@@ -12,8 +12,8 @@ from urllib.parse import parse_qs, urlsplit
 
 from loguru import logger
 
-from PySide6.QtCore import QDate, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QDate, QRectF, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
+    QWidget,
 )
 
 from app.airvault.config import AIRVAULT_FILENAME, AirVaultConfig
@@ -59,6 +60,7 @@ from app.airvault.web_reports import (
     abrir_en_web_search,
 )
 from app.utils.preferencias_ui import leer_opcion
+from app.gui.airvault_bitacora import pintar_latido
 from app.gui.cronometro import Cronometro, cronometro_qss
 from app.gui.memoria import WEB_REPORTS, recordar
 from app.gui.responsive import fit_to_screen
@@ -333,6 +335,32 @@ class WebSearchWorker(_TrabajoEnEdge):
         return self._etiqueta
 
 
+class _ActividadWebReports(QWidget):
+    """El mismo arco de actividad que usa el registro de AirVault."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lado = self.fontMetrics().height()
+        self.setFixedSize(lado, lado)
+        self._timer = QTimer(self)
+        self._timer.setInterval(50)
+        self._timer.timeout.connect(self.update)
+        self.setAccessibleName("Actividad de Web Reports")
+
+    def activar(self, activa: bool) -> None:
+        if activa:
+            self._timer.start()
+        else:
+            self._timer.stop()
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        if self._timer.isActive():
+            pintor = QPainter(self)
+            pintar_latido(pintor, QRectF(self.rect()), paleta().PANE_TEXT, True)
+            pintor.end()
+
+
 class WebReportsWindow(QDialog):
     """Suite de consulta para limpiar excepciones de Web Reports."""
 
@@ -530,6 +558,8 @@ class WebReportsWindow(QDialog):
         # barra se estira y las tres cifras conservan su ancho.
         fila_progreso = QHBoxLayout()
         fila_progreso.setSpacing(SPACE_S)
+        self.actividad = _ActividadWebReports(self)
+        fila_progreso.addWidget(self.actividad)
         self.progreso = QProgressBar()
         self.progreso.setRange(0, 100)
         self.progreso.setValue(0)
@@ -928,16 +958,21 @@ class WebReportsWindow(QDialog):
         self.progreso.setRange(0, 100)
         self.progreso.setValue(0)
         self.progreso.setFormat("Lectura: %p%")
-        self.resumen.setText("Consultando Web Reports…")
+        self._al_avanzar("Iniciando la consulta de Web Reports")
         self._arrancar_cronometro(TAREA_CONSULTA, len(filtros))
         worker.start()
 
     def _al_avanzar(self, texto: str) -> None:
         self.resumen.setText(texto)
+        logger.info("Web Reports: {}", texto)
+        if isinstance(self._worker, WebReportsWorker):
+            self.progreso.setFormat(f"%p% - {texto}")
+            self.progreso.setToolTip(texto)
 
     def _arrancar_cronometro(self, tarea: str, unidades: int) -> None:
         """Pone el reloj en marcha con lo que costó ese trabajo la vez pasada."""
         self._estimacion = Estimacion(tarea, unidades)
+        self.actividad.activar(True)
         self._al_latir()
         self._timer.start()
 
@@ -959,10 +994,10 @@ class WebReportsWindow(QDialog):
         fraccion = leidas / total if total > 0 else 0
         porcentaje = int(100 * (reporte - 1 + fraccion) / reportes)
         self.progreso.setRange(0, 100)
-        if total > 0:
-            self.progreso.setFormat("Lectura: %p%")
-        else:
-            self.progreso.setFormat("Lectura: %p% (total por confirmar)")
+        total_texto = str(total) if total > 0 else "total por confirmar"
+        texto = f"Leyendo página {leidas} de {total_texto} (reporte {reporte} de {reportes})"
+        self.progreso.setFormat(f"%p% - {texto}")
+        self.progreso.setToolTip(texto)
         self.progreso.setValue(max(self.progreso.value(), porcentaje))
 
     def _al_latir(self) -> None:
@@ -986,6 +1021,7 @@ class WebReportsWindow(QDialog):
         """
         estimacion = self._estimacion
         self._timer.stop()
+        self.actividad.activar(False)
         self._estimacion = None
         if estimacion is None:
             return
@@ -999,7 +1035,8 @@ class WebReportsWindow(QDialog):
     def _al_recibir(self, excepciones: object) -> None:
         self._cerrar_cronometro(aprender=True)
         self._resultados = list(excepciones)
-        self.progreso.setFormat("Lectura: %p%")
+        self.progreso.setFormat("Consulta terminada: %p%")
+        self.progreso.setToolTip("")
         repositorios = {
             int(parse_qs(urlsplit(item.url_busqueda).query)["repoId"][0])
             for item in self._resultados if item.url_busqueda
@@ -1044,6 +1081,7 @@ class WebReportsWindow(QDialog):
             paginas = sum(self._paginas_leidas.values())
             lectura = "Leída 1 página del reporte." if paginas == 1 else f"Leídas {paginas} páginas del reporte."
             self.resumen.setText(f"{lectura} {self.resumen.text()}")
+        logger.info("Web Reports: {}", self.resumen.text())
 
     def _llenar_tabla(
         self, excepciones: list[ExcepcionLogPageAudit]
@@ -1198,11 +1236,17 @@ class WebReportsWindow(QDialog):
     def _al_fallar(self, mensaje: str) -> None:
         self._cerrar_cronometro(aprender=False)
         self.resumen.setText(mensaje)
+        self.progreso.setFormat("Consulta interrumpida: %p%")
+        self.progreso.setToolTip(mensaje)
 
     def _al_cancelar(self) -> None:
         self._cerrar_revision()
         self._cerrar_cronometro(aprender=False)
         self.resumen.setText("Corrección cancelada." if isinstance(self._worker, CorreccionWorker) else "Consulta cancelada.")
+        if not isinstance(self._worker, CorreccionWorker):
+            self.progreso.setFormat("Consulta cancelada: %p%")
+            self.progreso.setToolTip("")
+        logger.info("Web Reports: {}", self.resumen.text())
 
     def _al_terminar(self) -> None:
         self._cerrar_revision()

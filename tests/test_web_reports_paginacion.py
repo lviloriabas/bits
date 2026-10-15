@@ -120,7 +120,7 @@ def test_la_barra_cuenta_la_lectura_y_conserva_el_total_de_paginas(app, tmp_path
     assert ventana.progreso.isTextVisible()
     ventana._al_leer_paginas(1, 4, 1, 2)
     assert ventana.progreso.value() == 12
-    assert ventana.progreso.format() == "Lectura: %p%"
+    assert ventana.progreso.format() == "%p% - Leyendo página 1 de 4 (reporte 1 de 2)"
     ventana._al_leer_paginas(4, 4, 1, 2)
     assert ventana.progreso.value() == 50
     ventana._al_leer_paginas(1, 2, 2, 2)

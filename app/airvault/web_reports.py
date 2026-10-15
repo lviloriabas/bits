@@ -481,7 +481,7 @@ class ClienteLogPageAudit:
         esta_cancelado = cancelar or (lambda: False)
         avanzar = progreso or (lambda _hechos, _total: None)
         perfil = _perfil_de(self.config)
-        notificar("Abriendo Log Page Audit en Edge")
+        notificar("Conectando con AirVault en segundo plano")
         pagina: _Pagina | None = None
         target_id = ""
         with SesionDeNavegador(perfil, visible=False) as navegador:
@@ -494,10 +494,12 @@ class ClienteLogPageAudit:
                 entrada_federada(self.config),
                 espera_s=self.config.espera_login_s,
             )
+            notificar("Comprobando el acceso a AirVault")
             esperar_acceso(lambda: navegador.cookies(version), self.config)
             try:
                 # La sesion protege esta pagina y retira solo las liberadas.
                 # Otro trabajo puede seguir usando el mismo navegador.
+                notificar("Abriendo el formulario de Log Page Audit")
                 target_id = navegador.abrir_pestana(LOG_PAGE_AUDIT_URL)
                 pagina = _Pagina(version, target_id, esta_cancelado)
                 if not pagina.esperar(
@@ -507,6 +509,7 @@ class ClienteLogPageAudit:
                         "Log Page Audit no quedó listo. Complete el acceso "
                         "en Edge con la cuenta de trabajo y vuelva a intentar."
                     )
+                notificar("Preparando el repositorio y los filtros del reporte")
                 self._elegir_repositorio(pagina, opciones.repositorio)
                 if not pagina.esperar(_FECHA_LISTA, 120.0):
                     raise RuntimeError(
@@ -610,7 +613,12 @@ class ClienteLogPageAudit:
         if lanzado != "OK":
             raise RuntimeError(f"El formulario de Log Page Audit cambió: {lanzado}")
         esperados = dict(valores, **{f"{_CONTROL}ctl03_ddValue": opciones.repositorio})
-        self._esperar_reporte(pagina, anterior, 1, esperados, nulos)
+        espera = (
+            "Esperando que AirVault actualice y genere el reporte"
+            if opciones.actualizar == "1"
+            else "Esperando que AirVault genere el reporte guardado"
+        )
+        self._esperar_reporte(pagina, anterior, 1, esperados, nulos, avisar, espera)
         return self._leer_todas_paginas(pagina, esperados, nulos, avisar, progreso_paginas)
 
     @staticmethod
@@ -671,8 +679,12 @@ class ClienteLogPageAudit:
     def _esperar_reporte(
         cls, pagina: _Pagina, anterior: str = "", pagina_esperada: int = 1,
         valores: dict | None = None, nulos: dict | None = None,
+        avisar: Callable[[str], None] | None = None,
+        descripcion: str = "Esperando que AirVault genere el reporte",
     ) -> None:
-        limite = time.monotonic() + 1800.0
+        inicio = time.monotonic()
+        limite = inicio + 1800.0
+        siguiente_aviso = inicio
         while time.monotonic() < limite:
             estado = cls._estado_reporte(pagina)
             if not estado.get("ocupada"):
@@ -682,6 +694,11 @@ class ClienteLogPageAudit:
                         and estado.get("texto") and estado.get("actual") == pagina_esperada):
                     cls._comprobar_parametros(estado, valores, nulos)
                     return
+            ahora = time.monotonic()
+            if avisar is not None and ahora >= siguiente_aviso:
+                minutos, segundos = divmod(int(ahora - inicio), 60)
+                avisar(f"{descripcion} ({minutos}:{segundos:02d} de espera)")
+                siguiente_aviso = ahora + 15.0
             pagina._dormir(0.5)
         raise RuntimeError(f"Log Page Audit no terminó de cargar la página {pagina_esperada}")
 
@@ -747,7 +764,10 @@ class ClienteLogPageAudit:
             if pulsado is not True:
                 raise RuntimeError("No se pudo avanzar; el reporte está incompleto")
             numero += 1
-            cls._esperar_reporte(pagina, anterior, numero, valores, nulos)
+            cls._esperar_reporte(
+                pagina, anterior, numero, valores, nulos, avisar,
+                f"Esperando la página {numero} del reporte en AirVault",
+            )
 
     @staticmethod
     def _fecha_ssrs(valor: date) -> str:
