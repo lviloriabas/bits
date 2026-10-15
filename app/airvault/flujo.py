@@ -5735,14 +5735,46 @@ def reenvios_hechos(trabajo: "Trabajo") -> int:
     return len(trabajo.manifiesto.eventos("reenvio"))
 
 
+def id_que_tuvo_en_web_index(trabajo: "Trabajo") -> str:
+    """El ID con que la carga actual ya estuvo en Web Index, o vacio.
+
+    Lo dice el historial: el ultimo hallazgo despues de la ultima subida o
+    reenvio. Un manifiesto anterior al historial no tiene esos hechos, y
+    entonces vale el ID que AirVault devolvio alguna vez (ver
+    :func:`id_recordado`).
+    """
+    manifiesto = trabajo.manifiesto
+    actual = str(manifiesto.batch_id or "").strip().upper()
+    if actual:
+        return actual
+    visto = ""
+    con_subidas = False
+    for evento in getattr(manifiesto, "historial", None) or ():
+        if evento.paso in ("reenvio", "subida"):
+            # Lo hallado antes era de la carga anterior.
+            visto = ""
+            con_subidas = True
+        elif evento.paso == "deteccion" and evento.resultado == "encontrado":
+            visto = (str(evento.detalle or "").split() or ["?"])[0]
+    if visto or con_subidas:
+        return visto.strip().upper()
+    return str(id_recordado(trabajo) or "").strip().upper()
+
+
 def _reenvio_sin_orden(trabajo: "Trabajo") -> bool:
     """Si el historial deja que el programa vuelva a mandar este archivo.
 
-    Sin registro de haberlo resubido, si: es la primera vez que falta, haya
-    tenido batch o no. Con registro, solo la carga que nunca llego a tener
-    batch y mientras no agote :data:`REENVIOS_AUTOMATICOS_MAXIMOS`; la que
-    ya se resubio, aparecio y volvio a faltar la decide una persona.
+    Nunca la carga que ya estuvo en Web Index con su ID: salir de la cola
+    es lo que pasa cuando alguien la completa o la borra, y Web Search tarda
+    en mostrar lo recien completado. Asi se subio dos veces un REVISAR que
+    una persona acababa de completar. Eso lo decide quien mira AirVault.
+
+    Por lo demas, sin registro de haberlo resubido, si: es la primera vez
+    que falta. Con registro, solo la carga que nunca llego a tener batch y
+    mientras no agote :data:`REENVIOS_AUTOMATICOS_MAXIMOS`.
     """
+    if id_que_tuvo_en_web_index(trabajo):
+        return False
     if not reenvios_hechos(trabajo):
         return True
     return bool(
@@ -5763,12 +5795,10 @@ def se_reenvia_sola(parte: EstadoParte) -> bool:
     """Si una carga que AirVault no publico puede volver sola a Quick Upload.
 
     Quick Upload la acepto, la cola entera se recorrio sin hallarla y
-    vencio el plazo en que AirVault publica un archivo de su tamano. Sin
-    registro de haberla resubido vuelve sola, haya tenido batch o no: si
-    alguien la completo a mano la encuentra Web Search, y si no esta ni en
-    la cola ni publicada, falta. Con registro decide el historial (ver
-    :func:`_reenvio_sin_orden`). No entran el cancelado ni el de una mezcla
-    pendiente.
+    vencio el plazo en que AirVault publica un archivo de su tamano. La que
+    nunca aparecio vuelve sola la primera vez; la que ya tuvo batch, no.
+    Lo decide el historial (ver :func:`_reenvio_sin_orden`). No entran el
+    cancelado ni el de una mezcla pendiente.
 
     Decir que si no la manda: antes hay que comprobar en Web Search que sus
     bitacoras no esten publicadas (ver :func:`ausencia_vigente`).
@@ -5925,8 +5955,38 @@ def ausencia_vigente(trabajo: "Trabajo", ahora: Optional[datetime] = None) -> bo
     return 0 <= (presente - revision).total_seconds() <= VIGENCIA_DE_AUSENCIA_S
 
 
+def motivo_para_no_reenviar(trabajo: "Trabajo") -> str:
+    """Por que el programa no vuelve a subir solo esta carga, o vacio si la sube.
+
+    Va en el registro junto al batch, para que quien lo lea sepa que mirar
+    en AirVault antes de mandarlo a mano.
+    """
+    if _reenvio_sin_orden(trabajo):
+        return ""
+    tuvo = id_que_tuvo_en_web_index(trabajo)
+    if tuvo:
+        return (
+            f"estuvo en Web Index como {tuvo} y salió de la cola: lo "
+            "completaron o lo borraron en AirVault"
+        )
+    hechos = reenvios_automaticos(trabajo)
+    return (
+        f"ya se volvió a subir {hechos} {'vez' if hechos == 1 else 'veces'} "
+        "sin que apareciera"
+        if hechos else "ya se volvió a subir y volvió a faltar"
+    )
+
+
 def detalle_de_no_encontrada(trabajo: "Trabajo") -> str:
     """Lo que la cola dice de una carga que AirVault no publico."""
+    tuvo = id_que_tuvo_en_web_index(trabajo)
+    if tuvo:
+        return (
+            f"Estuvo en Web Index como {tuvo} y ya no está: lo completaron o "
+            "lo borraron en AirVault. No se vuelve a subir solo. Si Web "
+            "Search no tiene sus bitácoras y no está en AirVault, súbala "
+            "desde sus acciones."
+        )
     base = "AirVault no publicó esta carga dentro del plazo."
     hechos = reenvios_automaticos(trabajo)
     if not _reenvio_sin_orden(trabajo):

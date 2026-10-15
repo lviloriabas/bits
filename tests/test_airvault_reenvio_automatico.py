@@ -17,6 +17,8 @@ from app.airvault.flujo import (NO_ENCONTRADO, REENVIOS_AUTOMATICOS_MAXIMOS,
                                 _reiniciar_subida_ausente, anotar_reenvio,
                                 ausencia_vigente, comprobar_partes,
                                 detalle_de_no_encontrada, estado_local,
+                                id_que_tuvo_en_web_index,
+                                motivo_para_no_reenviar,
                                 partes_por_recuperar, partes_por_subir,
                                 reenvios_automaticos, se_reenvia_sola)
 from app.airvault.model import MAXIMO_HISTORIAL, EstadoEtapa, Manifiesto
@@ -167,20 +169,55 @@ def test_lo_que_no_se_retoma_solo(tmp_path, cambio):
     assert partes_por_recuperar([parte]) == []
 
 
-def test_sin_registro_de_haberlo_resubido_se_retoma_aunque_tuviera_batch(tmp_path):
-    """Tuvo batch y dejo de estar en la cola: si nunca se resubio, vuelve solo.
+def test_el_que_ya_estuvo_en_web_index_no_se_retoma_solo(tmp_path):
+    """Tuvo batch y salio de la cola: lo completaron o lo borraron.
 
-    Que alguien lo completara a mano lo contesta Web Search, que se
-    consulta antes; si tampoco esta publicado, falta.
+    Web Search tarda en mostrar lo recien completado, y fiarse de el volvio
+    a subir un REVISAR que una persona acababa de completar.
     """
     trabajo, _cliente, _parte = perdida(tmp_path)
     trabajo.manifiesto.batch_id = "003YA"
     parte = EstadoParte(trabajo, NO_ENCONTRADO)
 
     assert not trabajo.manifiesto.eventos("reenvio")
-    assert se_reenvia_sola(parte)
-    assert partes_por_recuperar([parte]) == [trabajo]
-    assert "se vuelve a subir" in detalle_de_no_encontrada(trabajo)
+    assert not se_reenvia_sola(parte)
+    assert partes_por_recuperar([parte]) == []
+    detalle = detalle_de_no_encontrada(trabajo)
+    assert "003YA" in detalle and "desde sus acciones" in detalle
+    assert "003YA" in motivo_para_no_reenviar(trabajo)
+
+
+def test_el_hallazgo_del_historial_cuenta_aunque_el_id_ya_no_este(tmp_path):
+    """Al no confirmarlo, la revision le quita el ID; el historial lo guarda."""
+    trabajo, _cliente, _parte = perdida(tmp_path)
+    trabajo.manifiesto.anotar("subida", "aceptada", "entrega.pdf")
+    trabajo.manifiesto.anotar("deteccion", "encontrado", "003TI0 (78 paginas)")
+    trabajo.manifiesto.batch_id = None
+
+    assert id_que_tuvo_en_web_index(trabajo) == "003TI0"
+    assert not se_reenvia_sola(EstadoParte(trabajo, NO_ENCONTRADO))
+    assert "003TI0" in detalle_de_no_encontrada(trabajo)
+
+
+def test_tras_un_reenvio_el_hallazgo_anterior_no_cuenta(tmp_path):
+    """El ID de antes era de la carga anterior: la nueva nunca aparecio."""
+    trabajo, _cliente, _parte = perdida(tmp_path)
+    trabajo.manifiesto.anotar("deteccion", "encontrado", "003TI0 (78 paginas)")
+    anotar_reenvio(trabajo, automatico=False, motivo="orden expresa")
+    trabajo.manifiesto.anotar("subida", "aceptada", "entrega.pdf")
+
+    assert id_que_tuvo_en_web_index(trabajo) == ""
+    assert se_reenvia_sola(EstadoParte(trabajo, NO_ENCONTRADO))
+    assert motivo_para_no_reenviar(trabajo) == ""
+
+
+def test_un_manifiesto_sin_historial_usa_el_id_recordado(tmp_path):
+    trabajo, _cliente, _parte = perdida(tmp_path)
+    trabajo.manifiesto.historial = []
+    trabajo.manifiesto.websearch_batch_id = "003ti0"
+
+    assert id_que_tuvo_en_web_index(trabajo) == "003TI0"
+    assert not se_reenvia_sola(EstadoParte(trabajo, NO_ENCONTRADO))
 
 
 @pytest.mark.parametrize("automatico", [True, False], ids=["automatico", "manual"])
@@ -331,6 +368,37 @@ def test_antes_de_reenviar_se_buscan_sus_bitacoras_en_web_search(ventana, tmp_pa
     assert "se comprueba en Web Search antes de volver a subirlo" in lineas(ventana)
     # La lista se consume: no queda nada que retomar hasta otra revision.
     assert ventana._perdidos_por_recuperar == []
+
+
+def test_la_que_estuvo_en_web_index_se_busca_y_el_registro_dice_por_que_no_se_sube(
+    ventana, tmp_path, monkeypatch,
+):
+    trabajo, _cliente, parte = perdida(tmp_path)
+    trabajo.manifiesto.anotar("deteccion", "encontrado", "003TI0 (78 paginas)")
+    ventana._trabajos = [trabajo]
+    ventana._estados = [parte]
+    ventana._estado["trabajos"] = [trabajo]
+    ventana.auto_check.setChecked(True)
+    sin_lectura_real(ventana)
+    lanzados = []
+    monkeypatch.setattr(ventana, "_lanzar", lambda modo, estado: lanzados.append(modo))
+
+    ventana._al_comprobar({"estados": [parte], "planes": {}, "partes": []})
+
+    # Se busca en Web Search, que la confirma si ya esta publicada.
+    assert ventana._consultas == [([trabajo], {"automatico": True})]
+    assert str(trabajo.carpeta) not in ventana._reenvios_automaticos
+    texto = lineas(ventana)
+    assert "no se vuelve a subir solo" in texto
+    assert "estuvo en Web Index como 003TI0" in texto
+    assert "antes de volver a subirlo" not in texto
+
+    # Aunque Web Search conteste que no la tiene, no vuelve sola.
+    trabajo.manifiesto.websearch_resultado = "ausente"
+    trabajo.manifiesto.websearch_revision = datetime.now().isoformat(timespec="microseconds")
+    ventana._perdidos_por_recuperar = [trabajo]
+    assert ventana._recuperar_perdidos() is False
+    assert lanzados == []
 
 
 def test_no_se_pregunta_otra_vez_por_la_misma_carga_en_cada_vuelta(ventana, tmp_path, monkeypatch):

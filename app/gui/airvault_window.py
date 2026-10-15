@@ -3646,12 +3646,14 @@ class AirVaultWindow(QDialog):
                 ausentes = [t for t in ausentes if t not in a_mano]
                 if a_mano and not self._deteniendo:
                     self._anotar(
-                        "No está en Web Index ni en Web Search y ya se había vuelto a subir; "
-                        "queda para decidir a mano con «Subir a AirVault ahora»:"
+                        "No está en Web Index ni en Web Search y no se vuelve a subir solo; "
+                        "queda para decidir a mano. Si no está en AirVault, clic derecho en su "
+                        "fila y «Subir a AirVault ahora»:"
                         if len(a_mano) == 1 else
-                        f"{len(a_mano)} batches no están en Web Index ni en Web Search y ya se "
-                        "habían vuelto a subir; quedan para decidir a mano con «Subir a AirVault ahora»:",
-                        [self._rotulo(t) for t in a_mano],
+                        f"{len(a_mano)} batches no están en Web Index ni en Web Search y no se "
+                        "vuelven a subir solos; quedan para decidir a mano. Si no están en "
+                        "AirVault, clic derecho en su fila y «Subir a AirVault ahora»:",
+                        [self._rotulo_con_motivo(t) for t in a_mano],
                     )
             if (ausentes or self._revision_airvault_pendiente) and not self._websearch_proceso_activo:
                 self._websearch_inicio = set(self._websearch_revisados)
@@ -6131,6 +6133,13 @@ class AirVaultWindow(QDialog):
         nombre = trabajo.manifiesto.nombre_batch or "(sin nombre)"
         return f"Batch {numero} «{nombre}»" if numero else f"Batch «{nombre}»"
 
+    def _rotulo_con_motivo(self, trabajo) -> str:
+        """El rótulo del batch y por qué el programa no lo vuelve a subir solo."""
+        from app.airvault.flujo import motivo_para_no_reenviar
+
+        motivo = motivo_para_no_reenviar(trabajo)
+        return f"{self._rotulo(trabajo)}: {motivo}" if motivo else self._rotulo(trabajo)
+
     def _con_numero(self, texto: str) -> str:
         """Antepone a cada «nombre» de batch el número que tiene en la cola.
 
@@ -7011,21 +7020,36 @@ class AirVaultWindow(QDialog):
                 por_consultar.append(trabajo)
         if not por_consultar:
             return
+        resubibles = []
         for trabajo in por_consultar:
             clave = str(trabajo.carpeta)
             self._chequeo_de_perdidos[clave] = ahora
             self._ubicando.add(clave)
             if self._se_resube_sola(trabajo):
                 self._reenvios_automaticos.add(clave)
+                resubibles.append(trabajo)
             # La recuperación de antes no cuenta: es otra carga.
             self._websearch_recuperados.discard(clave)
-        self._anotar(
-            "AirVault no publicó 1 batch; se comprueba en Web Search antes de volver a subirlo:"
-            if len(por_consultar) == 1 else
-            f"AirVault no publicó {len(por_consultar)} batches; se comprueban en Web Search "
-            "antes de volver a subirlos:",
-            [self._rotulo(trabajo) for trabajo in por_consultar],
-        )
+        if resubibles:
+            self._anotar(
+                "AirVault no publicó 1 batch; se comprueba en Web Search antes de volver a subirlo:"
+                if len(resubibles) == 1 else
+                f"AirVault no publicó {len(resubibles)} batches; se comprueban en Web Search "
+                "antes de volver a subirlos:",
+                [self._rotulo(trabajo) for trabajo in resubibles],
+            )
+        # Lo que no vuelve solo también se busca: si Web Search ya tiene sus
+        # bitácoras queda como completado, y si no, el registro dice por qué
+        # espera a una persona.
+        a_mano = [trabajo for trabajo in por_consultar if trabajo not in resubibles]
+        if a_mano:
+            self._anotar(
+                "1 batch no está en Web Index; se busca en Web Search y no se vuelve a subir solo:"
+                if len(a_mano) == 1 else
+                f"{len(a_mano)} batches no están en Web Index; se buscan en Web Search y no se "
+                "vuelven a subir solos:",
+                [self._rotulo_con_motivo(trabajo) for trabajo in a_mano],
+            )
         self._iniciar_confirmacion(por_consultar, automatico=True)
 
     def _recuperar_perdidos(self) -> bool:
