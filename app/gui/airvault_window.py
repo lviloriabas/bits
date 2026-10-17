@@ -1414,6 +1414,8 @@ class TrabajoAirVaultWorker(QThread):
         from app.airvault.flujo import (REENVIOS_AUTOMATICOS_MAXIMOS,
                                         CopiaEnLaCola, anotar_reenvio,
                                         autorizar_posible_duplicado,
+                                        envio_en_camino,
+                                        motivo_envio_en_camino,
                                         reenvios_automaticos,
                                         ya_esta_en_airvault)
 
@@ -1427,6 +1429,14 @@ class TrabajoAirVaultWorker(QThread):
             try:
                 if ya_esta_en_airvault(trabajo, cliente) is not None:
                     autorizados.append(trabajo)
+                    continue
+                en_camino = envio_en_camino(trabajo)
+                if en_camino is not None:
+                    # Que Web Search no tenga sus bitácoras no dice nada de
+                    # una carga que AirVault todavía no publica.
+                    motivo = motivo_envio_en_camino(en_camino)
+                    fallos.append((trabajo.manifiesto.nombre_batch,
+                                   f"No se volvió a subir porque {motivo}."))
                     continue
                 if not numeros_de_batch(trabajo.manifiesto):
                     fallos.append((trabajo.manifiesto.nombre_batch,
@@ -6246,10 +6256,14 @@ class AirVaultWindow(QDialog):
         if estado == POSIBLE_DUPLICADO:
             pendientes.append("decidir si es un duplicado antes de subir")
         elif estado == NO_ENCONTRADO:
-            from app.airvault.flujo import se_reenvia_sola
+            from app.airvault.flujo import a_la_hora, reenvio_en_espera, se_reenvia_sola
+            en_espera = reenvio_en_espera(parte.trabajo)
             pendientes.append(
                 "comprobar en Web Search y volver a subir (AirVault no publicó la carga)"
                 if se_reenvia_sola(parte) else
+                f"esperar a que AirVault publique la carga; si no aparece, se vuelve a "
+                f"subir desde {a_la_hora(en_espera)}"
+                if en_espera else
                 "revisar en AirVault y volver a subir a mano (AirVault no publicó la carga)"
             )
         else:
@@ -7028,7 +7042,7 @@ class AirVaultWindow(QDialog):
         Una ausencia reciente no se vuelve a preguntar, ni la carga por la
         que ya se preguntó hace poco (`MINUTOS_ENTRE_CHEQUEOS_DE_PERDIDOS`).
         """
-        from app.airvault.flujo import ausencia_vigente
+        from app.airvault.flujo import ausencia_vigente, reenvio_en_espera
 
         if self._deteniendo or self._pausado or self._cancelacion_solicitada:
             return
@@ -7069,10 +7083,28 @@ class AirVaultWindow(QDialog):
                 "antes de volver a subirlos:",
                 [self._rotulo(trabajo) for trabajo in resubibles],
             )
+        # La que puede seguir llegando a AirVault también se busca, pero
+        # todavía no vuelve: el registro dice desde cuándo.
+        en_camino = [
+            trabajo for trabajo in por_consultar
+            if trabajo not in resubibles and reenvio_en_espera(trabajo)
+        ]
+        if en_camino:
+            self._anotar(
+                "1 batch no aparece todavía en Web Index; se busca en Web Search y, si "
+                "no aparece, se vuelve a subir cuando pase su plazo:"
+                if len(en_camino) == 1 else
+                f"{len(en_camino)} batches no aparecen todavía en Web Index; se buscan en "
+                "Web Search y, si no aparecen, se vuelven a subir cuando pase su plazo:",
+                [self._rotulo_con_motivo(trabajo) for trabajo in en_camino],
+            )
         # Lo que no vuelve solo también se busca: si Web Search ya tiene sus
         # bitácoras queda como completado, y si no, el registro dice por qué
         # espera a una persona.
-        a_mano = [trabajo for trabajo in por_consultar if trabajo not in resubibles]
+        a_mano = [
+            trabajo for trabajo in por_consultar
+            if trabajo not in resubibles and trabajo not in en_camino
+        ]
         if a_mano:
             self._anotar(
                 "1 batch no está en Web Index; se busca en Web Search y no se vuelve a subir solo:"

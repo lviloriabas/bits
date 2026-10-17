@@ -205,6 +205,10 @@ def test_tras_un_reenvio_el_hallazgo_anterior_no_cuenta(tmp_path):
     trabajo.manifiesto.anotar("deteccion", "encontrado", "003TI0 (78 paginas)")
     anotar_reenvio(trabajo, automatico=False, motivo="orden expresa")
     trabajo.manifiesto.anotar("subida", "aceptada", "entrega.pdf")
+    # Pasado el reposo: la reenviada ya no puede estar en camino.
+    trabajo.manifiesto.historial[-1].momento = (
+        datetime.now() - timedelta(hours=4)
+    ).isoformat(timespec="seconds")
 
     assert id_que_tuvo_en_web_index(trabajo) == ""
     assert se_reenvia_sola(EstadoParte(trabajo, NO_ENCONTRADO))

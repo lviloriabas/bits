@@ -54,6 +54,8 @@ _MOTIVOS = (
      "Hay varios batches que podrían ser esta carga. Revise cuál corresponde en AirVault."),
     (("web index ya tiene",),
      "Web Index ya tiene esta carga con otro título y no se subió otra vez. El registro dice cuál es y qué hacer."),
+    (("puede seguir llegando a airvault",),
+     "La carga anterior todavía puede llegar a AirVault. No se sube otra vez hasta que pase su plazo."),
     (("batch cambio desde",), "El batch cambió. Vuelva a revisarlo antes de indexar."),
     (("batch esta abierto", "esta abierto por"),
      "El batch está abierto en AirVault. Ciérrelo y vuelva a intentarlo."),

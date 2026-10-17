@@ -54,8 +54,9 @@ EN_INDEX = "en_index"
 COMPLETADO = "completado"
 INDEXADO = "indexado"
 
-# Lo que la carga por la web agrega al nombre del archivo. Normalizado, el
-# guion se vuelve espacio como cualquier otro separador.
+# Lo que AirVault agrega al titulo de lo que recibe, tambien de lo que manda
+# este programa, hasta que se le pone el suyo. Normalizado, el guion se
+# vuelve espacio como cualquier otro separador.
 _SUFIJO_WEB = " batch"
 
 # Paginas que se leen de cada batch para comparar contenido, y cuantas tienen
@@ -458,3 +459,28 @@ def copias_de_la_carga(
         elif veredicto is None:
             dudosos.append(lote)
     return iguales, dudosos
+
+
+def armandose_en_la_cola(manifiesto, lotes: Sequence[ResumenLote]) -> List[ResumenLote]:
+    """Los batches con el titulo de esta carga y «-Batch» que AirVault todavia arma.
+
+    Lo recien recibido aparece en la cola con ese titulo y menos paginas de
+    las que tendra. Puede ser la carga que este equipo mando hace rato o la
+    que mando otro: el nombre lleva la hora de la ejecucion y la parte, y no
+    lo repite ninguna otra. No se compara contenido, porque sus paginas aun
+    no estan, y no hace falta: subir otra vez mientras tanto es lo que deja
+    dos.
+    """
+    nombre = normalizar_nombre(manifiesto.nombre_batch)
+    if not nombre:
+        return []
+    menor = min(manifiesto.cantidades_paginas_compatibles())
+    descartados = {_clave_id(valor) for valor in manifiesto.batches_descartados}
+    return [
+        lote for lote in lotes
+        if lote.batch_id and _clave_id(lote.batch_id) not in descartados
+        and not (lote.repo_id and manifiesto.repo_id and lote.repo_id != manifiesto.repo_id)
+        and normalizar_nombre(lote.nombre) != nombre
+        and titulo_base(lote.nombre) == nombre
+        and lote.paginas < menor
+    ]

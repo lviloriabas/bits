@@ -19,7 +19,7 @@ import re
 import tempfile
 import time
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path, PureWindowsPath
 from typing import (
     Callable, Collection, Dict, List, Mapping, Optional, Sequence, Tuple,
@@ -3609,6 +3609,23 @@ def subir_partes(
                 if avisar is not None:
                     avisar(f"{cabeza}{_ya_lo_tiene(copia, trabajo)}", 0, 0)
                 continue
+        # La carga anterior de este archivo puede seguir en camino: AirVault
+        # la acepto y todavia no la publica, y nadie la ve hasta entonces.
+        # Mandarla otra vez es como quedaban dos, la que no se renombraba
+        # con «-Batch» al final. Se mira antes de reiniciar el manifiesto,
+        # que borra la foto de la cola con que se reconoce la que llega, y no
+        # corta la cadena: las demas cargas siguen.
+        en_camino = envio_en_camino(trabajo)
+        if en_camino is not None:
+            motivo_espera = motivo_envio_en_camino(en_camino)
+            fallos.append((trabajo, f"No se subió otra vez porque {motivo_espera}."))
+            logger.warning(
+                "No se vuelve a subir {}: {}",
+                trabajo.manifiesto.nombre_batch, motivo_espera,
+            )
+            if avisar is not None:
+                avisar(f"{cabeza}No se sube otra vez: {motivo_espera}", 0, 0)
+            continue
         # Ultimo filtro, y el unico por el que pasan las dos formas de
         # llegar aqui: la carga nueva y la orden dada a mano. Todo lo
         # anterior mira la cola de Web Index; esto mira lo que ya esta
@@ -4076,14 +4093,28 @@ def copia_en_la_cola(
     :class:`CopiaEnLaCola` con lo que hay que hacer: subir otra vez dejaria
     la misma bitacora publicada dos veces.
     """
-    from app.airvault.copias_en_index import copias_de_la_carga
+    from app.airvault.copias_en_index import armandose_en_la_cola, copias_de_la_carga
 
     nombre = trabajo.manifiesto.nombre_batch
     iguales, dudosos = copias_de_la_carga(trabajo.manifiesto, lotes, cliente)
     if len(iguales) == 1:
         return iguales[0]
     if not iguales and not dudosos:
-        return None
+        armandose = armandose_en_la_cola(trabajo.manifiesto, lotes)
+        if not armandose:
+            return None
+        esperadas = min(trabajo.manifiesto.cantidades_paginas_compatibles())
+        cuales = ", ".join(
+            f"{lote.batch_id} «{lote.nombre}» ({lote.paginas} de {esperadas} páginas)"
+            for lote in armandose
+        )
+        raise CopiaEnLaCola(
+            f"Web Index ya tiene {cuales} con el título de «{nombre}», y "
+            "AirVault todavía la está armando. No se subió otra vez para no "
+            "dejarla dos veces: cuando AirVault la termine, el programa la "
+            "reconoce y le pone su título. Si se quedó así y no es esta "
+            "carga, bórrela en Web Index."
+        )
     cuales = ", ".join(
         f"{lote.batch_id} «{lote.nombre}»" for lote in (iguales or dudosos)
     )
@@ -5884,7 +5915,70 @@ def id_que_tuvo_en_web_index(trabajo: "Trabajo") -> str:
     return str(id_recordado(trabajo) or "").strip().upper()
 
 
-def _reenvio_sin_orden(trabajo: "Trabajo") -> bool:
+# Lo menos que se le deja a AirVault para publicar un archivo que Quick
+# Upload acepto antes de mandarlo otra vez. Tarda entre unos minutos y mas de
+# una hora, sin que importe el tamano: el 8 de octubre, 70 minutos un batch de
+# 500 paginas; el 13, 33 minutos uno de 78. El plazo de la espera entre
+# cargas se queda corto para esto (cinco minutos para 78 paginas): con el, el
+# programa daba por perdida una carga que seguia en camino, Web Search
+# tampoco la tenia todavia, la volvia a subir y AirVault terminaba publicando
+# las dos. La que no se renombraba es la copia con «-Batch» al final.
+REPOSO_ANTES_DE_REENVIAR_S = 3 * 3600.0
+
+# Como termino un envio en el que salio ``FinishUpload``, que es lo que crea
+# el batch: aunque AirVault tarde en publicarlo, puede estar en camino.
+_ENVIOS_CON_BATCH = frozenset({"aceptada", "sin_respuesta", "interrumpida"})
+
+
+def envio_en_camino(
+    trabajo: "Trabajo", ahora: Optional[datetime] = None
+) -> Optional[datetime]:
+    """Hasta cuando la ultima carga de este archivo puede seguir llegando.
+
+    ``None`` si ninguna puede: nunca salio de este equipo, aparecio en Web
+    Index despues de mandarla, se aparto por mezclada con otra o ya paso
+    :data:`REPOSO_ANTES_DE_REENVIAR_S`. Mientras haya una en camino el
+    archivo no se vuelve a mandar, ni solo ni por orden: nadie la ve en
+    AirVault hasta que se publica, y mandarla otra vez es como quedan dos.
+    """
+    manifiesto = trabajo.manifiesto
+    if getattr(manifiesto, "resubir_por_mezcla", False):
+        return None
+    envio: Optional[datetime] = None
+    for evento in getattr(manifiesto, "historial", None) or ():
+        if evento.paso == "subida" and evento.resultado in _ENVIOS_CON_BATCH:
+            envio = _momento(evento.momento) or envio
+        elif evento.paso == "deteccion" and evento.resultado == "encontrado":
+            # La carga anterior llego: ya no hay ninguna en camino.
+            envio = None
+    if envio is None:
+        return None
+    limite = envio + timedelta(seconds=REPOSO_ANTES_DE_REENVIAR_S)
+    presente = ahora or (
+        datetime.now(limite.tzinfo) if limite.tzinfo else datetime.now()
+    )
+    if not _mismo_reloj(presente, limite) or presente >= limite:
+        return None
+    return limite
+
+
+def a_la_hora(momento: datetime) -> str:
+    """La hora de un limite, con la fecha si no es hoy."""
+    if momento.date() == datetime.now(momento.tzinfo).date():
+        return f"las {momento:%H:%M}"
+    return f"el {momento:%d/%m} a las {momento:%H:%M}"
+
+
+def motivo_envio_en_camino(limite: datetime) -> str:
+    """Por que no se manda otra vez un archivo que puede seguir en camino."""
+    return (
+        "la carga enviada puede seguir llegando a AirVault, que a veces tarda "
+        "más de una hora en publicarla; no se vuelve a subir antes de "
+        f"{a_la_hora(limite)} para no dejarla dos veces"
+    )
+
+
+def _historial_permite_reenviar(trabajo: "Trabajo") -> bool:
     """Si el historial deja que el programa vuelva a mandar este archivo.
 
     Nunca la carga que ya estuvo en Web Index con su ID: salir de la cola
@@ -5906,6 +6000,21 @@ def _reenvio_sin_orden(trabajo: "Trabajo") -> bool:
     )
 
 
+def _reenvio_sin_orden(trabajo: "Trabajo") -> bool:
+    """Si el programa puede volver a mandar ya este archivo por su cuenta.
+
+    Lo permite el historial (ver :func:`_historial_permite_reenviar`) y no
+    queda ninguna carga anterior en camino (ver :func:`envio_en_camino`).
+    """
+    return _historial_permite_reenviar(trabajo) and not envio_en_camino(trabajo)
+
+
+def reenvio_en_espera(trabajo: "Trabajo") -> Optional[datetime]:
+    """Desde cuando se podra volver a subir sola, si solo falta el reposo."""
+    limite = envio_en_camino(trabajo)
+    return limite if limite and _historial_permite_reenviar(trabajo) else None
+
+
 def anotar_reenvio(trabajo: "Trabajo", automatico: bool, motivo: str = "") -> None:
     """Deja constancia de que el archivo vuelve a Quick Upload y por que."""
     trabajo.manifiesto.anotar(
@@ -5920,8 +6029,9 @@ def se_reenvia_sola(parte: EstadoParte) -> bool:
     Quick Upload la acepto, la cola entera se recorrio sin hallarla y
     vencio el plazo en que AirVault publica un archivo de su tamano. La que
     nunca aparecio vuelve sola la primera vez; la que ya tuvo batch, no.
-    Lo decide el historial (ver :func:`_reenvio_sin_orden`). No entran el
-    cancelado ni el de una mezcla pendiente.
+    Lo decide el historial, y antes tiene que pasar el reposo desde el
+    ultimo envio (ver :func:`_reenvio_sin_orden`). No entran el cancelado
+    ni el de una mezcla pendiente.
 
     Decir que si no la manda: antes hay que comprobar en Web Search que sus
     bitacoras no esten publicadas (ver :func:`ausencia_vigente`).
@@ -5965,7 +6075,9 @@ def destino_de(parte: EstadoParte) -> str:
     """Que toca hacer con un batch segun donde lo dejo la confirmacion.
 
     - ``A_SUBIR``: nunca salio hacia AirVault.
-    - ``EN_ESPERA``: Quick Upload lo acepto y AirVault todavia lo arma.
+    - ``EN_ESPERA``: Quick Upload lo acepto y AirVault todavia lo arma,
+      tambien el que ya no aparecio en su plazo mientras dura el reposo
+      (ver :func:`envio_en_camino`).
     - ``EN_WEB_INDEX``: esta en la cola; se indexa y se completa.
     - ``EN_WEB_SEARCH``: completado o con su publicacion confirmada.
     - ``SIN_UBICAR``: la cola no lo tiene y vencio su plazo; falta buscar
@@ -5996,6 +6108,8 @@ def destino_de(parte: EstadoParte) -> str:
     if estado == NO_ENCONTRADO:
         if trabajo.manifiesto.mezcla_pendiente:
             return A_MANO
+        if reenvio_en_espera(trabajo):
+            return EN_ESPERA
         if not ausencia_vigente(trabajo):
             return SIN_UBICAR
         return A_RESUBIR if se_reenvia_sola(parte) else A_MANO
@@ -6092,6 +6206,9 @@ def motivo_para_no_reenviar(trabajo: "Trabajo") -> str:
             f"estuvo en Web Index como {tuvo} y salió de la cola: lo "
             "completaron o lo borraron en AirVault"
         )
+    limite = reenvio_en_espera(trabajo)
+    if limite:
+        return motivo_envio_en_camino(limite)
     hechos = reenvios_automaticos(trabajo)
     return (
         f"ya se volvió a subir {hechos} {'vez' if hechos == 1 else 'veces'} "
@@ -6111,6 +6228,14 @@ def detalle_de_no_encontrada(trabajo: "Trabajo") -> str:
             "desde sus acciones."
         )
     base = "AirVault no publicó esta carga dentro del plazo."
+    limite = reenvio_en_espera(trabajo)
+    if limite:
+        return (
+            "AirVault todavía no publica esta carga y a veces tarda más de "
+            f"una hora. No se vuelve a subir antes de {a_la_hora(limite)}: "
+            "si la primera termina de llegar quedarían dos. Si para entonces "
+            "no está en Web Index ni en Web Search, se vuelve a subir sola."
+        )
     hechos = reenvios_automaticos(trabajo)
     if not _reenvio_sin_orden(trabajo):
         veces = (

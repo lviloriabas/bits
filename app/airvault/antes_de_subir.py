@@ -9,12 +9,17 @@ preguntas, en este orden, y basta un si para no subir:
    :mod:`app.airvault.envios_exactos`, sin red. El mismo archivo no sale dos
    veces salvo que una persona lo autorice.
 2. **¿Web Index ya tiene esta carga?** Con su titulo, con el «-Batch» que
-   agrega la carga por la web o como Empty-Batch con su nombre por dentro
-   (:func:`app.airvault.flujo.comprobar_partes`,
+   le pone AirVault a lo que recibe o como Empty-Batch con su nombre por
+   dentro (:func:`app.airvault.flujo.comprobar_partes`,
    :func:`app.airvault.flujo.copia_en_la_cola` y
    :func:`app.airvault.flujo.ya_esta_en_airvault`). Si la tiene, se toma
-   esa en vez de subir otra.
+   esa en vez de subir otra; si todavia la esta armando, se espera.
 3. **¿Web Search ya tiene publicadas sus bitacoras?** Este modulo.
+
+Entre la segunda y la tercera se mira ademas si la carga anterior de ese
+mismo archivo puede seguir en camino (:func:`app.airvault.flujo.envio_en_camino`):
+AirVault no la muestra en ninguna parte hasta que la publica, asi que ni la
+cola ni Web Search la ven, y mandarla otra vez deja dos.
 
 La tercera es la unica que ve un batch ya completado, porque completar lo
 saca de Web Index; sin ella, otro equipo que no sabe que una ejecucion ya
