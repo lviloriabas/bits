@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -79,26 +80,40 @@ def test_header_clicks_cycle_descending_ascending_and_original(tmp_path: Path):
     app.processEvents()
 
 
-def test_sorting_moves_the_whole_row_and_its_metadata(tmp_path: Path):
+def test_sorting_moves_the_whole_row_and_its_metadata(
+    tmp_path: Path, monkeypatch,
+):
+    # Un numero de bitacora se busca en los batches locales, en un hilo; que
+    # recorra solo los de la prueba y no los del programa.
+    monkeypatch.setattr("app.gui.csv_viewer._PROGRAM_DIR", tmp_path)
     app = QApplication.instance() or QApplication([])
     viewer = _viewer_with_csv(tmp_path)
-    modelo = viewer.table_model
+    try:
+        modelo = viewer.table_model
 
-    _click(viewer.table, modelo.column_of("page"))  # de mayor a menor
+        _click(viewer.table, modelo.column_of("page"))  # de mayor a menor
 
-    assert _model_texts(viewer, "file") == ["a.pdf", "b.pdf", "c.pdf"]
-    assert _model_texts(viewer, "page") == ["10", "9", "2"]
-    # La fila del CSV acompaña a la fila mostrada: la búsqueda la ubica.
-    assert [modelo.source_row(row) for row in range(modelo.rowCount())] == [
-        1, 0, 2
-    ]
+        assert _model_texts(viewer, "file") == ["a.pdf", "b.pdf", "c.pdf"]
+        assert _model_texts(viewer, "page") == ["10", "9", "2"]
+        # La fila del CSV acompaña a la fila mostrada: la búsqueda la ubica.
+        assert [modelo.source_row(row) for row in range(modelo.rowCount())] == [
+            1, 0, 2
+        ]
 
-    viewer.search_edit.setText("1234500")
-    viewer._find_in_csv()
-    assert viewer.table.currentIndex().row() == 2
-
-    viewer.close()
-    app.processEvents()
+        viewer.search_edit.setText("1234500")
+        viewer._find_in_csv()
+        deadline = time.monotonic() + 5
+        while (
+            viewer._search_worker is not None or viewer._pending_search is not None
+        ) and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.005)
+        assert viewer.table.currentIndex().row() == 2
+    finally:
+        # Cerrar siempre: un hilo de busqueda vivo al destruir la ventana
+        # aborta el proceso y corta la corrida entera.
+        viewer.close()
+        app.processEvents()
 
 
 def test_changing_csv_starts_again_without_order(tmp_path: Path):

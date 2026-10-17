@@ -91,7 +91,7 @@ def test_supr_borra_de_la_corrida_las_paginas_seleccionadas(tmp_path: Path):
         assert payload["reportes"][0]["summary"]["total_pages"] == 1
         # Y la tabla se recarga con lo que quedó.
         assert viewer.table_model.rowCount() == 1
-        assert "eliminadas" in viewer.status_label.text()
+        assert "páginas excluidas" in viewer.status_label.text()
     finally:
         viewer.pdf_viewer.shutdown()
         viewer.close()
@@ -299,7 +299,7 @@ def test_depurar_quita_la_bitacora_repetida_y_conserva_la_primera(tmp_path: Path
         assert _pages_in_csv(csv_path) == ["1"]
         assert _pages_in_json(csv_path) == [1]
         assert viewer.table_model.rowCount() == 1
-        assert "eliminadas" in viewer.status_label.text()
+        assert "páginas excluidas" in viewer.status_label.text()
     finally:
         viewer.pdf_viewer.shutdown()
         viewer.close()

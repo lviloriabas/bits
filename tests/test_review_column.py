@@ -221,8 +221,8 @@ def test_el_recuadro_cuenta_las_bitacoras_y_sus_porcentajes(app, tmp_path):
     ventana.fijar_corrida(csv_path)
 
     assert ventana.reparto_total.text() == "10 bitácoras"
-    assert ventana.reparto_automaticas.text() == "7 se indexan solas (70 %)"
-    assert ventana.reparto_revisar.text() == "3 van a REVISAR (30 %)"
+    assert ventana.reparto_automaticas.text() == "7 automáticas (70 %)"
+    assert ventana.reparto_revisar.text() == "3 a revisar (30 %)"
 
 
 def test_el_recuadro_arranca_diciendo_que_falta_elegir(app, tmp_path):
