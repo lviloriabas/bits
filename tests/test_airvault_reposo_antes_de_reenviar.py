@@ -15,14 +15,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.airvault.flujo import (EN_ESPERA, NO_ENCONTRADO,
+from app.airvault.flujo import (BUSCANDO, EN_ESPERA, NO_ENCONTRADO,
                                 REPOSO_ANTES_DE_REENVIAR_S, A_RESUBIR,
                                 CopiaEnLaCola, EstadoParte, Trabajo,
-                                anotar_reenvio, destino_de,
-                                detalle_de_no_encontrada, envio_en_camino,
+                                a_la_hora, anotar_reenvio, comprobar_partes,
+                                destino_de, detalle_de_no_encontrada,
+                                envio_en_camino, estado_local,
+                                motivo_envio_en_camino,
                                 motivo_para_no_reenviar, partes_por_recuperar,
-                                se_reenvia_sola, subir_partes,
-                                ya_esta_en_airvault)
+                                partes_por_ubicar, se_reenvia_sola,
+                                subir_partes, ya_esta_en_airvault)
 from app.airvault.copias_en_index import armandose_en_la_cola
 from app.airvault.model import Etapa, Registro
 from app.gui import airvault_window as modulo
@@ -108,6 +110,60 @@ def test_la_apartada_por_mezclada_se_resube_sin_esperar(tmp_path):
     assert envio_en_camino(t) is None
 
 
+# ── lo que ve el usuario ─────────────────────────────────────────────
+
+def test_mientras_puede_llegar_se_ve_subida_y_hasta_que_hora_se_espera(tmp_path):
+    """No es una carga perdida: no va en rojo ni dice «No encontrado»."""
+    trabajo_perdido, cliente, _parte = perdida(tmp_path)
+    enviada(trabajo_perdido, hace_s=600)
+
+    parte, = comprobar_partes([trabajo_perdido], cliente)
+
+    assert parte.estado == BUSCANDO and parte.titulo == "Subido"
+    assert "AirVault todavía no la publica" in parte.detalle
+    assert "No se vuelve a subir hasta las" in parte.detalle
+    assert "se vuelve a subir sola" in parte.detalle
+    assert modulo.papel_de_estado(parte.estado) != "STATUS_ERROR"
+    # Sigue sin frenar a las cargas siguientes.
+    assert trabajo_perdido.manifiesto.no_encontrado_desde
+    assert estado_local(trabajo_perdido).estado == BUSCANDO
+    # Tampoco cuando Web Search ya contesto que no la tiene.
+    ausente_en_web_search(trabajo_perdido)
+    assert estado_local(trabajo_perdido).estado == BUSCANDO
+    assert partes_por_ubicar([parte]) == []
+
+
+def test_pasado_el_reposo_se_ve_no_encontrada_y_se_busca_para_resubir(tmp_path):
+    """El reposo no deja la carga olvidada: al terminar sigue su camino."""
+    trabajo_perdido, cliente, _parte = perdida(tmp_path)
+    enviada(trabajo_perdido, hace_s=REPOSO_ANTES_DE_REENVIAR_S + 60)
+
+    parte, = comprobar_partes([trabajo_perdido], cliente)
+
+    assert parte.estado == NO_ENCONTRADO
+    assert partes_por_ubicar([parte]) == [trabajo_perdido]
+    assert se_reenvia_sola(parte)
+
+
+def test_la_que_ya_no_se_resube_sola_tambien_dice_hasta_cuando_se_espera(tmp_path):
+    trabajo_perdido, cliente, _parte = perdida(tmp_path)
+    anotar_reenvio(trabajo_perdido, automatico=True)
+    anotar_reenvio(trabajo_perdido, automatico=True)
+    enviada(trabajo_perdido, hace_s=600)
+
+    parte, = comprobar_partes([trabajo_perdido], cliente)
+
+    assert parte.estado == BUSCANDO
+    assert "después queda para decidir a mano" in parte.detalle
+
+
+def test_el_plazo_que_pasa_de_medianoche_lleva_la_fecha():
+    manana = datetime.now().replace(hour=1, minute=5) + timedelta(days=1)
+
+    assert a_la_hora(manana) == f"el {manana:%d/%m} a las 01:05"
+    assert "hasta el " in motivo_envio_en_camino(manana)
+
+
 # ── el reenvio automatico ────────────────────────────────────────────
 
 def test_la_no_encontrada_espera_el_reposo_antes_de_volver_sola(tmp_path):
@@ -121,9 +177,9 @@ def test_la_no_encontrada_espera_el_reposo_antes_de_volver_sola(tmp_path):
     assert destino_de(parte) == EN_ESPERA
     motivo = motivo_para_no_reenviar(trabajo_perdido)
     assert "puede seguir llegando a AirVault" in motivo
-    assert "no se vuelve a subir antes de las" in motivo
+    assert "no se vuelve a subir hasta las" in motivo
     detalle = detalle_de_no_encontrada(trabajo_perdido)
-    assert "se vuelve a subir sola" in detalle and "antes de las" in detalle
+    assert "se vuelve a subir sola" in detalle and "hasta las" in detalle
 
 
 def test_pasado_el_reposo_vuelve_sola_como_antes(tmp_path):
@@ -219,7 +275,7 @@ def test_la_ventana_explica_el_motivo_sin_mandar_a_reintentar():
     detalle = (
         "No se subió otra vez porque la carga enviada puede seguir llegando a "
         "AirVault, que a veces tarda más de una hora en publicarla; no se "
-        "vuelve a subir antes de las 18:05 para no dejarla dos veces."
+        "vuelve a subir hasta las 18:05 para no dejarla dos veces."
     )
 
     texto = mensaje_error(detalle, "No se pudo subir. Vuelva a intentarlo.")

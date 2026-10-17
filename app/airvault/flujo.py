@@ -3758,6 +3758,13 @@ def subir_partes(
             )
         except Exception as exc:  # noqa: BLE001 - se sigue con las demas
             detalle = str(exc)
+            en_camino = envio_en_camino(trabajo)
+            if trabajo.manifiesto.no_encontrado_desde and en_camino:
+                # No es un fallo: AirVault todavia la puede publicar, y la
+                # revision siguiente la sigue buscando.
+                if avisar is not None:
+                    avisar(f"{cabeza}{aviso_en_camino(en_camino)}", 0, 0)
+                continue
             fallos.append((trabajo, detalle))
             if trabajo.manifiesto.no_encontrado_desde:
                 if avisar is not None:
@@ -3941,7 +3948,12 @@ def _esperar_cargas_en_vuelo(
             except Exception as exc:  # noqa: BLE001 - se informa y se espera
                 if trabajo.manifiesto.no_encontrado_desde:
                     if avisar:
-                        avisar(f"{cabeza}No encontrado tras agotar la espera; se continúa con las cargas siguientes", 0, 0)
+                        en_camino = envio_en_camino(trabajo)
+                        avisar(
+                            f"{cabeza}{aviso_en_camino(en_camino)}" if en_camino
+                            else f"{cabeza}No encontrado tras agotar la espera; se continúa con las cargas siguientes",
+                            0, 0,
+                        )
                     continue
                 logger.info(
                     "La carga {} sigue sin confirmar: {}",
@@ -4872,7 +4884,7 @@ def estado_local(trabajo: "Trabajo") -> EstadoParte:
     """
     manifiesto = trabajo.manifiesto
     if getattr(manifiesto, "websearch_resultado", "") == "ausente" and not manifiesto.cancelado:
-        return EstadoParte(trabajo, NO_ENCONTRADO, manifiesto.websearch_detalle)
+        return _no_encontrada(trabajo, manifiesto.websearch_detalle)
     completar = manifiesto.etapas.get("completar")
     if completar and completar.estado is EstadoEtapa.HECHA:
         return _cierre_de(trabajo)
@@ -4887,7 +4899,7 @@ def estado_local(trabajo: "Trabajo") -> EstadoParte:
             trabajo, POSIBLE_DUPLICADO, manifiesto.posible_duplicado
         )
     if getattr(manifiesto, "no_encontrado_desde", "") and not manifiesto.batch_id:
-        return EstadoParte(trabajo, NO_ENCONTRADO, detalle_de_no_encontrada(trabajo))
+        return _no_encontrada(trabajo, detalle_de_no_encontrada(trabajo))
     if not manifiesto.etapa_hecha("subir"):
         subir = manifiesto.etapas.get("subir")
         detalle = (
@@ -5973,7 +5985,7 @@ def motivo_envio_en_camino(limite: datetime) -> str:
     """Por que no se manda otra vez un archivo que puede seguir en camino."""
     return (
         "la carga enviada puede seguir llegando a AirVault, que a veces tarda "
-        "más de una hora en publicarla; no se vuelve a subir antes de "
+        "más de una hora en publicarla; no se vuelve a subir hasta "
         f"{a_la_hora(limite)} para no dejarla dos veces"
     )
 
@@ -5998,6 +6010,44 @@ def _historial_permite_reenviar(trabajo: "Trabajo") -> bool:
         not trabajo.manifiesto.batch_id
         and reenvios_automaticos(trabajo) < REENVIOS_AUTOMATICOS_MAXIMOS
     )
+
+
+def detalle_en_camino(trabajo: "Trabajo", limite: datetime) -> str:
+    """Lo que dice la fila de una carga que AirVault todavia puede publicar."""
+    texto = (
+        "Quick Upload la aceptó y AirVault todavía no la publica; a veces "
+        f"tarda más de una hora. No se vuelve a subir hasta {a_la_hora(limite)}"
+    )
+    if _historial_permite_reenviar(trabajo):
+        return (
+            f"{texto}: si para entonces no está en Web Index ni en Web Search, "
+            "se vuelve a subir sola."
+        )
+    return f"{texto}; después queda para decidir a mano."
+
+
+def aviso_en_camino(limite: datetime) -> str:
+    """Lo que dice la cadena al dejar de esperar una carga que sigue en camino."""
+    return (
+        "AirVault todavía no la publica; se sigue con las cargas siguientes y "
+        f"se la sigue esperando hasta {a_la_hora(limite)}. Si no aparece, se "
+        "comprueba en Web Search antes de volver a subirla"
+    )
+
+
+def _no_encontrada(trabajo: "Trabajo", detalle: str) -> EstadoParte:
+    """«No encontrado», o «Subido» mientras la carga pueda seguir en camino.
+
+    Vencido el plazo de la espera entre cargas, la carga deja de frenar a
+    las siguientes (eso lo marca ``no_encontrado_desde``), pero no esta
+    perdida: AirVault tarda a veces mas de una hora en publicar. Mientras
+    dura el reposo se muestra como lo que es, una carga aceptada que falta
+    que aparezca, con la hora hasta la que se la espera.
+    """
+    limite = envio_en_camino(trabajo)
+    if limite:
+        return EstadoParte(trabajo, BUSCANDO, detalle_en_camino(trabajo, limite))
+    return EstadoParte(trabajo, NO_ENCONTRADO, detalle)
 
 
 def _reenvio_sin_orden(trabajo: "Trabajo") -> bool:
@@ -6232,7 +6282,7 @@ def detalle_de_no_encontrada(trabajo: "Trabajo") -> str:
     if limite:
         return (
             "AirVault todavía no publica esta carga y a veces tarda más de "
-            f"una hora. No se vuelve a subir antes de {a_la_hora(limite)}: "
+            f"una hora. No se vuelve a subir hasta {a_la_hora(limite)}: "
             "si la primera termina de llegar quedarían dos. Si para entonces "
             "no está en Web Index ni en Web Search, se vuelve a subir sola."
         )
@@ -6263,8 +6313,12 @@ def _registrar_busqueda_amplia_fallida(trabajo: "Trabajo") -> EstadoParte:
         )
     trabajo.guardar()
     if _carga_vieja_sin_publicar(trabajo):
+        # Deja de frenar a las cargas siguientes aunque siga en camino.
         _dar_por_no_encontrada(trabajo)
-        return EstadoParte(trabajo, NO_ENCONTRADO, detalle_de_no_encontrada(trabajo))
+        return _no_encontrada(trabajo, detalle_de_no_encontrada(trabajo))
+    limite = envio_en_camino(trabajo)
+    if limite:
+        return EstadoParte(trabajo, BUSCANDO, detalle_en_camino(trabajo, limite))
     return EstadoParte(
         trabajo,
         BUSCANDO,
