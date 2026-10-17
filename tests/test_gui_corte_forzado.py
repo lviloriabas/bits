@@ -104,6 +104,8 @@ def test_cerrar_dos_veces_ofrece_cortar_la_espera(app, monkeypatch):
     window = MainWindow()
     try:
         hilo = HiloFalso()
+        # Es el OCR: solo con paginas en vuelo tiene sentido ofrecer cortar.
+        window._worker = hilo
         monkeypatch.setattr(window, "_running_workers", lambda: [hilo])
         preguntas: list[str] = []
 

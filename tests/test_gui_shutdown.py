@@ -112,27 +112,107 @@ class _WaitingWorker(QThread):
         self.liberar.wait(2)
 
 
-def test_el_cierre_espera_a_git_atendiendo_eventos(window, app):
-    consulta = _WaitingWorker(window)
+def test_el_cierre_no_espera_la_consulta_de_version_nueva(
+    window, app, monkeypatch,
+):
+    """Con la red mala, ``git fetch`` tarda hasta su limite.
+
+    El cierre lo esperaba y decia que terminaba paginas sin haber ninguna.
+    """
+    from app.gui import actualizacion
+
+    liberar = Event()
+    terminada = Event()
+
+    def consultar(_raiz):
+        liberar.wait(5)
+        terminada.set()
+        return 3
+
+    monkeypatch.setattr(actualizacion, "commits_pendientes", consultar)
     ajeno = _WaitingWorker()
-    window._buscar_actualizacion_worker = consulta
-    consulta.start()
     ajeno.start()
     window.show()
     try:
+        window.vigilar_actualizaciones()
+        assert window._consulta_actualizacion.en_curso()
         inicio = time.monotonic()
         window.close()
         assert time.monotonic() - inicio < .5
-        assert window.isVisible()
-        QTimer.singleShot(20, consulta.liberar.set)
-        assert _until(app, lambda: not window.isVisible())
+        assert not window.isVisible()
+        assert not window._closing
+        assert window._consulta_actualizacion.en_curso()
         assert ajeno.isRunning()
         assert not ajeno.isInterruptionRequested()
     finally:
-        consulta.liberar.set()
+        liberar.set()
         ajeno.liberar.set()
-        consulta.wait()
         ajeno.wait()
+    # Git termina solo despues, y su respuesta ya no toca la ventana.
+    assert terminada.wait(2)
+    window._recoger_actualizacion()
+    assert window.btn_actualizar.isHidden()
+
+
+def test_la_respuesta_de_version_nueva_llega_sin_bloquear(
+    window, app, monkeypatch,
+):
+    from app.gui import actualizacion
+
+    monkeypatch.setattr(actualizacion, "commits_pendientes", lambda _raiz: 2)
+    window.show()
+    try:
+        window.vigilar_actualizaciones()
+        assert _until(app, lambda: not window._respuesta_actualizacion_timer.isActive())
+        assert not window.btn_actualizar.isHidden()
+    finally:
+        window._actualizacion_timer.stop()
+
+
+def test_sin_paginas_en_curso_el_cierre_no_habla_de_paginas(
+    window, app, monkeypatch,
+):
+    limpieza = _WaitingWorker(window)
+    window._browser_shutdown_worker = limpieza
+    preguntas = []
+    monkeypatch.setattr(
+        window, "_confirmar_corte", lambda *a: preguntas.append(a) or True,
+    )
+    limpieza.start()
+    window.show()
+    try:
+        window.close()
+        assert window.isVisible()
+        assert "páginas" not in window.status_label.text()
+        # Volver a cerrar no ofrece cortar paginas que no existen.
+        window.close()
+        assert not preguntas
+        QTimer.singleShot(20, limpieza.liberar.set)
+        assert _until(app, lambda: not window.isVisible())
+    finally:
+        limpieza.liberar.set()
+        limpieza.wait()
+
+
+def test_con_ocr_en_curso_el_cierre_conserva_su_aviso(window, app, monkeypatch):
+    ocr = _WaitingWorker(window)
+    window._worker = ocr
+    preguntas = []
+    monkeypatch.setattr(
+        window, "_confirmar_corte", lambda *a: preguntas.append(a) or False,
+    )
+    ocr.start()
+    window.show()
+    try:
+        window.close()
+        assert "páginas ya leídas" in window.status_label.text()
+        window.close()
+        assert len(preguntas) == 1
+        QTimer.singleShot(20, ocr.liberar.set)
+        assert _until(app, lambda: not window.isVisible())
+    finally:
+        ocr.liberar.set()
+        ocr.wait()
 
 
 def test_el_cierre_del_navegador_no_bloquea_qt(window, app, monkeypatch):

@@ -100,8 +100,8 @@ from app.gui.responsive import (
 from app.gui.table_sort import ColumnSortController
 from app.gui.actualizacion import (
     ActualizarWorker,
-    BuscarActualizacionWorker,
     BuscarRamasWorker,
+    ConsultaDeActualizacion,
     mensaje_de_git,
     confirmar_novedades_instaladas,
     leer_novedades_instaladas,
@@ -196,6 +196,8 @@ _TABLE_CELL_CHUNK = 2000
 _SHUTDOWN_POLL_MS = 150
 # Cada cuanto se vuelve a preguntar al repositorio si hay version nueva.
 _CONSULTA_ACTUALIZACION_MS = 30 * 60 * 1000
+# Cada cuanto se mira si esa consulta ya tiene respuesta.
+_RESPUESTA_ACTUALIZACION_MS = 500
 _ACTUALIZAR_TEXTO = "Hacer clic aquí para actualizar"
 _PISTA_BUSQUEDA = "La búsqueda abre cada coincidencia en la vista previa."
 _PREVIEW_EMPTY_MESSAGE = "Seleccione un archivo PDF para ver la vista previa"
@@ -808,12 +810,17 @@ class MainWindow(QMainWindow):
 
         # Aviso de version nueva. La consulta la arranca ``run_gui`` con
         # ``vigilar_actualizaciones``; construir la ventana no va a la red.
-        self._buscar_actualizacion_worker: BuscarActualizacionWorker | None = None
+        self._consulta_actualizacion: ConsultaDeActualizacion | None = None
         self._actualizar_worker: ActualizarWorker | None = None
         self._buscar_ramas_worker: BuscarRamasWorker | None = None
         self._actualizacion_timer = QTimer(self)
         self._actualizacion_timer.setInterval(_CONSULTA_ACTUALIZACION_MS)
         self._actualizacion_timer.timeout.connect(self._buscar_actualizacion)
+        self._respuesta_actualizacion_timer = QTimer(self)
+        self._respuesta_actualizacion_timer.setInterval(_RESPUESTA_ACTUALIZACION_MS)
+        self._respuesta_actualizacion_timer.timeout.connect(
+            self._recoger_actualizacion
+        )
 
         self._build_ui()
         # El estilo ya esta instalado antes de construir la ventana. Pulir
@@ -868,13 +875,22 @@ class MainWindow(QMainWindow):
         """Lanza la consulta al repositorio si no hay otra en curso."""
         if self._closing or self._torn_down or self._actualizar_worker is not None:
             return
-        previa = self._buscar_actualizacion_worker
-        if previa is not None and previa.isRunning():
+        previa = self._consulta_actualizacion
+        if previa is not None and previa.en_curso():
             return
-        worker = BuscarActualizacionWorker(SCRIPT_DIR, self)
-        worker.encontrado.connect(self._on_actualizacion_encontrada)
-        self._buscar_actualizacion_worker = worker
-        worker.start()
+        consulta = ConsultaDeActualizacion(SCRIPT_DIR)
+        self._consulta_actualizacion = consulta
+        consulta.start()
+        self._respuesta_actualizacion_timer.start()
+
+    def _recoger_actualizacion(self) -> None:
+        """Toma la respuesta de Git en cuanto la consulta termina."""
+        consulta = self._consulta_actualizacion
+        if consulta is None or consulta.en_curso():
+            return
+        self._respuesta_actualizacion_timer.stop()
+        if consulta.resultado is not None:
+            self._on_actualizacion_encontrada(consulta.resultado)
 
     def _on_actualizacion_encontrada(self, pendientes: int) -> None:
         """Muestra u oculta el botón según haya commits nuevos."""
@@ -5472,11 +5488,17 @@ class MainWindow(QMainWindow):
             # Volver a cerrar mientras ya se estaba cerrando es la senal de
             # que la espera se hizo larga. Entonces se ofrece cortar: sin
             # esta salida, un OCR de paginas grandes deja la ventana
-            # diciendo "cerrando" durante minutos y parece colgada.
-            if self._closing and self._confirmar_corte(
-                "Cerrar a la fuerza",
-                "El programa esta esperando a que terminen las paginas en "
-                "curso para cerrarse sin perderlas.",
+            # diciendo "cerrando" durante minutos y parece colgada. Cortar
+            # solo apura el OCR y el preprocesado; si lo que queda es soltar
+            # batches o cerrar Edge, preguntar por paginas no tiene sentido.
+            if (
+                self._closing
+                and self._hay_paginas_en_curso()
+                and self._confirmar_corte(
+                    "Cerrar a la fuerza",
+                    "El programa esta esperando a que terminen las paginas en "
+                    "curso para cerrarse sin perderlas.",
+                )
             ):
                 self._cortar_trabajo_en_curso()
                 running = self._shutdown_workers()
@@ -5499,15 +5521,15 @@ class MainWindow(QMainWindow):
                 running.extend(ventana.preparar_cierre())
             except RuntimeError:
                 pass
-        for worker in (
-            self._buscar_actualizacion_worker, self._browser_shutdown_worker,
-        ):
-            if worker is not None:
-                try:
-                    if worker.isRunning() and worker not in running:
-                        running.append(worker)
-                except RuntimeError:
-                    pass
+        # La consulta de version nueva no cuenta: corre en un hilo de fondo
+        # que el programa no necesita esperar para salir.
+        worker = self._browser_shutdown_worker
+        if worker is not None:
+            try:
+                if worker.isRunning() and worker not in running:
+                    running.append(worker)
+            except RuntimeError:
+                pass
         # Edge se cierra solo cuando ningun trabajo ni liberacion de batches
         # lo necesita. El hilo conserva la ventana hasta que termina.
         if not running and self._browser_shutdown_worker is None:
@@ -5519,6 +5541,18 @@ class MainWindow(QMainWindow):
                 worker.start()
                 running.append(worker)
         return running
+
+    def _hay_paginas_en_curso(self) -> bool:
+        """Si hay OCR o preprocesado leyendo paginas, lo unico que se corta."""
+        for worker in (self._worker, self._preprocess_worker):
+            if worker is None:
+                continue
+            try:
+                if worker.isRunning():
+                    return True
+            except RuntimeError:
+                continue
+        return False
 
     def _confirmar_corte(self, titulo: str, situacion: str) -> bool:
         """Pregunta si se corta el trabajo en curso, avisando de lo que cuesta."""
@@ -5573,16 +5607,22 @@ class MainWindow(QMainWindow):
                 else:
                     worker.requestInterruption()
             self._actualizacion_timer.stop()
+            self._respuesta_actualizacion_timer.stop()
             for button in (
                 self.btn_process, self.btn_preprocess,
                 self.btn_export, self.btn_cancel,
             ):
                 button.setEnabled(False)
-            self.status_label.setText(
-                "Cerrando… se está deteniendo el trabajo en curso. "
-                "Las páginas ya leídas se guardan. Vuelva a cerrar para no "
-                "esperar."
-            )
+            if self._hay_paginas_en_curso():
+                self.status_label.setText(
+                    "Cerrando… se está deteniendo el trabajo en curso. "
+                    "Las páginas ya leídas se guardan. Vuelva a cerrar para no "
+                    "esperar."
+                )
+            else:
+                self.status_label.setText(
+                    "Cerrando… se terminan las tareas pendientes."
+                )
         if not self._shutdown_timer.isActive():
             self._shutdown_timer.start()
 
@@ -5606,17 +5646,11 @@ class MainWindow(QMainWindow):
         for timer in (
             self._timer, self._table_timer, self._log_timer,
             self._shutdown_timer, self._resize_preview_timer,
-            self._actualizacion_timer,
+            self._actualizacion_timer, self._respuesta_actualizacion_timer,
         ):
             timer.stop()
-        # La consulta de versión nueva no se interrumpe: Git termina solo o
-        # por su tiempo límite, y destruir el hilo en marcha abortaría.
-        consulta = self._buscar_actualizacion_worker
-        if consulta is not None:
-            try:
-                consulta.wait()
-            except RuntimeError:
-                pass
+        # La consulta de versión nueva no se espera: su hilo es de fondo y
+        # Git termina solo aunque el programa ya haya salido.
         if self._csv_viewer is not None:
             self._csv_viewer.close()
         if self._web_reports_window is not None:

@@ -16,6 +16,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 from datetime import datetime
 from pathlib import Path
 from threading import RLock
@@ -331,20 +332,35 @@ def recuperar_aviso_del_pull(raiz: Path) -> None:
         logger.info(f"No se pudo recuperar el aviso del ultimo pull: {exc}")
 
 
-class BuscarActualizacionWorker(QThread):
-    """Consulta en segundo plano cuantos commits nuevos hay en el remoto."""
+class ConsultaDeActualizacion:
+    """Consulta en segundo plano cuantos commits nuevos hay en el remoto.
 
-    encontrado = Signal(int)
+    ``git fetch`` puede tardar hasta su tiempo limite cuando la red falla.
+    Con un ``QThread`` el cierre tenia que esperarlo, porque destruirlo en
+    marcha aborta el proceso, y la ventana decia que terminaba paginas sin
+    haber ninguna. Este hilo es de fondo: el programa sale sin esperarlo y
+    Git termina solo, sin cortarlo a medias ni dejar candados en ``.git``.
 
-    def __init__(self, raiz: Path, parent=None) -> None:
-        super().__init__(parent)
+    No avisa con senales, que podrian llegar a una ventana ya destruida: la
+    ventana pregunta por ``resultado`` cuando ``en_curso`` deja de ser cierto.
+    """
+
+    def __init__(self, raiz: Path) -> None:
         self._raiz = raiz
+        self.resultado: int | None = None
+        self._hilo = threading.Thread(
+            target=self._consultar, name="consulta-version-nueva", daemon=True,
+        )
 
-    def run(self) -> None:  # noqa: D102 - lo describe la clase
+    def start(self) -> None:
+        self._hilo.start()
+
+    def en_curso(self) -> bool:
+        return self._hilo.is_alive()
+
+    def _consultar(self) -> None:
         with _TURNO_GIT:
-            pendientes = commits_pendientes(self._raiz)
-        if pendientes is not None:
-            self.encontrado.emit(pendientes)
+            self.resultado = commits_pendientes(self._raiz)
 
 
 class ActualizarWorker(QThread):
