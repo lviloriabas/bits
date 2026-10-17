@@ -24,6 +24,9 @@ from app.utils.io import sanitize_filename, unique_path
 from app.vision.pdf_loader import PdfDocumentCache, copy_pdf_pages
 
 _NUMERO_RE = re.compile(r"^\d{7}$")
+# Caracteres de números en el nombre del PDF conjunto. Windows no admite
+# rutas de más de 260 caracteres, y la carpeta elegida también cuenta.
+_LARGO_NOMBRE = 100
 
 
 @dataclass(frozen=True)
@@ -54,18 +57,69 @@ def nombre_de_bitacora(bitacora: Bitacora) -> str:
     return f"{sanitize_filename(base)} p{bitacora.pagina}.pdf"
 
 
-def nombre_conjunto(bitacoras: Sequence[Bitacora]) -> str:
-    """Nombre del PDF que junta varias bitácoras: el rango de sus números."""
-    numeros = sorted({
-        b.numero.strip() for b in bitacoras if _NUMERO_RE.match(b.numero.strip())
+def tramos(numeros: Iterable[str]) -> list[tuple[str, int]]:
+    """Los números legibles agrupados en tramos seguidos, de menor a mayor.
+
+    Cada tramo es su texto y cuántas bitácoras abarca: ``2281907-2281909``
+    son tres, ``2281915`` es una. Los repetidos cuentan una vez y los que no
+    son de siete dígitos no entran, porque no se pueden ordenar ni encadenar.
+    """
+    valores = sorted({
+        int(numero.strip()) for numero in numeros if _NUMERO_RE.match(numero.strip())
     })
+    resultado: list[tuple[str, int]] = []
+    inicio = anterior = None
+    for valor in valores + [None]:
+        if valor is not None and anterior is not None and valor == anterior + 1:
+            anterior = valor
+            continue
+        if inicio is not None:
+            texto = (
+                f"{inicio:07d}" if inicio == anterior
+                else f"{inicio:07d}-{anterior:07d}"
+            )
+            resultado.append((texto, anterior - inicio + 1))
+        inicio = anterior = valor
+    return resultado
+
+
+def describir_numeros(
+    numeros: Iterable[str], limite: int = 0, mas: str = "más"
+) -> str:
+    """Los números como se leen: un rango si son seguidos, si no uno a uno.
+
+    ``2281907-2281909`` cuando van seguidos, ``2281907, 2281915`` cuando no,
+    y las dos cosas mezcladas cuando hay tramos y sueltos. Con ``limite`` el
+    texto se corta antes de pasarse de esos caracteres y dice cuántas quedan
+    fuera; ``mas`` es la palabra de ese final, sin tilde en un nombre de
+    archivo.
+    """
+    partes = tramos(numeros)
+    total = sum(cuantas for _, cuantas in partes)
+    texto = ""
+    incluidas = 0
+    for parte, cuantas in partes:
+        candidato = f"{texto}, {parte}" if texto else parte
+        if limite and texto and len(candidato) > limite:
+            return f"{texto} y {total - incluidas} {mas}"
+        texto = candidato
+        incluidas += cuantas
+    return texto
+
+
+def nombre_conjunto(bitacoras: Sequence[Bitacora]) -> str:
+    """Nombre del PDF que junta varias bitácoras: sus números.
+
+    Un rango si son seguidos y la lista si no lo son. Muchas sueltas no caben
+    en un nombre de archivo de Windows, así que a partir de cierto largo se
+    dice cuántas faltan.
+    """
     if len(bitacoras) == 1:
         return nombre_de_bitacora(bitacoras[0])
-    if not numeros:
-        return "Bitacoras.pdf"
-    if len(numeros) == 1:
-        return f"Bitacoras {numeros[0]}.pdf"
-    return f"Bitacoras {numeros[0]}-{numeros[-1]}.pdf"
+    numeros = describir_numeros(
+        (b.numero for b in bitacoras), limite=_LARGO_NOMBRE, mas="mas"
+    )
+    return f"Bitacoras {numeros}.pdf" if numeros else "Bitacoras.pdf"
 
 
 def ordenar(bitacoras: Iterable[Bitacora]) -> list[Bitacora]:

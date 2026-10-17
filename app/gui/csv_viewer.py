@@ -34,6 +34,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -44,6 +45,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSizePolicy,
@@ -66,12 +68,7 @@ from app.gui.csv_utils import (
     template_for_csv,
     template_name_for_csv,
 )
-from app.gui.csv_model import (
-    CHECK_COLUMN,
-    CHECK_COLUMN_WIDTH,
-    STATUS_COLORS,
-    CsvTableModel,
-)
+from app.gui.csv_model import STATUS_COLORS, CsvTableModel
 from app.gui.csv_search import (
     FileStamp,
     LocalLogbookIndex,
@@ -89,6 +86,7 @@ from app.gui.field_selector import ImportantFieldsDialog
 from app.gui.memoria import VISOR, recordar
 from app.gui.responsive import ROOMY, Density, density_for, fit_to_screen
 from app.gui.table_sort import ModelSortController
+from app.gui.text_copy import selected_cells_as_text
 from app.gui.theme import gestor_tema
 from app.gui.tokens import FONT_CAPTION_PT, SPACE_S, accent_color, paleta
 from app.reports.outputs import complete_csv_path
@@ -768,14 +766,8 @@ def apply_csv_column_visibility(
     important_field_ids: Iterable[str],
     important_only: bool,
     selected_columns: Iterable[str] | None = None,
-    offset: int = 0,
 ) -> None:
-    """Aplica el modo resumido/completo ocultando columnas de la tabla.
-
-    ``offset`` son las columnas propias de la tabla que van delante de las
-    del CSV: en el visor, la de las casillas, que no se oculta nunca porque
-    no es un campo de la bitácora sino la forma de elegir páginas.
-    """
+    """Aplica el modo resumido/completo ocultando columnas de la tabla."""
     column_list = list(columns)
     visible = set(
         selected_columns
@@ -784,7 +776,7 @@ def apply_csv_column_visibility(
     )
     for index, column in enumerate(column_list):
         table.setColumnHidden(
-            index + offset, important_only and column not in visible
+            index, important_only and column not in visible
         )
 
 
@@ -1883,9 +1875,9 @@ class CsvViewerWindow(QMainWindow):
         )
         self.table.setWordWrap(False)
         self.table.setToolTip(
-            "Una fila por página: al elegirla se abre en el visor y Supr la "
-            "quita de la ejecución. Marque casillas para borrar varias "
-            "sueltas."
+            "Una fila por página: al elegirla se abre en el visor. Ctrl o "
+            "Mayús eligen varias; el clic derecho las exporta y Supr las "
+            "quita de la ejecución."
         )
         # Supr solo mientras la tabla tiene el foco: es la que sabe qué
         # páginas hay elegidas, y desde el buscador o el cuadro de salidas la
@@ -1893,16 +1885,11 @@ class CsvViewerWindow(QMainWindow):
         delete_pages = QShortcut(QKeySequence.StandardKey.Delete, self.table)
         delete_pages.setContext(Qt.ShortcutContext.WidgetShortcut)
         delete_pages.activated.connect(self._delete_selected_pages)
-        # La barra espaciadora marca las filas elegidas, como en cualquier
-        # lista con casillas: con muchas seguidas es lo que evita apuntar a
-        # una casilla de dos milímetros una por una.
-        marcar = QShortcut(QKeySequence(Qt.Key.Key_Space), self.table)
-        marcar.setContext(Qt.ShortcutContext.WidgetShortcut)
-        marcar.activated.connect(self._toggle_checked_rows)
+        # Menú propio: además de copiar la celda, exporta las bitácoras
+        # elegidas sin bajar hasta el botón.
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._menu_de_tabla)
         style_data_table(self.table)
-        # El delegado pinta la fila marcada entera; aquí se le dice en qué
-        # columna vive la casilla que lo decide.
-        self.table.setProperty("checkColumn", CHECK_COLUMN)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.horizontalHeader().setSectionsMovable(False)
@@ -2287,17 +2274,7 @@ class CsvViewerWindow(QMainWindow):
         self.table_sort.reset()
         self._apply_column_mode()
         self.table.resizeColumnsToContents()
-        self.table.setColumnWidth(CHECK_COLUMN, CHECK_COLUMN_WIDTH)
         self._restore_sort()
-
-    def _toggle_checked_rows(self) -> None:
-        """Marca o desmarca de una vez las filas resaltadas."""
-        modelo = self.table.selectionModel()
-        if modelo is None:
-            return
-        self.table_model.toggle_rows(
-            sorted(indice.row() for indice in modelo.selectedRows())
-        )
 
     def _remember_sort(self) -> None:
         """Anota por qué columna quedó ordenada la tabla tras un clic."""
@@ -2413,29 +2390,13 @@ class CsvViewerWindow(QMainWindow):
             if column in self._selected_important_columns
         ]
 
-    def _checked_source_rows(self) -> list[int]:
-        """Filas marcadas con la casilla de la primera columna."""
-        return [
-            source_row
-            for source_row in self.table_model.checked_source_rows()
-            if 0 <= source_row < len(self._rows)
-        ]
-
     def _selected_source_rows(self) -> list[int]:
         """Filas del CSV elegidas, en el orden en que están en el CSV.
 
         La tabla se puede ordenar por cualquier columna, así que la posición
-        en pantalla no dice qué fila del CSV es: eso lo lleva cada celda de
-        la primera columna, que es la que sobrevive al reordenamiento.
-
-        Manda lo marcado con las casillas en cuanto haya una marcada: es una
-        elección que sobrevive a recorrer la tabla, mientras que el resalte
-        se pierde con el clic siguiente. Sin ninguna marcada valen las filas
-        resaltadas, que es como funcionaba antes de las casillas.
+        en pantalla no dice qué fila del CSV es: eso lo traduce el modelo,
+        que sabe qué fila del CSV ocupa cada posición.
         """
-        marcadas = self._checked_source_rows()
-        if marcadas:
-            return marcadas
         model = self.table.selectionModel()
         if model is None:
             return []
@@ -2806,6 +2767,8 @@ class CsvViewerWindow(QMainWindow):
             )
             return
 
+        from app.reports.exportar_bitacoras import describir_numeros
+
         numeros = _numeros_de_bitacora(self._rows[row] for row in source_rows)
         un_solo_pdf = False
         if len(bitacoras) == 1:
@@ -2815,10 +2778,13 @@ class CsvViewerWindow(QMainWindow):
                 else "Carpeta para la bitácora"
             )
         else:
+            # Como el nombre del PDF: un rango si son seguidas, si no una a una.
+            descripcion = (
+                describir_numeros(numeros, limite=160)
+                or "sin número de bitácora legible"
+            )
             dialog = ExportarBitacorasDialog(
-                f"{len(bitacoras)} bitácoras elegidas: "
-                f"{_lista_de_bitacoras(numeros)}.",
-                self,
+                f"{len(bitacoras)} bitácoras elegidas: {descripcion}.", self
             )
             try:
                 if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -2841,6 +2807,48 @@ class CsvViewerWindow(QMainWindow):
         carpeta = Path(elegida)
         guardar_opcion(_CLAVE_CARPETA_EXPORTAR, str(carpeta))
         self._start_exportar(bitacoras, carpeta, un_solo_pdf)
+
+    def _menu_de_tabla(self, punto) -> None:
+        """Abre el menú de la fila sobre la que se hizo clic derecho.
+
+        Si la fila ya estaba entre las elegidas, el menú vale para toda la
+        selección; si no, la selección pasa a ser esa fila. Así nunca se
+        exporta otra bitácora que quedó resaltada de antes. Es lo que hace la
+        cola de AirVault y cualquier lista de Windows.
+        """
+        indice = self.table.indexAt(punto)
+        if not indice.isValid():
+            return
+        seleccion = self.table.selectionModel()
+        if seleccion is not None and not seleccion.isRowSelected(indice.row()):
+            self.table.selectRow(indice.row())
+        menu = self._acciones_de_tabla()
+        menu.aboutToHide.connect(menu.deleteLater)
+        menu.popup(self.table.viewport().mapToGlobal(punto))
+
+    def _acciones_de_tabla(self) -> QMenu:
+        """Las acciones del clic derecho sobre lo que hay elegido ahora.
+
+        El texto dice qué se va a exportar: con una sola fila, su número; con
+        varias, cuántas son.
+        """
+        menu = QMenu(self.table)
+        filas = self._selected_source_rows()
+        numeros = _numeros_de_bitacora(self._rows[fila] for fila in filas)
+        if len(filas) == 1:
+            texto = f"Exportar bitácora {numeros[0]}" if numeros else "Exportar bitácora"
+        else:
+            texto = f"Exportar {len(filas)} bitácoras"
+        exportar = menu.addAction(texto)
+        exportar.setEnabled(bool(filas) and self.btn_exportar.isEnabled())
+        exportar.triggered.connect(self._exportar_bitacoras)
+        # El mismo «Copiar» que tienen las demás tablas: con menú propio, el
+        # de la aplicación ya no se abre aquí.
+        copia = selected_cells_as_text(self.table)
+        copiar = menu.addAction("Copiar")
+        copiar.setEnabled(bool(copia))
+        copiar.triggered.connect(lambda: QApplication.clipboard().setText(copia))
+        return menu
 
     def _start_exportar(self, bitacoras: list, carpeta: Path, un_solo_pdf: bool) -> None:
         """Copia las bitácoras en su propio hilo."""
@@ -3246,10 +3254,10 @@ class CsvViewerWindow(QMainWindow):
         return next(
             (
                 position
-                for position in range(1, self.table_model.columnCount())
+                for position in range(self.table_model.columnCount())
                 if not self.table.isColumnHidden(position)
             ),
-            CHECK_COLUMN,
+            0,
         )
 
     def _sync_search_controls(self) -> None:
@@ -3339,7 +3347,6 @@ class CsvViewerWindow(QMainWindow):
             self._important_field_ids,
             important_only,
             self._selected_important_columns,
-            offset=CHECK_COLUMN + 1,
         )
         visible = (
             sum(

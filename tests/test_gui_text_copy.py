@@ -112,6 +112,56 @@ def test_el_menu_del_csv_copia_la_celda_sobre_la_que_se_hizo_clic():
     assert table.currentIndex().column() == 1
 
 
+def test_el_menu_sobre_una_fila_elegida_no_deshace_la_seleccion():
+    """Con varias filas elegidas el menu es para todas, como en Windows.
+
+    Fuera de la seleccion, en cambio, la fila del clic pasa a ser la unica:
+    actuar sobre otras que quedaron resaltadas de antes seria un error.
+    """
+    app = _app()
+    table = _tabla_por_filas(
+        (("A320", "2312238"), ("B737", "2312239"), ("E190", "2312240"))
+    )
+    table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
+    table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+    table.show()
+    app.processEvents()
+    table.selectRow(0)
+    table.selectionModel().select(
+        table.model().index(1, 0),
+        table.selectionModel().SelectionFlag.Select
+        | table.selectionModel().SelectionFlag.Rows,
+    )
+    viewport = table.viewport()
+
+    def menu_sobre(fila: int) -> None:
+        # Como el raton: primero la pulsacion, que es la que elige, y
+        # despues el menu.
+        destino = table.visualRect(table.model().index(fila, 1)).center()
+        QTest.mousePress(
+            viewport, Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier, destino
+        )
+        QTest.mouseRelease(
+            viewport, Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier, destino
+        )
+        app.sendEvent(
+            viewport,
+            QContextMenuEvent(
+                QContextMenuEvent.Reason.Mouse, destino, viewport.mapToGlobal(destino)
+            ),
+        )
+
+    def elegidas() -> list[int]:
+        return sorted(i.row() for i in table.selectionModel().selectedRows())
+
+    menu_sobre(1)
+    assert elegidas() == [0, 1]
+    assert table.currentIndex().row() == 1
+
+    menu_sobre(2)
+    assert elegidas() == [2]
+
+
 def test_una_tabla_que_elige_por_celdas_copia_el_bloque_elegido():
     """Ahi elegir varias es una decision, no un efecto de pulsar la fila."""
     app = _app()

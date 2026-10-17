@@ -366,8 +366,8 @@ def test_row_and_column_indicators_are_visible(tmp_path: Path):
         for index in range(modelo.columnCount())
     ]
 
-    # La primera columna es la de las casillas y va sin rótulo.
-    assert horizontal == ["", "file", "page", "log_number"]
+    # Una columna por cada una del CSV, sin otra delante.
+    assert horizontal == ["file", "page", "log_number"]
     assert modelo.rowCount() == 1
     # La cabecera se pinta explícitamente: sin fondo y color propios, sobre la
     # tabla oscura el estilo nativo dejaría los rótulos ilegibles.
@@ -1050,9 +1050,9 @@ def test_a_long_csv_is_ready_without_filling_cell_by_cell(tmp_path: Path):
     modelo = viewer.table_model
     # Entera desde el primer momento, sin tramos pendientes.
     assert modelo.rowCount() == 400
-    assert modelo.index(0, 1).data() == "a.pdf"
-    assert modelo.index(399, 2).data() == "400"
-    assert modelo.index(399, 3).data() == "v400_0"
+    assert modelo.index(0, 0).data() == "a.pdf"
+    assert modelo.index(399, 1).data() == "400"
+    assert modelo.index(399, 2).data() == "v400_0"
     assert [modelo.source_row(row) for row in range(400)] == list(range(400))
     viewer.close()
     app.processEvents()
@@ -1369,7 +1369,8 @@ def test_varias_bitacoras_preguntan_si_van_en_un_solo_pdf(
         assert _textos_pdf(destino / "Bitacoras 2147337-2147338.pdf") == [
             "pagina 1", "pagina 2",
         ]
-        assert "2 bitácoras elegidas: 2147337, 2147338" in descripciones[0]
+        # Seguidas, el cuadro las dice como rango, igual que el nombre.
+        assert "2 bitácoras elegidas: 2147337-2147338." in descripciones[0]
         assert "2 bitácoras exportadas" in viewer.status_label.text()
         # La forma elegida es la que trae el cuadro la vez siguiente.
         dialog = csv_viewer_module.ExportarBitacorasDialog("x", viewer)
@@ -1406,8 +1407,7 @@ def test_varias_bitacoras_en_archivos_separados_y_cancelar_no_escribe(
     viewer = CsvViewerWindow(tmp_path)
     try:
         assert viewer.load_csv_file(csv_path) is True
-        # Las casillas mandan sobre el resalte, igual que al eliminar.
-        viewer.table_model.toggle_rows([0, 1])
+        viewer.table.selectAll()
 
         viewer._exportar_bitacoras()
         assert viewer._exportar_worker is None
@@ -1419,6 +1419,109 @@ def test_varias_bitacoras_en_archivos_separados_y_cancelar_no_escribe(
             "2147337.pdf", "2147338.pdf",
         ]
         assert "2 bitácoras exportadas en pedidas" in viewer.status_label.text()
+    finally:
+        viewer.close()
+        app.processEvents()
+
+
+def _clic_derecho(app, viewer, fila: int):
+    """Pulsa y suelta el botón derecho sobre una fila; devuelve dónde."""
+    from PySide6.QtTest import QTest
+
+    viewport = viewer.table.viewport()
+    punto = viewer.table.visualRect(viewer.table_model.index(fila, 1)).center()
+    QTest.mousePress(
+        viewport, Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier, punto
+    )
+    QTest.mouseRelease(
+        viewport, Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier, punto
+    )
+    app.processEvents()
+    return punto
+
+
+def test_el_clic_derecho_elige_la_bitacora_y_ofrece_exportarla(
+    tmp_path: Path, monkeypatch
+):
+    """La que se exporta es la del clic, no otra que estaba resaltada."""
+    from PySide6.QtWidgets import QMenu
+
+    app = QApplication.instance() or QApplication([])
+    origen = _pdf_con_texto(tmp_path / "entrada" / "escaneo-menu.pdf", 2)
+    _run, csv_path = _run_with_companion_json(tmp_path, origen)
+    menus: list[QMenu] = []
+    monkeypatch.setattr(QMenu, "popup", lambda menu, *_args: menus.append(menu))
+    viewer = CsvViewerWindow(tmp_path)
+    exportadas: list[list[int]] = []
+    monkeypatch.setattr(
+        viewer,
+        "_exportar_bitacoras",
+        lambda *_args: exportadas.append(viewer._selected_source_rows()),
+    )
+    viewer.resize(1200, 700)
+    viewer.show()
+    try:
+        assert viewer.load_csv_file(csv_path) is True
+        app.processEvents()
+        viewer.table.selectRow(viewer.table_model.display_row(0))
+
+        punto = _clic_derecho(app, viewer, viewer.table_model.display_row(1))
+        viewer.table.customContextMenuRequested.emit(punto)
+
+        assert viewer._selected_source_rows() == [1]
+        textos = [accion.text() for accion in menus[-1].actions()]
+        assert textos == ["Exportar bitácora 2147338", "Copiar"]
+        menus[-1].actions()[0].trigger()
+        assert exportadas == [[1]]
+    finally:
+        viewer.close()
+        app.processEvents()
+
+
+def test_el_clic_derecho_sobre_varias_elegidas_las_exporta_todas(
+    tmp_path: Path, monkeypatch
+):
+    """Sobre una fila ya elegida no se deshace la selección de varias."""
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QContextMenuEvent
+    from PySide6.QtWidgets import QMenu
+
+    from app.gui.text_copy import install_text_copy_support
+
+    app = QApplication.instance() or QApplication([])
+    # El filtro de «Copiar» de la aplicación también ve el clic derecho.
+    install_text_copy_support(app)
+    origen = _pdf_con_texto(tmp_path / "entrada" / "escaneo-menu-varias.pdf", 2)
+    _run, csv_path = _run_with_companion_json(tmp_path, origen)
+    menus: list[QMenu] = []
+    monkeypatch.setattr(QMenu, "popup", lambda menu, *_args: menus.append(menu))
+    viewer = CsvViewerWindow(tmp_path)
+    viewer.resize(1200, 700)
+    viewer.show()
+    try:
+        assert viewer.load_csv_file(csv_path) is True
+        app.processEvents()
+        viewer.table.selectAll()
+
+        fila = viewer.table_model.display_row(1)
+        punto = _clic_derecho(app, viewer, fila)
+        viewport = viewer.table.viewport()
+        app.sendEvent(
+            viewport,
+            QContextMenuEvent(
+                QContextMenuEvent.Reason.Mouse, punto, viewport.mapToGlobal(punto)
+            ),
+        )
+        app.processEvents()
+
+        assert viewer._selected_source_rows() == [0, 1]
+        assert viewer.table.currentIndex().row() == fila
+        assert menus[-1].actions()[0].text() == "Exportar 2 bitácoras"
+
+        # Fuera de las filas no hay menú: no hay bitácora que exportar.
+        antes = len(menus)
+        viewer.table.customContextMenuRequested.emit(QPoint(5, 5000))
+        assert len(menus) == antes
     finally:
         viewer.close()
         app.processEvents()

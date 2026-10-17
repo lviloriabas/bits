@@ -305,7 +305,8 @@ Abra **Herramientas -> Visor de CSV…** para consultar una ejecución guardada 
 | **Página** y flechas                         | Ir a una página o recorrer el conjunto.                                                                                        |
 | Acercar, alejar y ajustar                    | Inspeccionar la imagen o verla completa.                                                                                       |
 | **Ubicar PDF…**                              | Localizar los originales si se movieron.                                                                                       |
-| Casillas y **Supr**                          | Marcar páginas y quitarlas de la ejecución tras confirmar. La barra espaciadora alterna las marcas de las filas seleccionadas. |
+| Ctrl, Mayús y **Supr**                       | Elegir varias filas y quitarlas de la ejecución tras confirmar.                                                                |
+| Clic derecho                                 | Exportar la bitácora de esa fila, o todas las elegidas si la fila ya era una de ellas, y copiar la celda.                      |
 | **Duplicadas y en blanco**                   | Revisar y retirar páginas duplicadas o en blanco.                                                                             |
 | **Salida** y **Generar salidas**             | Cambiar la organización y volver a generar la entrega sin OCR.                                                                 |
 | **Exportar**                                 | Guardar en una carpeta el PDF de las bitácoras seleccionadas, tal como se escanearon.                                          |
@@ -319,7 +320,9 @@ Para entregar bitácoras sueltas:
 1. Escriba los siete dígitos de la bitácora y pulse **Buscar**. El visor abre su ejecución y deja su fila seleccionada.
 2. Pulse **Exportar** y elija la carpeta. El archivo se llama como la bitácora, por ejemplo `2281909.pdf`.
 
-Para exportar varias de la misma ejecución, selecciónelas con Ctrl o Mayús, márquelas con sus casillas o pulse Ctrl+A para elegir todas. Antes de la carpeta se pregunta si van en **Un PDF por bitácora** o en **Un solo PDF**, ordenado por número. La carpeta y la forma elegidas se recuerdan para la próxima vez. Exportar no cambia la ejecución y nunca reemplaza un archivo de la carpeta: un nombre repetido se guarda como `2281909-2.pdf`. Si falta el PDF de origen, ubíquelo antes con **Ubicar PDF…**.
+También puede hacer clic derecho sobre la fila y elegir **Exportar bitácora**: el clic derecho deja elegida esa fila, así que se exporta la que señaló y no otra que estuviera resaltada.
+
+Para exportar varias de la misma ejecución, selecciónelas con Ctrl o Mayús, o pulse Ctrl+A para elegir todas, y use **Exportar** o el clic derecho sobre una de ellas. Antes de la carpeta se pregunta si van en **Un PDF por bitácora** o en **Un solo PDF**, ordenado por número. El nombre de ese PDF dice qué bitácoras lleva: un rango si son seguidas (`Bitacoras 2281907-2281909.pdf`) y la lista si no lo son (`Bitacoras 2281907, 2281915.pdf`); los tramos seguidos y las sueltas se combinan, y con muchas sueltas el nombre termina en «y N mas». La carpeta y la forma elegidas se recuerdan para la próxima vez. Exportar no cambia la ejecución y nunca reemplaza un archivo de la carpeta: un nombre repetido se guarda como `2281909-2.pdf`. Si falta el PDF de origen, ubíquelo antes con **Ubicar PDF…**.
 
 Los cambios de **Campos importantes** de la ventana principal se reflejan también en el visor de CSV abierto, para la misma plantilla.
 

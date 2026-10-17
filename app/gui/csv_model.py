@@ -9,26 +9,20 @@ Aquí la tabla no guarda nada: lee del CSV que ya está en memoria y pinta
 solo lo que se ve. Ordenar es reordenar una lista de índices, que es
 instantáneo por grande que sea la ejecución.
 
-La primera columna es la de las casillas. Vive aparte de los datos porque
-es de la tabla, no del CSV: marcar páginas sueltas para borrarlas no puede
-depender de que la vista resumida deje a la vista la columna que le tocara.
+Cada columna de la tabla es una del CSV, en el mismo orden. Hubo una primera
+columna de casillas para marcar páginas sueltas, pero no seguía a la
+selección y confundía: lo que se elige es lo resaltado, con Ctrl o Mayús.
 """
 
 from __future__ import annotations
 
-from typing import Callable, Iterable, Sequence
+from typing import Callable, Sequence
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PySide6.QtGui import QColor
 
 from app.gui.csv_utils import csv_display_name
 from app.gui.table_sort import sorted_row_order
-
-# Columna de las casillas: siempre la primera y siempre visible.
-CHECK_COLUMN = 0
-# Ancho de esa columna. Solo lleva la casilla, así que se fija a mano: por
-# contenido queda tan estrecha que la marca toca los bordes.
-CHECK_COLUMN_WIDTH = 34
 
 STATUS_COLORS = {
     "OK": "#1a7f37",
@@ -38,7 +32,7 @@ STATUS_COLORS = {
 
 
 class CsvTableModel(QAbstractTableModel):
-    """Filas y columnas del CSV abierto, con su casilla y sus colores."""
+    """Filas y columnas del CSV abierto, con sus colores."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -47,7 +41,6 @@ class CsvTableModel(QAbstractTableModel):
         # Fila del CSV que ocupa hoy cada fila mostrada. Es lo único que
         # cambia al ordenar.
         self._order: list[int] = []
-        self._checked: set[int] = set()
         self._status: Callable[[dict[str, str], str], str | None] = (
             lambda _row, _column: None
         )
@@ -74,7 +67,6 @@ class CsvTableModel(QAbstractTableModel):
         self._columns = list(columns)
         self._rows = list(rows)
         self._order = list(range(len(self._rows)))
-        self._checked = set()
         self.endResetModel()
 
     @property
@@ -101,72 +93,20 @@ class CsvTableModel(QAbstractTableModel):
     def column_of(self, name: str) -> int:
         """Columna de la tabla que muestra esa columna del CSV."""
         try:
-            return self._columns.index(name) + 1
+            return self._columns.index(name)
         except ValueError:
             return -1
 
     def name_of(self, column: int) -> str:
         """Columna del CSV que se ve en esa columna de la tabla."""
-        indice = column - 1
-        if 0 <= indice < len(self._columns):
-            return self._columns[indice]
+        if 0 <= column < len(self._columns):
+            return self._columns[column]
         return ""
-
-    # ── casillas ────────────────────────────────────────────────────────
-
-    def checked_source_rows(self) -> list[int]:
-        """Filas del CSV marcadas, en el orden en que están en el CSV."""
-        return sorted(self._checked)
-
-    def clear_checked(self) -> None:
-        if not self._checked:
-            return
-        self._checked = set()
-        self._repaint_rows()
-
-    def toggle_rows(self, display_rows: Iterable[int]) -> None:
-        """Invierte la marca de esas filas mostradas, todas a la vez.
-
-        Con varias elegidas manda la primera: si no estaba marcada, se
-        marcan todas; si lo estaba, se desmarcan todas. Es lo que hace
-        cualquier lista con casillas y evita que una selección mezclada
-        quede medio marcada tras pulsar una sola vez.
-        """
-        filas = [
-            self._order[fila]
-            for fila in display_rows
-            if 0 <= fila < len(self._order)
-        ]
-        if not filas:
-            return
-        marcar = filas[0] not in self._checked
-        for origen in filas:
-            if marcar:
-                self._checked.add(origen)
-            else:
-                self._checked.discard(origen)
-        self._repaint_rows()
-
-    def _repaint_rows(self) -> None:
-        if not self._order:
-            return
-        # La fila entera se repinta: marcarla la sombrea de un extremo al
-        # otro, no solo donde está la casilla.
-        self.dataChanged.emit(
-            self.index(0, 0),
-            self.index(len(self._order) - 1, self.columnCount() - 1),
-            [Qt.ItemDataRole.CheckStateRole, Qt.ItemDataRole.BackgroundRole],
-        )
 
     # ── orden ───────────────────────────────────────────────────────────
 
     def column_values(self, column: int) -> list[str]:
         """Texto de esa columna para cada fila del CSV, en orden del CSV."""
-        if column == CHECK_COLUMN:
-            return [
-                "1" if fila in self._checked else "0"
-                for fila in range(len(self._rows))
-            ]
         name = self.name_of(column)
         if not name:
             return [""] * len(self._rows)
@@ -194,7 +134,7 @@ class CsvTableModel(QAbstractTableModel):
         self.layoutChanged.emit()
 
     def sort_rows(self, column: int, descending: bool) -> None:
-        """Ordena por una columna; la de las casillas, por lo marcado."""
+        """Ordena las filas por una columna, sin mover ningún dato."""
         self.apply_order(
             sorted_row_order(self.column_values(column), descending)
         )
@@ -209,7 +149,7 @@ class CsvTableModel(QAbstractTableModel):
         return 0 if parent.isValid() else len(self._order)
 
     def columnCount(self, parent=QModelIndex()) -> int:  # noqa: N802 - API Qt
-        return 0 if parent.isValid() else len(self._columns) + 1
+        return 0 if parent.isValid() else len(self._columns)
 
     def headerData(  # noqa: N802 - API Qt
         self, section: int, orientation, role=Qt.ItemDataRole.DisplayRole
@@ -217,27 +157,13 @@ class CsvTableModel(QAbstractTableModel):
         if orientation is not Qt.Orientation.Horizontal:
             return None
         if role == Qt.ItemDataRole.DisplayRole:
-            return (
-                "" if section == CHECK_COLUMN
-                else csv_display_name(self.name_of(section))
-            )
-        if role == Qt.ItemDataRole.ToolTipRole and section == CHECK_COLUMN:
-            return (
-                "Marque las páginas que quiera juntar aunque no estén "
-                "seguidas. Mientras haya alguna marcada, son esas las que se "
-                "eliminan."
-            )
+            return csv_display_name(self.name_of(section))
         return None
 
     def flags(self, index):  # noqa: D102 - API Qt
         if not index.isValid():
             return Qt.ItemFlag.NoItemFlags
-        base = (
-            Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-        )
-        if index.column() == CHECK_COLUMN:
-            return base | Qt.ItemFlag.ItemIsUserCheckable
-        return base
+        return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):  # noqa: D102
         if not index.isValid():
@@ -246,17 +172,6 @@ class CsvTableModel(QAbstractTableModel):
         if origen < 0:
             return None
         column = index.column()
-
-        if column == CHECK_COLUMN:
-            if role == Qt.ItemDataRole.CheckStateRole:
-                return (
-                    Qt.CheckState.Checked
-                    if origen in self._checked
-                    else Qt.CheckState.Unchecked
-                )
-            if role == Qt.ItemDataRole.UserRole:
-                return origen
-            return None
 
         if role == Qt.ItemDataRole.UserRole:
             return origen
@@ -280,15 +195,3 @@ class CsvTableModel(QAbstractTableModel):
             comment = self._comment(row, name)
             return f"Estado: {status}" + (f"\n{comment}" if comment else "")
         return None
-
-    def setData(  # noqa: N802 - API Qt
-        self, index, value, role=Qt.ItemDataRole.CheckStateRole
-    ) -> bool:
-        if (
-            not index.isValid()
-            or index.column() != CHECK_COLUMN
-            or role != Qt.ItemDataRole.CheckStateRole
-        ):
-            return False
-        self.toggle_rows([index.row()])
-        return True

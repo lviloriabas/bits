@@ -8,6 +8,7 @@ import pymupdf as fitz
 
 from app.reports.exportar_bitacoras import (
     Bitacora,
+    describir_numeros,
     exportar_bitacoras,
     nombre_conjunto,
     nombre_de_bitacora,
@@ -99,15 +100,60 @@ def test_sin_numero_legible_se_nombra_por_su_pdf_y_pagina():
     assert nombre_de_bitacora(Bitacora("22/19?09", Path("a.pdf"), 1)) == "22_19_09.pdf"
 
 
-def test_nombre_del_pdf_conjunto():
-    a = Bitacora("2281907", Path("a.pdf"), 1)
-    b = Bitacora("2281909", Path("a.pdf"), 2)
-    ilegible = Bitacora("", Path("a.pdf"), 3)
+def _bitacoras(*numeros: str) -> list[Bitacora]:
+    return [Bitacora(numero, Path("a.pdf"), 1) for numero in numeros]
 
-    assert nombre_conjunto([a]) == "2281907.pdf"
-    assert nombre_conjunto([b, a]) == "Bitacoras 2281907-2281909.pdf"
-    assert nombre_conjunto([a, a]) == "Bitacoras 2281907.pdf"
-    assert nombre_conjunto([ilegible, ilegible]) == "Bitacoras.pdf"
+
+def test_seguidas_el_nombre_es_su_rango():
+    assert nombre_conjunto(_bitacoras("2281909", "2281907", "2281908")) == (
+        "Bitacoras 2281907-2281909.pdf"
+    )
+    assert nombre_conjunto(_bitacoras("2281907", "2281908")) == (
+        "Bitacoras 2281907-2281908.pdf"
+    )
+
+
+def test_sueltas_el_nombre_las_lista_todas():
+    assert nombre_conjunto(_bitacoras("2281915", "2281907", "2281911")) == (
+        "Bitacoras 2281907, 2281911, 2281915.pdf"
+    )
+
+
+def test_tramos_seguidos_y_sueltas_se_combinan():
+    assert nombre_conjunto(
+        _bitacoras("2281907", "2281908", "2281909", "2281915", "2281920", "2281921")
+    ) == "Bitacoras 2281907-2281909, 2281915, 2281920-2281921.pdf"
+
+
+def test_nombre_con_una_sola_repetidas_o_ilegibles():
+    assert nombre_conjunto(_bitacoras("2281907")) == "2281907.pdf"
+    assert nombre_conjunto(_bitacoras("2281907", "2281907")) == "Bitacoras 2281907.pdf"
+    assert nombre_conjunto(_bitacoras("", "")) == "Bitacoras.pdf"
+    # Una ilegible no rompe el rango de las legibles.
+    assert nombre_conjunto(_bitacoras("2281907", "22819?", "2281908")) == (
+        "Bitacoras 2281907-2281908.pdf"
+    )
+
+
+def test_muchas_sueltas_no_desbordan_el_nombre():
+    """Windows no admite rutas de más de 260 caracteres."""
+    numeros = [f"{2281900 + 2 * n}" for n in range(40)]  # ninguna seguida
+
+    nombre = nombre_conjunto(_bitacoras(*numeros))
+
+    assert nombre.startswith("Bitacoras 2281900, 2281902, ")
+    assert len(nombre) < 130
+    mostradas = nombre.count(", ") + 1
+    assert nombre.endswith(f" y {40 - mostradas} mas.pdf")
+
+
+def test_describir_numeros_para_la_interfaz():
+    assert describir_numeros(["2281909", "2281907", "2281908"]) == "2281907-2281909"
+    assert describir_numeros(["2281907", "2281909"]) == "2281907, 2281909"
+    assert describir_numeros([f"{2281900 + 2 * n}" for n in range(5)], limite=20) == (
+        "2281900, 2281902 y 3 más"
+    )
+    assert describir_numeros(["", "abc"]) == ""
 
 
 def test_cancelar_deja_completo_lo_ya_escrito(tmp_path: Path):

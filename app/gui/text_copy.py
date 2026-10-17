@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QObject, Qt
+from PySide6.QtCore import QEvent, QItemSelectionModel, QObject, Qt
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -116,7 +116,16 @@ class _CopyableTextFilter(QObject):
                 # evento son coordenadas de celdas; con el teclado no hay
                 # posicion y la celda activa ya es la que corresponde.
                 bajo = table.indexAt(event.pos())
-                if bajo.isValid():
+                seleccion = table.selectionModel()
+                if bajo.isValid() and seleccion is not None and seleccion.isSelected(bajo):
+                    # Sobre una fila ya elegida solo se mueve el cursor: con
+                    # varias elegidas el menu actua sobre todas, como hace Qt
+                    # al pulsar con el boton derecho. Mover el cursor con la
+                    # tabla dejaba elegida solo esa fila.
+                    seleccion.setCurrentIndex(
+                        bajo, QItemSelectionModel.SelectionFlag.NoUpdate
+                    )
+                elif bajo.isValid():
                     table.setCurrentIndex(bajo)
             # Una tabla con menu propio se queda con el suyo: el filtro de
             # la aplicacion corre antes que el widget, y quedarse con el
