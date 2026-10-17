@@ -85,6 +85,11 @@ from app.gui.exportar_bitacoras_dialog import ExportarBitacorasDialog
 from app.gui.field_selector import ImportantFieldsDialog
 from app.gui.memoria import VISOR, recordar
 from app.gui.responsive import ROOMY, Density, density_for, fit_to_screen
+from app.gui.resumen_corrida import (
+    detalle_entrega,
+    resumir_corrida,
+    texto_resumen,
+)
 from app.gui.table_sort import ModelSortController
 from app.gui.text_copy import selected_cells_as_text
 from app.gui.theme import gestor_tema
@@ -1109,6 +1114,15 @@ class EmbeddedPdfViewer(QFrame):
         )
         layout.addWidget(nav_bar)
 
+        # Las cifras de la ejecución, siempre a la vista: la paginación
+        # cuenta bitácoras, y la entrega lleva además los separadores.
+        self.run_stats = QLabel()
+        self.run_stats.setObjectName("pdfRunStats")
+        self.run_stats.setWordWrap(True)
+        self.run_stats.setAccessibleName("Estadísticas de la ejecución")
+        self.run_stats.setVisible(False)
+        layout.addWidget(self.run_stats)
+
         self.source_status = QLabel()
         self.source_status.setObjectName("pdfSourceStatus")
         self.source_status.setWordWrap(True)
@@ -1203,6 +1217,12 @@ class EmbeddedPdfViewer(QFrame):
             else "Este CSV no registra los PDF de los que proviene."
         )
         self._sync_controls()
+
+    def set_run_stats(self, text: str, detail: str = "") -> None:
+        """Pone las cifras de la ejecución bajo la página; vacías, las oculta."""
+        self.run_stats.setText(text)
+        self.run_stats.setToolTip(detail)
+        self.run_stats.setVisible(bool(text))
 
     def _on_document_changed(self, index: int) -> None:
         if 0 <= index < len(self._documents):
@@ -1533,7 +1553,7 @@ class EmbeddedPdfViewer(QFrame):
         elif missing:
             text = (
                 f"{available} de {available + missing} PDF de origen "
-                f"disponibles · {'falta' if missing == 1 else 'faltan'} {names}."
+                f"disponibles; {'falta' if missing == 1 else 'faltan'} {names}."
             )
             estado = "WARNING"
         else:
@@ -2226,6 +2246,7 @@ class CsvViewerWindow(QMainWindow):
         )
         self._apply_column_mode()
         self._load_pdf_paths(path)
+        self._show_run_stats(path)
         self._sync_search_controls()
         self._sync_export_button()
         self.setWindowTitle(f"Visor de resultados CSV - {path.name}")
@@ -2308,6 +2329,15 @@ class CsvViewerWindow(QMainWindow):
                 page = 0
             page_refs.append((path, page))
         self.pdf_viewer.load_paths(documents, missing, page_refs)
+
+    def _show_run_stats(self, csv_path: Path) -> None:
+        """Deja en el visor las cifras de la ejecución y de su entrega."""
+        resumen = resumir_corrida(
+            self._rows, csv_path, run_dir_for_csv(csv_path), self._columns
+        )
+        self.pdf_viewer.set_run_stats(
+            texto_resumen(resumen), detalle_entrega(resumen)
+        )
 
     def _relocate_source_pdfs(self) -> None:
         """Reintenta la búsqueda de los PDF faltantes en otra carpeta."""
