@@ -255,7 +255,7 @@ class DepurarPaginasDialog(QDialog):
         raiz.addWidget(self.total_label)
         efectos = QLabel(
             "Al aplicar se actualizarán los datos procesados. Los PDF de la entrega "
-            "cambiarán cuando vuelva a exportar. Los archivos originales se conservan."
+            "cambiarán cuando vuelva a generarlos. Los archivos originales se conservan."
         )
         efectos.setWordWrap(True)
         raiz.addWidget(efectos)

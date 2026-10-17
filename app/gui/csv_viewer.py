@@ -84,6 +84,7 @@ from app.gui.csv_search import (
 )
 from app.gui.depuracion_dialog import DEPURAR_TOOLTIP, REVISAR_PAGINAS_TEXTO, DepurarPaginasDialog
 from app.gui.export_options import ExportOptionsGroup
+from app.gui.exportar_bitacoras_dialog import ExportarBitacorasDialog
 from app.gui.field_selector import ImportantFieldsDialog
 from app.gui.memoria import VISOR, recordar
 from app.gui.responsive import ROOMY, Density, density_for, fit_to_screen
@@ -118,6 +119,7 @@ from app.utils.important_fields import (
 )
 from app.utils import ruta_remota
 from app.utils.io import PROCESSED_DIRNAME
+from app.utils.preferencias_ui import guardar_opcion, leer_opcion
 # El mismo recuento que dejan los correctores al tocar un reporte: quitarle
 # páginas cambia los totales y el JSON no puede quedar diciendo los de antes.
 from app.validation.book_corrector import _recompute_summary
@@ -139,14 +141,20 @@ _TABLE_SHARE = 3
 # Ejecuciones que lista el historial. Es la ventana de trabajo de un turno: lo
 # de más atrás sigue estando en output/ y se abre con «Seleccionar carpeta».
 _HISTORY_LIMIT = 25
-# El mismo texto que en la ventana principal; el botón lo recupera cuando
-# deja de explicar por qué no se puede exportar.
 # Lo que dice el indicador de búsqueda mientras no hay nada que buscar.
 _SEARCH_HINT = "Siete dígitos buscan una bitácora en todos los batches locales."
-_EXPORT_TOOLTIP = (
-    "Volver a generar CSV, JSON y PDF con las opciones actuales, sin "
-    "reprocesar. Los PDF repetidos se numeran (-2, -3…)"
+# El botón lo recupera cuando deja de explicar por qué no se pueden generar
+# las salidas.
+_GENERAR_TOOLTIP = (
+    "Volver a generar CSV, JSON y PDF de la ejecución con las opciones de "
+    "«Salida», sin reprocesar. Los PDF repetidos se numeran (-2, -3…)"
 )
+_EXPORTAR_TOOLTIP = (
+    "Guardar en una carpeta el PDF de las bitácoras elegidas en la tabla. "
+    "Ctrl+A elige todas"
+)
+# Donde se guardó la última exportación: el selector de carpeta abre ahí.
+_CLAVE_CARPETA_EXPORTAR = f"{VISOR}.carpeta_exportar"
 def _pdf_pane_qss() -> str:
     """El panel se viste a sí mismo para verse igual dentro y fuera del visor."""
     c = paleta()
@@ -1674,9 +1682,12 @@ class CsvViewerWindow(QMainWindow):
 
         self._splitter_adjusted = False
         self._outputs_worker = None
-        # Qué escribió la última ejecución del hilo de salidas: exportar o
+        # Qué escribió la última ejecución del hilo de salidas: generarlas o
         # eliminar páginas. El aviso final de cada una no es el mismo.
         self._outputs_context = "export"
+        # Exportar bitácoras va en un hilo aparte: no escribe la ejecución,
+        # así que no tiene por qué esperar a que se generen sus salidas.
+        self._exportar_worker = None
         # El indicador de abajo lleva dos cosas: el resumen de la tabla, que
         # se rehace en cada cambio de columnas, y el estado de la exportación,
         # que sobrevive a esos cambios hasta que se abre otro CSV.
@@ -1928,11 +1939,16 @@ class CsvViewerWindow(QMainWindow):
         self.btn_depurar.setToolTip(DEPURAR_TOOLTIP)
         self.btn_depurar.clicked.connect(self._depurar_paginas)
         status_row.addWidget(self.btn_depurar)
-        self.btn_export = QPushButton("Exportar")
-        self.btn_export.setEnabled(False)
-        self.btn_export.setToolTip(_EXPORT_TOOLTIP)
-        self.btn_export.clicked.connect(self._exportar)
-        status_row.addWidget(self.btn_export)
+        self.btn_generar = QPushButton("Generar salidas")
+        self.btn_generar.setEnabled(False)
+        self.btn_generar.setToolTip(_GENERAR_TOOLTIP)
+        self.btn_generar.clicked.connect(self._generar_salidas)
+        status_row.addWidget(self.btn_generar)
+        self.btn_exportar = QPushButton("Exportar")
+        self.btn_exportar.setEnabled(False)
+        self.btn_exportar.setToolTip(_EXPORTAR_TOOLTIP)
+        self.btn_exportar.clicked.connect(self._exportar_bitacoras)
+        status_row.addWidget(self.btn_exportar)
         layout.addLayout(status_row)
 
         # Al final: el historial se sincroniza con lo que hay abierto y para
@@ -1991,8 +2007,9 @@ class CsvViewerWindow(QMainWindow):
 
         El panel es un hijo de la ventana: cerrarla no le entrega un evento
         de cierre, y dejar su hilo de render vivo abortaría el proceso al
-        destruir la ventana. La exportación no se puede interrumpir a mitad
-        de escritura, así que se la espera.
+        destruir la ventana. Generar las salidas no se puede interrumpir a
+        mitad de escritura, así que se lo espera; exportar bitácoras sí se
+        corta entre un archivo y el siguiente.
         """
         self._reset_search()
         if self._search_worker is not None:
@@ -2002,6 +2019,10 @@ class CsvViewerWindow(QMainWindow):
                 event.ignore()
                 return
         self.pdf_viewer.shutdown()
+        exportando = self._exportar_worker
+        if exportando is not None and exportando.isRunning():
+            exportando.requestInterruption()
+            exportando.wait(30000)
         worker = self._outputs_worker
         if worker is not None and worker.isRunning():
             worker.wait(30000)
@@ -2331,10 +2352,20 @@ class CsvViewerWindow(QMainWindow):
         data = self.csv_combo.currentData()
         return Path(data) if data else None
 
-    # ── Exportación ─────────────────────────────────────────────────────
+    # ── Salidas y exportación ───────────────────────────────────────────
 
     def _sync_export_button(self) -> None:
-        """Solo se exporta la ejecución que el CSV abierto permite rehacer."""
+        """Habilita los botones de abajo según lo que el CSV abierto permite.
+
+        Las salidas solo se generan sobre la ejecución que el CSV permite
+        rehacer. Exportar bitácoras basta con que haya filas: sale de los PDF
+        de origen, que se ubican también sin el JSON de la ejecución.
+        """
+        exportando = (
+            self._exportar_worker is not None
+            and self._exportar_worker.isRunning()
+        )
+        self.btn_exportar.setEnabled(bool(self._rows) and not exportando)
         csv_path = self._current_csv_path()
         if csv_path is None or not _companion_payload(csv_path).get("reportes"):
             reason = (
@@ -2348,14 +2379,15 @@ class CsvViewerWindow(QMainWindow):
             )
         else:
             reason = ""
-        self.btn_export.setToolTip(reason or _EXPORT_TOOLTIP)
+        self.btn_generar.setToolTip(reason or _GENERAR_TOOLTIP)
         libre = (
             self._outputs_worker is None
             or not self._outputs_worker.isRunning()
         )
-        self.btn_export.setEnabled(not reason and libre)
-        # Depurar reescribe la misma ejecución que exportar, así que depende de
-        # lo mismo: sin el JSON al lado no hay páginas que quitar.
+        self.btn_generar.setEnabled(not reason and libre)
+        # Depurar reescribe la misma ejecución que generar las salidas, así
+        # que depende de lo mismo: sin el JSON al lado no hay páginas que
+        # quitar.
         self.btn_depurar.setToolTip(reason or DEPURAR_TOOLTIP)
         from app.reports.exclusiones import motivo_restauracion
 
@@ -2505,7 +2537,7 @@ class CsvViewerWindow(QMainWindow):
 
         Escribe lo mismo que el borrado por selección (CSV, JSON y
         estadísticas) y por lo mismo no rehace los PDF: la entrega se compone
-        al exportar, cuando ya no queda nada más que quitar.
+        al generar las salidas, cuando ya no queda nada más que quitar.
         """
         if self._outputs_worker is not None and self._outputs_worker.isRunning():
             self._export_note = "hay una escritura en curso; espere a que termine"
@@ -2577,9 +2609,9 @@ class CsvViewerWindow(QMainWindow):
 
         Se reescriben los datos de la ejecución (CSV mínimo, CSV completo, JSON
         y estadísticas) sin esas páginas, que es lo que consulta el visor y
-        de donde sale cualquier exportación posterior. Los PDF ya entregados
-        no se tocan: rehacerlos aquí dejaría dos entregas distintas de la
-        misma ejecución en la carpeta, así que se rehacen al exportar.
+        de donde sale cualquier salida posterior. Los PDF ya entregados no se
+        tocan: rehacerlos aquí dejaría dos entregas distintas de la misma
+        ejecución en la carpeta, así que se rehacen al generar las salidas.
         """
         if self._outputs_worker is not None and self._outputs_worker.isRunning():
             self._export_note = "hay una escritura en curso; espere a que termine"
@@ -2656,8 +2688,8 @@ class CsvViewerWindow(QMainWindow):
             f"Se eliminarán {removed} página(s) de «{run_dir.name}».\n\n"
             f"{detalle}"
             "Se reescriben el CSV, el JSON y las estadísticas de la ejecución "
-            "sin ellas. Los PDF ya exportados las conservan hasta que vuelva "
-            "a exportar.\n\n¿Desea continuar?",
+            "sin ellas. Los PDF ya generados las conservan hasta que vuelva "
+            "a generar las salidas.\n\n¿Desea continuar?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -2676,7 +2708,7 @@ class CsvViewerWindow(QMainWindow):
             context="eliminar",
         )
 
-    def _exportar(self) -> None:
+    def _generar_salidas(self) -> None:
         """Regenera CSV, JSON y PDFs de la ejecución abierta, sin repetir OCR."""
         if self._outputs_worker is not None and self._outputs_worker.isRunning():
             return
@@ -2698,7 +2730,7 @@ class CsvViewerWindow(QMainWindow):
             logger.error(f"No se pudo leer el JSON de la ejecución: {exc}")
             QMessageBox.critical(
                 self,
-                "No se pudo exportar",
+                "No se pudieron generar las salidas",
                 "No se pudieron leer los datos de esta ejecución. Vuelva a procesarla.",
             )
             return
@@ -2706,25 +2738,164 @@ class CsvViewerWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Faltan los PDF de origen",
-                "Faltan los PDF originales. Selecciónelos con «Ubicar PDF…» antes de exportar.",
+                "Faltan los PDF originales. Selecciónelos con «Ubicar PDF…» antes de generar las salidas.",
             )
             return
 
         self._start_outputs(
             reports,
             self._export_options(csv_path, template, reports),
-            note="exportando salidas…",
+            note="generando salidas…",
             context="export",
         )
+
+    def _bitacoras_elegidas(self, source_rows: Sequence[int]):
+        """Las filas elegidas con su PDF de origen, y las que no lo tienen.
+
+        Devuelve las bitácoras listas para copiar y el número (o el archivo
+        y la página) de las que no se pueden sacar porque su PDF no está o la
+        fila no dice de qué página sale.
+        """
+        from app.reports.exportar_bitacoras import Bitacora
+
+        listas: list[Bitacora] = []
+        sin_pdf: list[str] = []
+        for source_row in source_rows:
+            row = self._rows[source_row]
+            numero = (row.get("log_number") or "").strip()
+            archivo = (row.get("file") or "").strip()
+            try:
+                pagina = int(row.get("page", ""))
+            except ValueError:
+                pagina = 0
+            path = (
+                self._row_pdf_paths[source_row]
+                if source_row < len(self._row_pdf_paths)
+                else None
+            )
+            if path is None or pagina <= 0 or not Path(path).is_file():
+                sin_pdf.append(numero or f"{archivo or 'PDF desconocido'} página {pagina or '?'}")
+                continue
+            listas.append(Bitacora(numero, Path(path), pagina, archivo))
+        return listas, sin_pdf
+
+    def _exportar_bitacoras(self) -> None:
+        """Guarda el PDF de las bitácoras elegidas en la carpeta que se elija.
+
+        Es lo que se hace cuando piden unas bitácoras: se buscan por número,
+        la búsqueda deja elegida su fila y de aquí sale su página tal como se
+        escaneó. Con varias elegidas se pregunta si van en un archivo cada
+        una o todas juntas.
+        """
+        if self._exportar_worker is not None and self._exportar_worker.isRunning():
+            return
+        source_rows = self._selected_source_rows()
+        if not source_rows:
+            self._export_note = "seleccione en la tabla las bitácoras que quiere exportar"
+            self._refresh_status()
+            return
+        bitacoras, sin_pdf = self._bitacoras_elegidas(source_rows)
+        if sin_pdf:
+            cuantas = "1 bitácora" if len(sin_pdf) == 1 else f"{len(sin_pdf)} bitácoras"
+            QMessageBox.warning(
+                self,
+                "Faltan los PDF de origen",
+                f"Falta el PDF de origen de {cuantas}: "
+                f"{_lista_de_bitacoras(sin_pdf)}. Ubíquelo con «Ubicar PDF…» "
+                "y vuelva a exportar.",
+            )
+            return
+
+        numeros = _numeros_de_bitacora(self._rows[row] for row in source_rows)
+        un_solo_pdf = False
+        if len(bitacoras) == 1:
+            titulo = (
+                f"Carpeta para la bitácora {numeros[0]}"
+                if numeros
+                else "Carpeta para la bitácora"
+            )
+        else:
+            dialog = ExportarBitacorasDialog(
+                f"{len(bitacoras)} bitácoras elegidas: "
+                f"{_lista_de_bitacoras(numeros)}.",
+                self,
+            )
+            try:
+                if dialog.exec() != QDialog.DialogCode.Accepted:
+                    return
+                un_solo_pdf = dialog.en_un_solo_pdf()
+            finally:
+                # Hijo del visor: sin esto quedaría uno vivo por exportación.
+                dialog.deleteLater()
+            titulo = f"Carpeta para {len(bitacoras)} bitácoras"
+
+        anterior = leer_opcion(_CLAVE_CARPETA_EXPORTAR)
+        inicio = (
+            anterior
+            if isinstance(anterior, str) and anterior and Path(anterior).is_dir()
+            else str(Path.home())
+        )
+        elegida = QFileDialog.getExistingDirectory(self, titulo, inicio)
+        if not elegida:
+            return
+        carpeta = Path(elegida)
+        guardar_opcion(_CLAVE_CARPETA_EXPORTAR, str(carpeta))
+        self._start_exportar(bitacoras, carpeta, un_solo_pdf)
+
+    def _start_exportar(self, bitacoras: list, carpeta: Path, un_solo_pdf: bool) -> None:
+        """Copia las bitácoras en su propio hilo."""
+        from app.gui.worker import ExportarBitacorasWorker
+
+        worker = ExportarBitacorasWorker(bitacoras, carpeta, un_solo_pdf, parent=self)
+        self._exportar_worker = worker
+        worker.progress.connect(self._on_exportar_progress)
+        worker.succeeded.connect(
+            lambda escritos, pedidas, carpeta=carpeta:
+            self._on_exportar_done(escritos, pedidas, carpeta)
+        )
+        worker.failed.connect(self._on_exportar_failed)
+        worker.finished.connect(self._on_exportar_finished)
+        worker.finished.connect(worker.deleteLater)
+        self.btn_exportar.setEnabled(False)
+        self._export_note = "exportando bitácoras…"
+        self._refresh_status()
+        worker.start()
+
+    def _on_exportar_progress(self, hechas: int, total: int) -> None:
+        if total > 1:
+            self._export_note = f"exportando bitácoras… {hechas} de {total}"
+            self._refresh_status()
+
+    def _on_exportar_done(self, escritos: list, pedidas: int, carpeta: Path) -> None:
+        """Dice dónde quedó lo exportado, con el nombre del archivo si es uno."""
+        lugar = Path(carpeta.name or str(carpeta))
+        if len(escritos) == 1:
+            cuantas = (
+                "bitácora exportada" if pedidas == 1
+                else f"{pedidas} bitácoras exportadas"
+            )
+            self._export_note = f"{cuantas}: {lugar / Path(escritos[0]).name}"
+        else:
+            self._export_note = f"{len(escritos)} bitácoras exportadas en {lugar}"
+        self._refresh_status()
+
+    def _on_exportar_failed(self, message: str) -> None:
+        self._export_note = "error al exportar las bitácoras"
+        self._refresh_status()
+        QMessageBox.critical(self, "Error al exportar las bitácoras", message)
+
+    def _on_exportar_finished(self) -> None:
+        self._exportar_worker = None
+        self._sync_export_button()
 
     def _start_outputs(
         self, reports: list, options, note: str, context: str
     ) -> None:
         """Escribe las salidas en su propio hilo, venga de donde venga.
 
-        Exportar y eliminar páginas escriben la misma ejecución con la misma
-        función; solo cambian las opciones (la eliminación no rehace PDFs) y
-        el aviso que queda en la franja de estado.
+        Generar las salidas y eliminar páginas escriben la misma ejecución
+        con la misma función; solo cambian las opciones (la eliminación no
+        rehace PDFs) y el aviso que queda en la franja de estado.
         """
         from app.gui.worker import OutputsWorker
 
@@ -2741,7 +2912,7 @@ class CsvViewerWindow(QMainWindow):
         worker.progress.connect(self._on_outputs_stage)
         worker.finished.connect(self._on_outputs_finished)
         worker.finished.connect(worker.deleteLater)
-        self.btn_export.setEnabled(False)
+        self.btn_generar.setEnabled(False)
         self.btn_depurar.setEnabled(False)
         self._export_note = note
         self._refresh_status()
@@ -2789,18 +2960,18 @@ class CsvViewerWindow(QMainWindow):
     def _on_outputs_written(self, output_dir: Path) -> None:
         """Recarga el CSV: la escritura acaba de rehacerlo en disco."""
         eliminando = self._outputs_context == "eliminar"
-        accion = "Páginas eliminadas" if eliminando else "Exportación completada"
+        accion = "Páginas eliminadas" if eliminando else "Salidas generadas"
         logger.info(f"{accion} en: {output_dir}")
         csv_path = self._current_csv_path()
         if csv_path is not None and csv_path.is_file():
             self._load_csv(csv_path)
         self._export_note = (
             f"páginas excluidas; puede restaurar la última exclusión desde {REVISAR_PAGINAS_TEXTO}. "
-            "Exporte para actualizar los PDF"
+            "Genere las salidas para actualizar los PDF"
             if eliminando
-            else "última exclusión restaurada; exporte para actualizar los PDF"
+            else "última exclusión restaurada; genere las salidas para actualizar los PDF"
             if self._outputs_context == "restaurar"
-            else f"exportación terminada: {Path(output_dir).name}"
+            else f"salidas generadas: {Path(output_dir).name}"
         )
         self._refresh_status()
 
@@ -2809,7 +2980,7 @@ class CsvViewerWindow(QMainWindow):
         logger.error(f"Error generando outputs: {message}")
         titulo = ("Error al excluir las páginas" if eliminando else
                   "Error al restaurar la exclusión" if self._outputs_context == "restaurar" else
-                  "Error al exportar")
+                  "Error al generar las salidas")
         self._export_note = titulo.lower()
         self._refresh_status()
         QMessageBox.critical(

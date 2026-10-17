@@ -462,7 +462,7 @@ Código: `app/airvault/web_reports.py`, `correcciones.py`, `app/gui/web_reports_
 
 ## Visor y editor
 
-El visor usa un modelo Qt (`csv_model.py`) para cargar y ordenar tablas grandes. La selección y búsqueda resuelven la página original mediante los datos de la ejecución. No edita celdas directamente; las acciones de depuración y exportación utilizan el modelo de resultados. Código: `app/gui/csv_viewer.py` y `csv_utils.py`.
+El visor usa un modelo Qt (`csv_model.py`) para cargar y ordenar tablas grandes. La selección y búsqueda resuelven la página original mediante los datos de la ejecución. No edita celdas directamente; depurar y generar las salidas utilizan el modelo de resultados. **Exportar** copia la página de origen de cada bitácora seleccionada a la carpeta elegida, sin rasterizarla y sin tocar la ejecución, en un archivo por bitácora o en uno solo ordenado por número; corre en un `QThread` y no pisa nombres ocupados (`app/reports/exportar_bitacoras.py`). Código: `app/gui/csv_viewer.py` y `csv_utils.py`.
 
 El editor combina `QGraphicsScene` con renderizado de PyMuPDF. Guarda zonas en coordenadas relativas `x`, `y`, `w`, `h` entre 0 y 1. Cada campo incluye identificador, tipo, obligatoriedad, formato, postproceso y umbrales; Pydantic valida el JSON. Al guardar conserva propiedades adicionales de cada campo cargado. Revise también la referencia canónica y los metadatos generales de una plantilla nueva antes de sustituir la de producción. Código: `app/gui/editor_window.py` y `app/templates/`.
 

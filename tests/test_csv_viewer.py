@@ -1208,19 +1208,19 @@ def test_export_is_offered_only_when_the_run_can_be_rebuilt(tmp_path: Path):
     viewer = CsvViewerWindow(tmp_path)
     try:
         assert viewer.load_csv_file(csv_path) is True
-        assert viewer.btn_export.isEnabled()
+        assert viewer.btn_generar.isEnabled()
 
         # Un CSV suelto no trae el JSON de su ejecución y no se puede rehacer.
         loose = tmp_path / "suelto.csv"
         loose.write_text("file,page\na.pdf,1\n", encoding="utf-8")
         assert viewer.load_csv_file(loose) is True
-        assert not viewer.btn_export.isEnabled()
-        assert "JSON" in viewer.btn_export.toolTip()
+        assert not viewer.btn_generar.isEnabled()
+        assert "JSON" in viewer.btn_generar.toolTip()
 
         # Al volver a la ejecución el botón recupera su explicación de siempre.
         assert viewer.load_csv_file(csv_path) is True
-        assert viewer.btn_export.isEnabled()
-        assert "Volver a generar" in viewer.btn_export.toolTip()
+        assert viewer.btn_generar.isEnabled()
+        assert "Volver a generar" in viewer.btn_generar.toolTip()
     finally:
         viewer.close()
         app.processEvents()
@@ -1238,7 +1238,7 @@ def test_exporting_rewrites_the_run_without_reprocessing(tmp_path: Path):
         viewer.export_options.set_un_solo_pdf(False)
         viewer.export_options.matricula_check.setChecked(True)
         viewer.export_options.discrepancias_check.setChecked(False)
-        viewer._exportar()
+        viewer._generar_salidas()
         worker = viewer._outputs_worker
         assert worker is not None
         assert worker.wait(120000)
@@ -1251,7 +1251,213 @@ def test_exporting_rewrites_the_run_without_reprocessing(tmp_path: Path):
         assert (run / "HP-1538CMP.pdf").is_file()
         assert (run / "stats.json").is_file()
         assert csv_path.is_file()
-        assert "exportación terminada" in viewer.status_label.text()
+        assert "salidas generadas" in viewer.status_label.text()
+    finally:
+        viewer.close()
+        app.processEvents()
+
+
+def _pdf_con_texto(path: Path, paginas: int) -> Path:
+    """PDF cuya página N dice «pagina N», para saber cuál se exportó."""
+    import pymupdf as fitz
+
+    documento = fitz.open()
+    for numero in range(1, paginas + 1):
+        documento.new_page().insert_text((72, 72), f"pagina {numero}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    documento.save(str(path))
+    documento.close()
+    return path
+
+
+def _textos_pdf(path: Path) -> list[str]:
+    import pymupdf as fitz
+
+    with fitz.open(str(path)) as documento:
+        return [pagina.get_text().strip() for pagina in documento]
+
+
+def _exportar_y_esperar(app, viewer) -> None:
+    viewer._exportar_bitacoras()
+    worker = viewer._exportar_worker
+    assert worker is not None
+    assert worker.wait(60000)
+    app.processEvents()
+    app.processEvents()
+
+
+def test_exportar_una_bitacora_la_guarda_en_la_carpeta_elegida(
+    tmp_path: Path, monkeypatch
+):
+    import app.gui.csv_viewer as csv_viewer_module
+
+    app = QApplication.instance() or QApplication([])
+    origen = _pdf_con_texto(tmp_path / "entrada" / "escaneo-exportar.pdf", 2)
+    run, csv_path = _run_with_companion_json(tmp_path, origen)
+    destino = tmp_path / "pedidas"
+    destino.mkdir()
+    pedidos: list[tuple] = []
+    monkeypatch.setattr(
+        csv_viewer_module.QFileDialog,
+        "getExistingDirectory",
+        lambda *args: (pedidos.append(args), str(destino))[1],
+    )
+    viewer = CsvViewerWindow(tmp_path)
+    try:
+        assert viewer.load_csv_file(csv_path) is True
+        assert viewer.btn_exportar.text() == "Exportar"
+        assert viewer.btn_exportar.isEnabled()
+
+        # Una sola bitácora no pregunta la forma: va directo a la carpeta.
+        viewer.table.selectRow(viewer.table_model.display_row(1))
+        _exportar_y_esperar(app, viewer)
+
+        assert _textos_pdf(destino / "2147338.pdf") == ["pagina 2"]
+        assert "2147338" in pedidos[0][1]
+        assert "bitácora exportada" in viewer.status_label.text()
+        assert viewer.btn_exportar.isEnabled()
+        # Exportar no toca la ejecución: ni sus datos ni su entrega.
+        assert not list(run.glob("*.pdf"))
+
+        # La carpeta queda recordada: la siguiente bitácora abre ahí.
+        viewer.table.selectRow(viewer.table_model.display_row(0))
+        _exportar_y_esperar(app, viewer)
+        assert pedidos[1][2] == str(destino)
+        assert _textos_pdf(destino / "2147337.pdf") == ["pagina 1"]
+    finally:
+        viewer.close()
+        app.processEvents()
+
+
+def test_varias_bitacoras_preguntan_si_van_en_un_solo_pdf(
+    tmp_path: Path, monkeypatch
+):
+    import app.gui.csv_viewer as csv_viewer_module
+    from PySide6.QtWidgets import QDialog
+
+    app = QApplication.instance() or QApplication([])
+    origen = _pdf_con_texto(tmp_path / "entrada" / "escaneo-varias.pdf", 2)
+    _run, csv_path = _run_with_companion_json(tmp_path, origen)
+    destino = tmp_path / "pedidas"
+    destino.mkdir()
+    monkeypatch.setattr(
+        csv_viewer_module.QFileDialog,
+        "getExistingDirectory",
+        lambda *args: str(destino),
+    )
+    descripciones: list[str] = []
+
+    def elegir_un_solo_pdf(dialog):
+        descripciones.append(dialog.descripcion.text())
+        # Nace en un PDF por bitácora.
+        assert dialog.por_bitacora.isChecked()
+        dialog.un_solo_pdf.setChecked(True)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(
+        csv_viewer_module.ExportarBitacorasDialog, "exec", elegir_un_solo_pdf
+    )
+    viewer = CsvViewerWindow(tmp_path)
+    try:
+        assert viewer.load_csv_file(csv_path) is True
+        viewer.table.selectAll()
+        _exportar_y_esperar(app, viewer)
+
+        assert [p.name for p in destino.iterdir()] == [
+            "Bitacoras 2147337-2147338.pdf"
+        ]
+        assert _textos_pdf(destino / "Bitacoras 2147337-2147338.pdf") == [
+            "pagina 1", "pagina 2",
+        ]
+        assert "2 bitácoras elegidas: 2147337, 2147338" in descripciones[0]
+        assert "2 bitácoras exportadas" in viewer.status_label.text()
+        # La forma elegida es la que trae el cuadro la vez siguiente.
+        dialog = csv_viewer_module.ExportarBitacorasDialog("x", viewer)
+        assert dialog.en_un_solo_pdf()
+        dialog.deleteLater()
+    finally:
+        viewer.close()
+        app.processEvents()
+
+
+def test_varias_bitacoras_en_archivos_separados_y_cancelar_no_escribe(
+    tmp_path: Path, monkeypatch
+):
+    import app.gui.csv_viewer as csv_viewer_module
+    from PySide6.QtWidgets import QDialog
+
+    app = QApplication.instance() or QApplication([])
+    origen = _pdf_con_texto(tmp_path / "entrada" / "escaneo-separadas.pdf", 2)
+    _run, csv_path = _run_with_companion_json(tmp_path, origen)
+    destino = tmp_path / "pedidas"
+    destino.mkdir()
+    pedidos: list[tuple] = []
+    monkeypatch.setattr(
+        csv_viewer_module.QFileDialog,
+        "getExistingDirectory",
+        lambda *args: (pedidos.append(args), str(destino))[1],
+    )
+    respuesta = [QDialog.DialogCode.Rejected]
+    monkeypatch.setattr(
+        csv_viewer_module.ExportarBitacorasDialog,
+        "exec",
+        lambda _dialog: respuesta[0],
+    )
+    viewer = CsvViewerWindow(tmp_path)
+    try:
+        assert viewer.load_csv_file(csv_path) is True
+        # Las casillas mandan sobre el resalte, igual que al eliminar.
+        viewer.table_model.toggle_rows([0, 1])
+
+        viewer._exportar_bitacoras()
+        assert viewer._exportar_worker is None
+        assert pedidos == []
+
+        respuesta[0] = QDialog.DialogCode.Accepted
+        _exportar_y_esperar(app, viewer)
+        assert sorted(p.name for p in destino.iterdir()) == [
+            "2147337.pdf", "2147338.pdf",
+        ]
+        assert "2 bitácoras exportadas en pedidas" in viewer.status_label.text()
+    finally:
+        viewer.close()
+        app.processEvents()
+
+
+def test_exportar_sin_el_pdf_de_origen_avisa_y_no_pide_carpeta(
+    tmp_path: Path, monkeypatch
+):
+    import app.gui.csv_viewer as csv_viewer_module
+
+    app = QApplication.instance() or QApplication([])
+    _run, csv_path = _run_with_companion_json(
+        tmp_path, tmp_path / "ya no" / "escaneo-perdido-exportar.pdf"
+    )
+    avisos: list[str] = []
+    monkeypatch.setattr(
+        csv_viewer_module.QMessageBox,
+        "warning",
+        lambda *args, **kwargs: avisos.append(args[2]),
+    )
+
+    def no_debe_pedir_carpeta(*_args):
+        raise AssertionError("no debía pedir carpeta")
+
+    monkeypatch.setattr(
+        csv_viewer_module.QFileDialog, "getExistingDirectory", no_debe_pedir_carpeta
+    )
+    viewer = CsvViewerWindow(tmp_path)
+    try:
+        assert viewer.load_csv_file(csv_path) is True
+        viewer.table.clearSelection()
+        viewer._exportar_bitacoras()
+        assert "seleccione en la tabla" in viewer.status_label.text()
+
+        viewer.table.selectRow(viewer.table_model.display_row(0))
+        viewer._exportar_bitacoras()
+        assert viewer._exportar_worker is None
+        assert "2147337" in avisos[0]
+        assert "Ubicar PDF" in avisos[0]
     finally:
         viewer.close()
         app.processEvents()

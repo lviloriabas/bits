@@ -471,6 +471,47 @@ class OutputsWorker(QThread):
         self.progress.emit(message, percent)
 
 
+class ExportarBitacorasWorker(QThread):
+    """Copia bitácoras sueltas a una carpeta sin bloquear la interfaz.
+
+    Con todas las de una ejecución son miles de archivos. Entre uno y otro
+    atiende ``requestInterruption``, que es lo que usa el visor al cerrarse:
+    lo ya escrito queda completo y se entrega igual en ``succeeded``.
+    """
+
+    # (archivos escritos, bitácoras pedidas)
+    succeeded = Signal(object, int)
+    failed = Signal(str)
+    # (hechas, total)
+    progress = Signal(int, int)
+
+    def __init__(
+        self, bitacoras: list, carpeta: Path, un_solo_pdf: bool, parent=None
+    ) -> None:
+        super().__init__(parent)
+        self.bitacoras = list(bitacoras)
+        self.carpeta = Path(carpeta)
+        self.un_solo_pdf = un_solo_pdf
+
+    def run(self) -> None:
+        """Punto de entrada del hilo de exportación."""
+        try:
+            from app.reports.exportar_bitacoras import exportar_bitacoras
+
+            escritos = exportar_bitacoras(
+                self.bitacoras,
+                self.carpeta,
+                un_solo_pdf=self.un_solo_pdf,
+                al_avanzar=self.progress.emit,
+                cancelado=self.isInterruptionRequested,
+            )
+        except Exception as exc:  # noqa: BLE001 - la GUI muestra el error
+            logger.exception("No se pudieron exportar las bitácoras")
+            self.failed.emit(mensaje_error(exc, "No se pudieron guardar las bitácoras. Compruebe la carpeta elegida y vuelva a intentarlo."))
+        else:
+            self.succeeded.emit(escritos, len(self.bitacoras))
+
+
 class InputScanWorker(QThread):
     """Lee DPI y numero de paginas de la entrada, fuera del hilo de la GUI.
 
