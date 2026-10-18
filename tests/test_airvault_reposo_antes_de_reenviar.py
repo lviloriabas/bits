@@ -119,9 +119,11 @@ def test_mientras_puede_llegar_se_ve_subida_y_hasta_que_hora_se_espera(tmp_path)
 
     parte, = comprobar_partes([trabajo_perdido], cliente)
 
+    limite = envio_en_camino(trabajo_perdido)
+    assert limite is not None
     assert parte.estado == BUSCANDO and parte.titulo == "Subido"
     assert "AirVault todavía no la publica" in parte.detalle
-    assert "No se vuelve a subir hasta las" in parte.detalle
+    assert f"No se vuelve a subir hasta {a_la_hora(limite)}" in parte.detalle
     assert "se vuelve a subir sola" in parte.detalle
     assert modulo.papel_de_estado(parte.estado) != "STATUS_ERROR"
     # Sigue sin frenar a las cargas siguientes.
@@ -157,11 +159,22 @@ def test_la_que_ya_no_se_resube_sola_tambien_dice_hasta_cuando_se_espera(tmp_pat
     assert "después queda para decidir a mano" in parte.detalle
 
 
-def test_el_plazo_que_pasa_de_medianoche_lleva_la_fecha():
-    manana = datetime.now().replace(hour=1, minute=5) + timedelta(days=1)
+@pytest.mark.parametrize("momento, esperado", [
+    (datetime(2026, 12, 31, 23, 5), "las 23:05"),
+    (datetime(2027, 1, 1, 1, 5), "el 01/01 a las 01:05"),
+], ids=["mismo_dia", "medianoche_y_cambio_de_ano"])
+def test_el_plazo_lleva_fecha_solo_si_no_es_hoy(monkeypatch, momento, esperado):
+    from app.airvault import flujo
 
-    assert a_la_hora(manana) == f"el {manana:%d/%m} a las 01:05"
-    assert "hasta el " in motivo_envio_en_camino(manana)
+    class Reloj(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 12, 31, 22, 0, tzinfo=tz)
+
+    monkeypatch.setattr(flujo, "datetime", Reloj)
+
+    assert a_la_hora(momento) == esperado
+    assert f"hasta {esperado}" in motivo_envio_en_camino(momento)
 
 
 # ── el reenvio automatico ────────────────────────────────────────────
@@ -175,11 +188,14 @@ def test_la_no_encontrada_espera_el_reposo_antes_de_volver_sola(tmp_path):
     assert partes_por_recuperar([parte]) == []
     # No es para decidir a mano: AirVault todavia puede publicarla.
     assert destino_de(parte) == EN_ESPERA
+    limite = envio_en_camino(trabajo_perdido)
+    assert limite is not None
     motivo = motivo_para_no_reenviar(trabajo_perdido)
     assert "puede seguir llegando a AirVault" in motivo
-    assert "no se vuelve a subir hasta las" in motivo
+    assert f"no se vuelve a subir hasta {a_la_hora(limite)}" in motivo
     detalle = detalle_de_no_encontrada(trabajo_perdido)
-    assert "se vuelve a subir sola" in detalle and "hasta las" in detalle
+    assert "se vuelve a subir sola" in detalle
+    assert f"hasta {a_la_hora(limite)}" in detalle
 
 
 def test_pasado_el_reposo_vuelve_sola_como_antes(tmp_path):
