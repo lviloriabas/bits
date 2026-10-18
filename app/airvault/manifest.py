@@ -212,6 +212,7 @@ def guardar(manifiesto: Manifiesto, carpeta_job: Path | str) -> Path:
             if actual.websearch_confirmado and not manifiesto.batch_id:
                 manifiesto.batch_id = actual.websearch_batch_id
     _aplicar_cierre_por_muestra(manifiesto)
+    manifiesto.actualizar_tiempos_del_envio()
     contenido = manifiesto.model_dump_json(indent=2)
     tmp_fd, tmp_name = tempfile.mkstemp(
         dir=str(carpeta), prefix=".manifiesto-", suffix=".tmp"

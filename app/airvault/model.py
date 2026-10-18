@@ -13,7 +13,7 @@ from datetime import datetime
 from enum import Enum
 from typing import ClassVar, Dict, List, Optional
 
-from pydantic import BaseModel, Field, PrivateAttr, computed_field
+from pydantic import BaseModel, Field, PrivateAttr, computed_field, model_validator
 
 
 class EstadoEtapa(str, Enum):
@@ -164,6 +164,43 @@ class TiemposBatch(BaseModel):
         return self.indexacion_s / self.paginas
 
 
+class EnvioBatch(BaseModel):
+    """Un envio real con sus fechas, tiempos y origen, si se conoce."""
+
+    automatico: Optional[bool] = None
+    resultado: str = ""
+    batch_id: str = ""
+    tiempos: TiemposBatch = Field(default_factory=TiemposBatch)
+
+
+class EnviosBatch(BaseModel):
+    """Conteos e historia de envios que sobreviven a reiniciar la carga."""
+
+    # No se recorta con el historial general: los conteos son acumulados.
+    historial: List[EnvioBatch] = Field(default_factory=list)
+    historial_incompleto: bool = False
+
+    @computed_field
+    @property
+    def automaticos(self) -> int:
+        return sum(envio.automatico is True for envio in self.historial)
+
+    @computed_field
+    @property
+    def manuales(self) -> int:
+        return sum(envio.automatico is False for envio in self.historial)
+
+    @computed_field
+    @property
+    def sin_clasificar(self) -> int:
+        return sum(envio.automatico is None for envio in self.historial)
+
+    @computed_field
+    @property
+    def total(self) -> int:
+        return len(self.historial)
+
+
 class Manifiesto(BaseModel):
     """Estado completo de un trabajo de indexado."""
 
@@ -271,6 +308,7 @@ class Manifiesto(BaseModel):
 
     etapas: Dict[str, Etapa] = Field(default_factory=dict)
     tiempos: TiemposBatch = Field(default_factory=TiemposBatch)
+    envios: EnviosBatch = Field(default_factory=EnviosBatch)
     # Lo que se hizo con la carga, en orden. Sobrevive a reiniciar la subida,
     # que borra las etapas: de aqui sale cuantas veces se envio este archivo
     # y cuantas lo reenvio el programa por su cuenta.
@@ -290,6 +328,64 @@ class Manifiesto(BaseModel):
     ORDEN_ETAPAS: ClassVar[tuple[str, ...]] = (
         "procesar", "preparar", "subir", "descubrir", "indexar", "verificar",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def recuperar_envios_anteriores(cls, datos):
+        """Recupera lo que prueba el historial antiguo sin inventar el origen."""
+        if not isinstance(datos, dict) or "envios" in datos:
+            return datos
+        anteriores = datos.get("historial") or []
+        envios = EnviosBatch(historial_incompleto=len(anteriores) >= MAXIMO_HISTORIAL)
+        automatico = None
+        for entrada in anteriores:
+            evento = Evento.model_validate(entrada)
+            if evento.paso == "reenvio":
+                automatico = {"automatico": True, "manual": False}.get(evento.resultado)
+            elif (evento.paso == "subida"
+                  and evento.resultado in ("aceptada", "sin_respuesta", "interrumpida")):
+                envios.historial.append(EnvioBatch(
+                    automatico=automatico, resultado=evento.resultado,
+                    tiempos=TiemposBatch(subido=evento.momento),
+                ))
+                automatico = None
+            elif (evento.paso == "deteccion" and evento.resultado == "encontrado"
+                  and envios.historial and not envios.historial[-1].tiempos.disponible_index):
+                envio = envios.historial[-1]
+                envio.tiempos.disponible_index = evento.momento
+                envio.batch_id = (evento.detalle.split() or [""])[0]
+        tiempos = TiemposBatch.model_validate(datos.get("tiempos") or {})
+        if tiempos.subido:
+            if envios.historial:
+                envios.historial[-1].tiempos = tiempos
+            else:
+                envios.historial.append(EnvioBatch(tiempos=tiempos))
+        return {**datos, "envios": envios}
+
+    def registrar_envio(self, automatico: bool, resultado: str, momento: str) -> None:
+        """Cuenta una carga aceptada o incierta, nunca una simple orden de reenvio."""
+        for evento in reversed(self.historial):
+            if evento.paso == "reenvio" and evento.resultado in ("automatico", "manual"):
+                automatico = evento.resultado == "automatico"
+                break
+            if (evento.paso == "subida"
+                    and evento.resultado in ("aceptada", "sin_respuesta", "interrumpida")):
+                break
+        self.tiempos.subido = momento
+        self.tiempos.paginas = len(self.bitacoras())
+        self.envios.historial.append(EnvioBatch(
+            automatico=automatico, resultado=resultado,
+            tiempos=self.tiempos.model_copy(deep=True),
+        ))
+
+    def actualizar_tiempos_del_envio(self) -> None:
+        """Junta la deteccion y la indexacion con el envio que las origino."""
+        if not self.envios.historial or not self.tiempos.subido:
+            return
+        envio = self.envios.historial[-1]
+        if envio.tiempos.subido == self.tiempos.subido:
+            envio.tiempos = self.tiempos.model_copy(deep=True)
+            envio.batch_id = self.batch_id or envio.batch_id
 
     def etapa(self, nombre: str) -> Etapa:
         """Devuelve la etapa, creandola en pendiente si no existia."""

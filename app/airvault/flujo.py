@@ -842,6 +842,8 @@ class Trabajo:
         # Solo vive durante esta sesion. Una autorizacion de reenvio no debe
         # sobrevivir a un cierre inesperado y convertirse en permiso automatico.
         self._duplicado_permitido = False
+        # Solo clasifica la metrica; no autoriza ni decide ninguna carga.
+        self._envio_automatico = False
 
     # ── ciclo de vida ──────────────────────────────────────────────
 
@@ -1323,14 +1325,16 @@ class Trabajo:
                     )
                     self.manifiesto.anotar("subida", "no_enviada", str(exc))
                 self.guardar()
-            elif isinstance(exc, Exception):
+            else:
                 # La etapa sigue «en curso»: los trozos pudieron llegar.
                 # Queda anotado que este envio se corto, para que la
                 # busqueda que viene despues sepa de donde parte.
-                self.manifiesto.anotar("subida", "interrumpida", str(exc))
-                self.manifiesto.tiempos.subido = datetime.now().isoformat(
-                    timespec="microseconds"
+                self.manifiesto.registrar_envio(
+                    self._envio_automatico, "interrumpida",
+                    datetime.now().isoformat(timespec="microseconds"),
                 )
+                if isinstance(exc, Exception):
+                    self.manifiesto.anotar("subida", "interrumpida", str(exc))
                 self.guardar()
             raise
         if not resultado.ok:
@@ -1340,8 +1344,10 @@ class Trabajo:
             raise ErrorDeCorrida(
                 f"No se pudo subir {archivo.name}: {resultado.detalle}"
             )
-        self.manifiesto.tiempos.subido = datetime.now().isoformat(
-            timespec="microseconds"
+        self.manifiesto.registrar_envio(
+            self._envio_automatico,
+            "aceptada" if getattr(resultado, "confirmada", True) else "sin_respuesta",
+            datetime.now().isoformat(timespec="microseconds"),
         )
         if not getattr(resultado, "confirmada", True):
             # Los trozos llegaron y FinishUpload salio, pero su respuesta no.
@@ -3732,6 +3738,8 @@ def subir_partes(
             if avisar is not None:
                 avisar(_con_cabeza(cabeza, texto), hechas, total)
 
+        origen_previo = trabajo._envio_automatico
+        trabajo._envio_automatico = not forzado
         try:
             trabajo.subir(
                 sesion, avisar=propio if avisar else None, cliente=cliente
@@ -3761,6 +3769,8 @@ def subir_partes(
                 # cargas siguientes fallarian igual una detras de otra.
                 break
             continue
+        finally:
+            trabajo._envio_automatico = origen_previo
         # Quick Upload lo acepto: desde aqui esas bitacoras estan
         # comprometidas y no se vuelven a repartir aunque cambie la
         # configuracion o se pierda el manifiesto.
@@ -4520,7 +4530,12 @@ def subir_y_descubrir_partes(
             if avisar is not None:
                 avisar(_con_cabeza(cabeza, texto), hechas, total)
 
-        trabajo.subir(sesion, avisar=propio if avisar else None, cliente=cliente)
+        origen_previo = trabajo._envio_automatico
+        trabajo._envio_automatico = True
+        try:
+            trabajo.subir(sesion, avisar=propio if avisar else None, cliente=cliente)
+        finally:
+            trabajo._envio_automatico = origen_previo
         if trabajo.manifiesto.batch_id:
             continue
         try:
