@@ -532,6 +532,105 @@ def test_indexar_no_modifica_el_csv_de_la_corrida(tmp_path):
     assert csv.read_bytes() == contenido_original
 
 
+def test_guarda_espera_desde_subida_y_conserva_primera_deteccion(tmp_path, monkeypatch):
+    from datetime import datetime
+    from app.airvault import flujo, uploader
+
+    class Reloj(datetime):
+        actual = datetime(2026, 10, 17, 10, 0)
+
+        @classmethod
+        def now(cls):
+            return cls.actual
+
+    monkeypatch.setattr(flujo, "datetime", Reloj)
+    monkeypatch.setattr(uploader, "SubidorQuickUpload", SubidorFalso())
+    trabajo = Trabajo.preparar(AirVaultConfig(), tmp_path / "job", corrida(tmp_path),
+                               "DP | BIT 18 AUG 2026 05 42")
+    trabajo.subir(object())
+    # La espera tambien cuenta mientras el programa estuvo cerrado.
+    trabajo = Trabajo.cargar(trabajo.config, trabajo.carpeta)
+    Reloj.actual = datetime(2026, 10, 17, 10, 5)
+    cliente = cliente_con_lote()
+    trabajo.descubrir(cliente, esperar=False)
+    tiempos = manifiestos.cargar(trabajo.carpeta).tiempos
+    assert tiempos.subido == "2026-10-17T10:00:00.000000"
+    assert tiempos.disponible_index == "2026-10-17T10:05:00.000000"
+    assert tiempos.espera_index_s == 300
+    assert tiempos.espera_por_pagina_s == 150
+
+    Reloj.actual = datetime(2026, 10, 17, 10, 10)
+    trabajo.descubrir(cliente, esperar=False)
+    assert manifiestos.cargar(trabajo.carpeta).tiempos == tiempos
+
+
+@pytest.mark.parametrize("marca", ["", "no es una fecha", "2999-01-01T00:00:00"])
+def test_no_inventa_espera_sin_hora_de_subida_valida(tmp_path, marca):
+    trabajo = Trabajo.preparar(AirVaultConfig(), tmp_path / "job", corrida(tmp_path),
+                               "DP | BIT 18 AUG 2026 05 42")
+    trabajo.omitir_subida()
+    trabajo.manifiesto.tiempos.subido = marca
+    trabajo.descubrir(cliente_con_lote(), esperar=False)
+    tiempos = manifiestos.cargar(trabajo.carpeta).tiempos
+    assert tiempos.disponible_index
+    assert tiempos.espera_index_s is None
+    assert tiempos.espera_por_pagina_s is None
+
+
+def test_acumula_indexacion_al_reanudar_sin_contar_la_pausa(tmp_path, monkeypatch):
+    from app.airvault import flujo
+    from app.airvault.indexer import Resultado
+    from app.airvault.model import Registro
+
+    trabajo = Trabajo.preparar(AirVaultConfig(), tmp_path / "job", corrida(tmp_path),
+                               "DP | BIT 18 AUG 2026 05 42")
+    cliente = cliente_con_lote()
+    trabajo.descubrir(cliente, esperar=False)
+    plan, indexador = trabajo.planificar(cliente)
+    # Una divisoria no debe reducir el promedio por bitacora.
+    trabajo.manifiesto.registros.append(Registro(seq=3, separador="REVISAR"))
+    monkeypatch.setattr(trabajo, "tomar", lambda _cliente: {"pageCount": 3})
+    reloj = [100.0]
+    monkeypatch.setattr(flujo.time, "monotonic", lambda: reloj[0])
+
+    def interrumpir(*_args):
+        reloj[0] += 10
+        raise RuntimeError("conexion interrumpida")
+
+    monkeypatch.setattr(indexador, "aplicar", interrumpir)
+    with pytest.raises(RuntimeError, match="conexion interrumpida"):
+        trabajo.indexar(indexador, plan)
+    assert manifiestos.cargar(trabajo.carpeta).tiempos.indexacion_s == 10
+
+    trabajo = Trabajo.cargar(trabajo.config, trabajo.carpeta)
+    monkeypatch.setattr(trabajo, "tomar", lambda _cliente: {"pageCount": 3})
+    reloj[0] += 3600
+
+    def terminar(*_args):
+        reloj[0] += 6
+        return Resultado(escritas=2)
+
+    monkeypatch.setattr(indexador, "aplicar", terminar)
+    trabajo.indexar(indexador, plan)
+    tiempos = manifiestos.cargar(trabajo.carpeta).tiempos
+    assert tiempos.indexacion_s == 16
+    assert tiempos.paginas == 2
+    assert tiempos.indexacion_por_pagina_s == 8
+
+
+def test_resubir_reinicia_mediciones_del_batch(tmp_path):
+    from app.airvault.flujo import reiniciar_subida
+    from app.airvault.model import TiemposBatch
+
+    trabajo = Trabajo.preparar(AirVaultConfig(), tmp_path / "job", corrida(tmp_path))
+    trabajo.manifiesto.tiempos = TiemposBatch(
+        subido="2026-10-17T10:00:00", disponible_index="2026-10-17T10:05:00",
+        espera_index_s=300, indexacion_s=40, paginas=2,
+    )
+    reiniciar_subida(trabajo)
+    assert manifiestos.cargar(trabajo.carpeta).tiempos == TiemposBatch()
+
+
 def test_un_lote_con_otra_cantidad_de_paginas_no_se_toca(tmp_path):
     """Si la correspondencia por posicion esta rota, no se escribe nada."""
     from app.airvault.guards import ErrorDeGuarda

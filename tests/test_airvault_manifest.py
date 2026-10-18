@@ -31,6 +31,18 @@ def test_guardar_y_cargar(tmp_path):
     assert leido.registros[0].log_number == "2287325"
 
 
+def test_manifiesto_anterior_sin_tiempos_se_sigue_cargando(tmp_path):
+    datos = _manifiesto().model_dump()
+    datos.pop("tiempos")
+    manifiestos.ruta_manifiesto(tmp_path).write_text(
+        json.dumps(datos), encoding="utf-8"
+    )
+    leido = manifiestos.cargar(tmp_path)
+    assert leido.tiempos.espera_index_s is None
+    assert leido.tiempos.indexacion_s is None
+    assert leido.tiempos.indexacion_por_pagina_s is None
+
+
 def test_cargar_sin_manifiesto(tmp_path):
     with pytest.raises(FileNotFoundError):
         manifiestos.cargar(tmp_path)

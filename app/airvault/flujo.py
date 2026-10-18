@@ -71,6 +71,7 @@ from app.airvault.model import (
     Etapa,
     Manifiesto,
     Registro,
+    TiemposBatch,
 )
 from app.airvault.naming import (
     PREFIJO_POR_DEFECTO,
@@ -1327,6 +1328,9 @@ class Trabajo:
                 # Queda anotado que este envio se corto, para que la
                 # busqueda que viene despues sepa de donde parte.
                 self.manifiesto.anotar("subida", "interrumpida", str(exc))
+                self.manifiesto.tiempos.subido = datetime.now().isoformat(
+                    timespec="microseconds"
+                )
                 self.guardar()
             raise
         if not resultado.ok:
@@ -1336,6 +1340,9 @@ class Trabajo:
             raise ErrorDeCorrida(
                 f"No se pudo subir {archivo.name}: {resultado.detalle}"
             )
+        self.manifiesto.tiempos.subido = datetime.now().isoformat(
+            timespec="microseconds"
+        )
         if not getattr(resultado, "confirmada", True):
             # Los trozos llegaron y FinishUpload salio, pero su respuesta no.
             # Sigue «en curso»: quien llama busca la carga en la cola con la
@@ -1615,7 +1622,28 @@ class Trabajo:
         ubica batches sin esperar a nada, y encontrarlo tiene que dejar el
         trabajo igual de anotado se haya llegado por donde se haya llegado.
         """
+        encontrado = datetime.now()
         self._ponerle_nombre(cliente, lote, avisar)
+        tiempos = self.manifiesto.tiempos
+        if not tiempos.disponible_index:
+            # La deteccion puede ocurrir horas despues y tras reiniciar.
+            # Una carga manual no tiene una hora de subida conocida.
+            subida_previa = self.manifiesto.etapas.get("subir")
+            subido = _momento(tiempos.subido)
+            if (subido is None and subida_previa is not None
+                    and subida_previa.estado is EstadoEtapa.HECHA):
+                subido = _momento(subida_previa.actualizada)
+            tiempos.disponible_index = encontrado.isoformat(timespec="microseconds")
+            tiempos.paginas = len(self.manifiesto.bitacoras())
+            if subido is not None and _mismo_reloj(subido, encontrado):
+                espera = (encontrado - subido).total_seconds()
+                if espera >= 0:
+                    tiempos.subido = subido.isoformat(timespec="microseconds")
+                    tiempos.espera_index_s = espera
+                    logger.info(
+                        "Batch {}: espera hasta Web Index {:.1f} s, {} paginas",
+                        lote.batch_id, espera, tiempos.paginas,
+                    )
         # Que AirVault tenga el batch es la prueba de que la carga llego. Una
         # subida que quedo «en curso» porque FinishUpload no contesto a
         # tiempo no puede seguir asi despues de confirmarse: la ventana no
@@ -1948,6 +1976,7 @@ class Trabajo:
         self.manifiesto.anotar_separadores_borrados(0)
         self.manifiesto.etapa("indexar").marcar(EstadoEtapa.EN_CURSO)
         self.guardar()
+        inicio_indexacion = time.monotonic()
         avanzar = None
         if avisar is not None:
 
@@ -1967,7 +1996,21 @@ class Trabajo:
         finally:
             # Tambien si se corto a medias: lo escrito queda escrito y el
             # batch no se queda bloqueado por un trabajo que ya no corre.
-            self.cerrar(indexador.cliente)
+            try:
+                self.cerrar(indexador.cliente)
+            finally:
+                tiempos = self.manifiesto.tiempos
+                tiempos.paginas = len(self.manifiesto.bitacoras())
+                tiempos.indexacion_s = (tiempos.indexacion_s or 0.0) + max(
+                    0.0, time.monotonic() - inicio_indexacion
+                )
+                self.guardar()
+                logger.info(
+                    "Batch {}: indexacion acumulada {:.1f} s, {} paginas, "
+                    "promedio por pagina {} s",
+                    self.manifiesto.batch_id, tiempos.indexacion_s,
+                    tiempos.paginas, tiempos.indexacion_por_pagina_s,
+                )
         con_error = bool(
             resultado.fallidas
             or resultado.separadores_pendientes
@@ -4222,6 +4265,8 @@ def _reiniciar_subida_ausente(trabajo: "Trabajo") -> None:
     """Quita la suposicion local de un batch que AirVault no devolvio."""
     manifiesto = trabajo.manifiesto
     manifiesto.websearch_resultado = ""
+    # Una resubida crea otra carga y empieza sus mediciones desde cero.
+    manifiesto.tiempos = TiemposBatch()
     if manifiesto.websearch_confirmado:
         # La prueba de Web Search hablaba de la carga anterior. Es lo unico
         # que la borra: mientras no se vuelva a subir, un batch confirmado

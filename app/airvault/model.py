@@ -13,7 +13,7 @@ from datetime import datetime
 from enum import Enum
 from typing import ClassVar, Dict, List, Optional
 
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, Field, PrivateAttr, computed_field
 
 
 class EstadoEtapa(str, Enum):
@@ -137,6 +137,33 @@ class Registro(BaseModel):
         return self.estado is EstadoRegistro.PENDIENTE and not self.avisos
 
 
+class TiemposBatch(BaseModel):
+    """Medidas en segundos de la carga actual, conservadas al reanudar."""
+
+    subido: str = ""
+    disponible_index: str = ""
+    espera_index_s: Optional[float] = None
+    # Tiempo activo de indexar, incluido tomar y soltar el batch. Acumula
+    # intentos interrumpidos, pero no las pausas entre reanudaciones.
+    indexacion_s: Optional[float] = None
+    # Solo bitacoras, sin las paginas divisorias que no se indexan.
+    paginas: int = 0
+
+    @computed_field
+    @property
+    def espera_por_pagina_s(self) -> Optional[float]:
+        if self.espera_index_s is None or not self.paginas:
+            return None
+        return self.espera_index_s / self.paginas
+
+    @computed_field
+    @property
+    def indexacion_por_pagina_s(self) -> Optional[float]:
+        if self.indexacion_s is None or not self.paginas:
+            return None
+        return self.indexacion_s / self.paginas
+
+
 class Manifiesto(BaseModel):
     """Estado completo de un trabajo de indexado."""
 
@@ -243,6 +270,7 @@ class Manifiesto(BaseModel):
     audit_status_discrepancia: str = "AUDIT IN PROGRESS"
 
     etapas: Dict[str, Etapa] = Field(default_factory=dict)
+    tiempos: TiemposBatch = Field(default_factory=TiemposBatch)
     # Lo que se hizo con la carga, en orden. Sobrevive a reiniciar la subida,
     # que borra las etapas: de aqui sale cuantas veces se envio este archivo
     # y cuantas lo reenvio el programa por su cuenta.
