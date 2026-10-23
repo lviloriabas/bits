@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 from loguru import logger
 
 from PySide6.QtCore import QDate, QRectF, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtGui import QColor, QPainter, QTextCharFormat
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -83,6 +83,7 @@ from app.gui.web_reports_tiempos import (
     Estimacion,
 )
 from app.gui.widgets import (
+    al_cambiar_tema,
     align_vertical_scrollbar_to_header,
     configure_combo_box,
     data_table_qss,
@@ -160,6 +161,38 @@ def _ensanchar_hasta_la_fecha_mas_larga(campo: QDateEdit) -> None:
         - limites
     )
     campo.setMinimumWidth(campo.sizeHint().width() + max(0, falta))
+
+
+def _apagar_dias_que_no_se_eligen(campo: QDateEdit) -> None:
+    """Pinta en gris los días del calendario que no se pueden elegir.
+
+    El campo ya no deja pasar de hoy, pero Qt a un día fuera de rango solo
+    le cambia el fondo, y los días del mes anterior y del siguiente los
+    apaga con el color deshabilitado de la paleta, que la hoja de estilo
+    iguala al del texto normal. Mañana y el 3 del mes que viene se veían
+    igual que cualquier día elegible. Cada día que sobra se marca uno a
+    uno, y se rehace al pasar de mes y al cambiar de tema.
+    """
+    calendario = campo.calendarWidget()
+    # Qt pinta sábados y domingos en rojo, un color que no es del tema.
+    for dia in (Qt.DayOfWeek.Saturday, Qt.DayOfWeek.Sunday):
+        calendario.setWeekdayTextFormat(dia, QTextCharFormat())
+
+    def repintar(*_pagina) -> None:
+        mes = calendario.monthShown()
+        primero = QDate(calendario.yearShown(), mes, 1)
+        apagado = QTextCharFormat()
+        apagado.setForeground(QColor(paleta().TEXT_DISABLED))
+        calendario.setDateTextFormat(QDate(), QTextCharFormat())
+        # La rejilla nunca enseña más de dos semanas de los meses vecinos.
+        dia, fin = primero.addDays(-14), primero.addMonths(1).addDays(14)
+        while dia < fin:
+            if dia.month() != mes or dia > campo.maximumDate():
+                calendario.setDateTextFormat(dia, apagado)
+            dia = dia.addDays(1)
+
+    calendario.currentPageChanged.connect(repintar)
+    al_cambiar_tema(calendario, repintar)
 
 
 class _TrabajoEnEdge(QThread):
@@ -941,6 +974,7 @@ class WebReportsWindow(QDialog):
         control.setDisplayFormat(FORMATO_FECHA)
         control.setMinimumDate(QDate(2000, 1, 1))
         control.setMaximumDate(QDate.currentDate())
+        _apagar_dias_que_no_se_eligen(control)
         return control
 
     def _consultar(self) -> None:

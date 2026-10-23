@@ -130,6 +130,59 @@ SPLIT_PAD_LEFT = 10
 SPLIT_PAD_RIGHT = SPLIT_PAD_LEFT + SPLIT_MENU_WIDTH
 
 
+def calendario_qss() -> str:
+    """El calendario que sale al pulsar un campo de fecha.
+
+    Va en la hoja global y se repite al final de :func:`data_table_qss`. La
+    rejilla de dias es un QTableView, y una ventana con tablas lleva su hoja
+    propia, que manda sobre la global aunque la regla global sea mas
+    precisa: el calendario se quedaba con el borde de las tablas, ese borde
+    le quitaba dos pixeles a la rejilla y la ultima semana salia cortada por
+    la mitad. Dentro de una misma hoja si decide la precision, y ahi gana
+    esta.
+    """
+    c = paleta()
+    return f"""
+/* El calendario es una ventana con sus propios hijos, asi que hay que nombrarlos uno a uno: la barra del mes, sus
+   flechas y la rejilla de dias. La rejilla ademas hace falta nombrarla
+   porque es un QTableView, y sin esto le caia entera la hoja de las tablas
+   de datos: lineas de cuadricula, filas alternas y cabecera en negrita
+   sobre lo que tiene que ser un calendario. */
+QCalendarWidget QWidget#qt_calendar_navigationbar {{
+    background-color: {c.TABLE_HEADER_BG};
+    border-top-left-radius: {TABLE_RADIUS}px;
+    border-top-right-radius: {TABLE_RADIUS}px;
+}}
+QCalendarWidget QToolButton {{
+    color: {c.PANE_TEXT};
+    background-color: transparent;
+    border: 0;
+    border-radius: {TABLE_RADIUS}px;
+    margin: 2px;
+    padding: 0 {SPACE_S}px;
+}}
+QCalendarWidget QToolButton:hover {{
+    background-color: {c.PANE_CONTROL_HOVER};
+}}
+QCalendarWidget QToolButton::menu-indicator {{
+    image: none;
+}}
+QCalendarWidget QAbstractItemView {{
+    color: {c.PANE_TEXT};
+    background-color: {c.PANE_BG};
+    alternate-background-color: {c.PANE_BG};
+    gridline-color: transparent;
+    selection-background-color: palette(highlight);
+    selection-color: {on_accent_text()};
+    border: 0;
+    outline: 0;
+}}
+QCalendarWidget QAbstractItemView:disabled {{
+    color: {c.TEXT_DISABLED};
+}}
+"""
+
+
 def data_table_qss() -> str:
     """La tabla, en los tonos del tema puesto ahora.
 
@@ -167,7 +220,7 @@ def data_table_qss() -> str:
         "QTableView::corner, QTableWidget::corner { background: transparent; }"
         # Las barras de la propia tabla van en la hoja: aplicadas por
         # descendencia sirven igual aqui y en el visor de PDF.
-    ) + scrollbars_qss("QTableView") + scrollbars_qss("QTableWidget")
+    ) + scrollbars_qss("QTableView") + scrollbars_qss("QTableWidget") + calendario_qss()
 
 
 def scrollbars_qss(scope: str) -> str:
@@ -527,45 +580,7 @@ QDateEdit:hover::drop-down, QDateEdit:on::drop-down,
 QTimeEdit:hover::drop-down, QDateTimeEdit:hover::drop-down {{
     background-color: {c.PANE_CONTROL_HOVER};
 }}
-/* Y el calendario que sale al pulsarla. Es una ventana con sus propios
-   hijos, asi que hay que nombrarlos uno a uno: la barra del mes, sus
-   flechas y la rejilla de dias. La rejilla ademas hace falta nombrarla
-   porque es un QTableView, y sin esto le caia entera la hoja de las tablas
-   de datos: lineas de cuadricula, filas alternas y cabecera en negrita
-   sobre lo que tiene que ser un calendario. */
-QCalendarWidget QWidget#qt_calendar_navigationbar {{
-    background-color: {c.TABLE_HEADER_BG};
-    border-top-left-radius: {TABLE_RADIUS}px;
-    border-top-right-radius: {TABLE_RADIUS}px;
-}}
-QCalendarWidget QToolButton {{
-    color: {c.PANE_TEXT};
-    background-color: transparent;
-    border: 0;
-    border-radius: {TABLE_RADIUS}px;
-    margin: 2px;
-    padding: 0 {SPACE_S}px;
-}}
-QCalendarWidget QToolButton:hover {{
-    background-color: {c.PANE_CONTROL_HOVER};
-}}
-QCalendarWidget QToolButton::menu-indicator {{
-    image: none;
-}}
-QCalendarWidget QAbstractItemView {{
-    color: {c.PANE_TEXT};
-    background-color: {c.PANE_BG};
-    alternate-background-color: {c.PANE_BG};
-    gridline-color: transparent;
-    selection-background-color: palette(highlight);
-    selection-color: {on_accent};
-    border: 0;
-    outline: 0;
-}}
-QCalendarWidget QAbstractItemView:disabled {{
-    color: {c.TEXT_DISABLED};
-}}
-QGroupBox {{
+{calendario_qss()}QGroupBox {{
     color: {c.PANE_TEXT};
     background-color: {c.TABLE_BASE_BG};
     font-weight: 600;
