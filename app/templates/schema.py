@@ -312,6 +312,11 @@ class Template(BaseModel):
                     "los campos que se reclaman en ese tipo; lista vacia apaga "
                     "el tipo entero",
     )
+    # El interruptor general del menu «Discrepancias a detectar». Es una
+    # preferencia de quien revisa, como la seleccion de arriba, pero no
+    # tiene valor de partida en el archivo: se excluye para que el editor,
+    # que rehace la plantilla entera, no lo escriba en el JSON versionado.
+    detect_discrepancies: bool = Field(default=True, exclude=True, repr=False)
 
     @field_validator("fields")
     @classmethod

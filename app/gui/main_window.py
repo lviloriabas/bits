@@ -3385,8 +3385,23 @@ class MainWindow(QMainWindow):
         template = self._load_template()
         if template is None:
             return
+        from app.validation.discrepancias import deteccion_activa
+
         activas = self._seleccion_discrepancias(template)
         habilitado = not (self._worker and self._worker.isRunning())
+        # Apagar la búsqueda entera deja la selección en gris y sin tocar:
+        # al volver a encenderla se reclama lo mismo que antes.
+        self._accion_deteccion = menu.addAction("Detectar discrepancias")
+        self._accion_deteccion.setCheckable(True)
+        self._accion_deteccion.setChecked(deteccion_activa(template))
+        self._accion_deteccion.setEnabled(habilitado)
+        self._accion_deteccion.setToolTip(
+            "Sin marcar, no se busca ninguna discrepancia. Lo elegido abajo "
+            "se conserva para cuando se vuelva a marcar."
+        )
+        self._accion_deteccion.toggled.connect(self._cambiar_deteccion_discrepancias)
+        menu.addSeparator()
+        self._discrepancias_habilitadas = habilitado
         # La fila del tipo es a la vez la casilla y la que abre el submenu:
         # se marca al pulsarla y despliega sus campos al pasar por encima.
         self._acciones_tipo = {}
@@ -3402,7 +3417,6 @@ class MainWindow(QMainWindow):
                 accion = submenu.addAction(NOMBRE_CAMPO[campo])
                 accion.setCheckable(True)
                 accion.setChecked(campo in activas[tipo])
-                accion.setEnabled(habilitado)
                 accion.toggled.connect(
                     lambda marcada, t=tipo, c=campo:
                     self._cambiar_discrepancia(t, c, marcada)
@@ -3411,11 +3425,50 @@ class MainWindow(QMainWindow):
             accion_tipo = menu.addMenu(submenu)
             accion_tipo.setCheckable(True)
             accion_tipo.setChecked(any(c in activas[tipo] for c in disponibles))
-            accion_tipo.setEnabled(habilitado)
             accion_tipo.toggled.connect(
                 lambda marcada, t=tipo: self._cambiar_tipo_discrepancia(t, marcada)
             )
             self._acciones_tipo[tipo] = accion_tipo
+        self._habilitar_seleccion_discrepancias()
+
+    def _habilitar_seleccion_discrepancias(self) -> None:
+        """Pone en gris los tipos y sus casillas mientras la búsqueda esté apagada."""
+        accion = getattr(self, "_accion_deteccion", None)
+        habilitado = getattr(self, "_discrepancias_habilitadas", True) and (
+            accion is None or accion.isChecked()
+        )
+        for accion_tipo in getattr(self, "_acciones_tipo", {}).values():
+            accion_tipo.setEnabled(habilitado)
+        for accion_campo in getattr(self, "_acciones_campo", {}).values():
+            accion_campo.setEnabled(habilitado)
+
+    def _cambiar_deteccion_discrepancias(self, activa: bool) -> None:
+        """Enciende o apaga la búsqueda entera sin tocar la selección."""
+        from app.validation.discrepancias import guardar_deteccion_activa
+
+        template = self._load_template()
+        if template is None:
+            return
+        if not guardar_deteccion_activa(template, activa):
+            QMessageBox.warning(
+                self,
+                "Discrepancias a detectar",
+                "No se pudo guardar la selección junto al programa.",
+            )
+            accion = getattr(self, "_accion_deteccion", None)
+            if accion is not None:
+                with QSignalBlocker(accion):
+                    accion.setChecked(not activa)
+            return
+        # Igual que al cambiar una casilla: la plantilla en memoria lleva
+        # dentro el valor anterior.
+        self._template_cache = None
+        self._habilitar_seleccion_discrepancias()
+        self.statusBar().showMessage(
+            "Discrepancias activadas para el próximo procesamiento"
+            if activa
+            else "Discrepancias desactivadas para el próximo procesamiento"
+        )
 
     def _cambiar_tipo_discrepancia(self, tipo: str, marcada: bool) -> None:
         """Apaga el tipo entero o lo devuelve con todas sus casillas."""

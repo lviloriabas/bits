@@ -78,6 +78,9 @@ lleva la lista de casillas que se reclaman en él (``Template
 .discrepancy_types``), así que apagar la firma de piloto en vuelo no la apaga
 en mantenimiento. Las páginas de tipo incierto no responden a ningún
 interruptor (``tipo_de_menu`` devuelve None) y se reportan como siempre.
+Encima de los tres hay un interruptor general (``detect_discrepancies``):
+apagado, ninguna página se marca, tampoco las de tipo incierto, y la
+selección de los tres se conserva para cuando se vuelva a encender.
 
 Las discrepancias se ordenan globalmente por número de bitácora
 (``log_number``) ascendente, sin subdividirlas por matrícula o mes.
@@ -148,6 +151,9 @@ CAMPOS_POR_TIPO = {
 # La clave lleva el nombre del archivo de la plantilla y no su ruta: la
 # carpeta entera se copia a otro Windows, donde la ruta ya no existe.
 _SECCION_DISCREPANCIAS = "discrepancias"
+# El interruptor general va en su propia clave para que apagarlo no toque la
+# selección: al encenderlo de nuevo vuelve lo que estaba marcado.
+_SECCION_DETECCION = "detectar_discrepancias"
 
 
 def nombre_de_plantilla(template: Template) -> str:
@@ -184,6 +190,20 @@ def guardar_discrepancias_elegidas(
     )
 
 
+def deteccion_activa(template: Template) -> bool:
+    """Si se buscan discrepancias con esa plantilla; de fábrica, sí."""
+    return leer_opcion(
+        f"{_SECCION_DETECCION}.{nombre_de_plantilla(template)}", True
+    ) is not False
+
+
+def guardar_deteccion_activa(template: Template, activa: bool) -> bool:
+    """Enciende o apaga la búsqueda entera sin tocar la selección."""
+    return guardar_opcion(
+        f"{_SECCION_DETECCION}.{nombre_de_plantilla(template)}", bool(activa)
+    )
+
+
 def con_discrepancias_elegidas(template: Template) -> Template:
     """La plantilla con lo elegido puesto, que es lo que filtra al clasificar.
 
@@ -191,9 +211,10 @@ def con_discrepancias_elegidas(template: Template) -> Template:
     y no al cargarla para editarla: el editor rehace el archivo, y meterle
     la selección de esta máquina lo devolvería al repositorio.
     """
-    return template.model_copy(
-        update={"discrepancy_types": discrepancias_elegidas(template)}
-    )
+    return template.model_copy(update={
+        "discrepancy_types": discrepancias_elegidas(template),
+        "detect_discrepancies": deteccion_activa(template),
+    })
 
 
 # Cómo se nombra cada tipo en el menú.
@@ -513,7 +534,7 @@ def clasificar_lote(reports: List[ValidationReport], template: Template
             page.discrepancy = False
             page.discrepancy_note = ""
             page.discrepancy_fields = []
-            if page.blank:
+            if page.blank or not template.detect_discrepancies:
                 continue
             resultado = _clasificar_pagina(page, template)
             if resultado is None:

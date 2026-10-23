@@ -28,7 +28,9 @@ from app.validation.discrepancias import (
     TIPO_MANTENIMIENTO,
     TIPO_VUELO,
     con_discrepancias_elegidas,
+    deteccion_activa,
     discrepancias_elegidas,
+    guardar_deteccion_activa,
     guardar_discrepancias_elegidas,
 )
 
@@ -168,7 +170,7 @@ def test_la_fila_del_tipo_es_la_casilla_y_abre_el_submenu(app, plantilla):
     """Una sola fila por tipo: marca a la izquierda y flecha a la derecha."""
     ventana = _ventana(app, plantilla)
     ventana._llenar_menu_discrepancias()
-    filas = [a for a in ventana.discrepancias_menu.actions() if not a.isSeparator()]
+    filas = [a for a in ventana.discrepancias_menu.actions() if a.menu() is not None]
     assert len(filas) == len(CAMPOS_POR_TIPO)
     for accion in filas:
         assert accion.isCheckable(), accion.text()
@@ -193,3 +195,38 @@ def test_marcar_una_casilla_actualiza_la_fila_del_tipo(app, plantilla):
     assert fila.isChecked()
     ventana._acciones_campo[(TIPO_VUELO, "pilot_signature")].setChecked(False)
     assert not fila.isChecked()
+
+
+def test_apagar_la_deteccion_conserva_la_seleccion(app, plantilla):
+    """Un solo interruptor: la selección queda en gris, marcada como estaba."""
+    _guardar(plantilla, SELECCION)
+    ventana = _ventana(app, plantilla)
+    ventana._llenar_menu_discrepancias()
+    antes = _marcas(ventana.discrepancias_menu)
+    ventana._accion_deteccion.setChecked(False)
+
+    assert not deteccion_activa(TemplateManager().load(plantilla))
+    assert _elegidas(plantilla) == SELECCION
+    assert _marcas(ventana.discrepancias_menu) == antes
+    assert not any(a.isEnabled() for a in ventana._acciones_tipo.values())
+    assert not any(a.isEnabled() for a in ventana._acciones_campo.values())
+
+    # Al reabrir sigue apagada y en gris, y al encenderla vuelve lo de antes.
+    otra = _ventana(app, plantilla)
+    otra._llenar_menu_discrepancias()
+    assert not otra._accion_deteccion.isChecked()
+    assert not any(a.isEnabled() for a in otra._acciones_tipo.values())
+    otra._accion_deteccion.setChecked(True)
+    assert all(a.isEnabled() for a in otra._acciones_tipo.values())
+    assert _elegidas(plantilla) == SELECCION
+    assert _marcas(otra.discrepancias_menu) == antes
+
+
+def test_la_deteccion_apagada_llega_a_lo_que_se_procesa(plantilla):
+    """Ni el JSON versionado la guarda ni los hilos la pierden."""
+    antes = plantilla.read_bytes()
+    guardar_deteccion_activa(TemplateManager().load(plantilla), False)
+    assert plantilla.read_bytes() == antes
+    puesta = con_discrepancias_elegidas(TemplateManager().load(plantilla))
+    assert puesta.detect_discrepancies is False
+    assert "detect_discrepancies" not in puesta.model_dump(mode="json")

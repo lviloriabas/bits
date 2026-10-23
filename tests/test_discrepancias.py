@@ -49,6 +49,18 @@ def test_seleccion_de_discrepancias_filtra_solo_lo_solicitado():
     assert _clasificar_pagina(page, apagado) is None
 
 
+def test_deteccion_apagada_no_marca_ninguna_pagina():
+    """Ni las confirmadas ni las de tipo incierto, y borra marcas viejas."""
+    apagada = TEMPLATE.model_copy(update={"detect_discrepancies": False})
+    pagina = _vuelo_ok(captain_signature=("false", AUSENTE))
+    pagina.discrepancy = True
+    pagina.discrepancy_note = "anterior"
+    assert clasificar_lote([_reporte(pagina)], apagada) == []
+    assert not pagina.discrepancy
+    assert pagina.discrepancy_note == ""
+    assert len(clasificar_lote([_reporte(pagina)], TEMPLATE)) == 1
+
+
 def test_apagar_un_tipo_no_apaga_los_otros():
     """Cada tipo lleva su propio juego: el de vuelo no toca al de mantenimiento."""
     from app.validation.discrepancias import _clasificar_pagina
