@@ -104,9 +104,10 @@ _ERROR_DEL_SERVIDOR = re.compile(r"\(rs[A-Z]\w+\)")
 # nada en camino.
 _VISOR_QUIETO_S = 60.0
 # El tope de una página con el visor trabajando. Con la cola cargada el
-# reporte con «Refresh» ha tardado 7 minutos, y media hora llegaba a cortar
-# uno que AirVault seguía generando. Quien no quiera esperar tiene Cancelar.
-_ESPERA_MAXIMA_S = 7200.0
+# reporte con «Refresh» ha tardado 7 minutos; casi el triple deja terminar
+# uno lento, y lo que pase de ahí ya no es un reporte lento sino uno que
+# AirVault no va a entregar.
+_ESPERA_MAXIMA_S = 1200.0
 
 _DUPLICADA = re.compile(
     r"\bDUPLICATED\s+(?P<log>\d{7})\s*\((?P<copias>\d+)x\)",

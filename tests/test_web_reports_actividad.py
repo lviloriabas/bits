@@ -114,13 +114,14 @@ def test_el_visor_quieto_sin_la_pagina_no_se_espera_media_hora(monkeypatch):
     assert ahora[0] == 100 + web_reports._VISOR_QUIETO_S
 
 
-def test_un_reporte_que_airvault_sigue_generando_no_se_corta_a_la_media_hora(monkeypatch):
+def test_un_reporte_lento_termina_y_uno_eterno_se_corta_a_los_veinte_minutos(monkeypatch):
     ahora = [0.0]
+    listo_en = [900.0]
     monkeypatch.setattr(web_reports.time, "monotonic", lambda: ahora[0])
     monkeypatch.setattr(
         ClienteLogPageAudit, "_estado_reporte",
         staticmethod(lambda _p: {
-            "ocupada": ahora[0] < 3600, "huella": "nuevo",
+            "ocupada": ahora[0] < listo_en[0], "huella": "nuevo",
             "texto": "Log Page Audit", "actual": 1,
         }),
     )
@@ -130,4 +131,10 @@ def test_un_reporte_que_airvault_sigue_generando_no_se_corta_a_la_media_hora(mon
             ahora[0] += segundos
 
     ClienteLogPageAudit._esperar_reporte(Pagina(), "viejo")
-    assert ahora[0] == 3600
+    assert ahora[0] == 900
+
+    ahora[0], listo_en[0] = 0.0, float("inf")
+    with pytest.raises(RuntimeError, match="no terminó de cargar") as error:
+        ClienteLogPageAudit._esperar_reporte(Pagina(), "viejo")
+    assert ahora[0] == 1200
+    assert mensaje_error(error.value) == "No se pudo cargar el reporte completo. Vuelva a consultarlo."
