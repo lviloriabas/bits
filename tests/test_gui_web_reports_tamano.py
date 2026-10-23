@@ -16,9 +16,14 @@ from __future__ import annotations
 import pytest
 
 from PySide6.QtCore import QDate, QRect
+from PySide6.QtWidgets import (
+    QHBoxLayout, QSizePolicy, QStyle, QStyleOptionFrame, QWidget,
+)
 
 from app.gui import responsive
-from app.gui.web_reports_window import FECHA_MAS_LARGA, WebReportsWindow
+from app.gui.web_reports_window import (
+    FECHA_MAS_LARGA, FORMATO_FECHA, WebReportsWindow, _CampoDeFecha,
+)
 
 
 @pytest.fixture
@@ -33,6 +38,23 @@ def pantalla(monkeypatch):
         )
 
     return fijar
+
+
+def _sitio_para_el_texto(campo) -> int:
+    """Lo que el editor deja de verdad para la fecha, con el cursor dentro.
+
+    El editor no presta todo su ancho: el estilo le pone relleno, y QLineEdit
+    guarda dos píxeles por lado y el cursor. Medir su ancho entero dejaba
+    pasar una fecha que en pantalla salía cortada.
+    """
+    editor = campo.lineEdit()
+    marco = QStyleOptionFrame()
+    editor.initStyleOption(marco)
+    libre = editor.style().subElementRect(
+        QStyle.SubElement.SE_LineEditContents, marco, editor
+    ).width()
+    cursor = editor.style().pixelMetric(QStyle.PixelMetric.PM_TextCursorWidth, None, editor)
+    return libre - 2 * 2 - cursor
 
 
 @pytest.mark.parametrize("alto", [1080, 768])
@@ -50,12 +72,47 @@ def test_la_fecha_mas_larga_se_ve_entera(app, pantalla, tmp_path, alto):
 
         for campo in (ventana.desde_edit, ventana.hasta_edit):
             escrito = campo.fontMetrics().horizontalAdvance(campo.text())
-            assert campo.lineEdit().width() >= escrito, (
-                f"{campo.text()} no cabe en el campo y se corta por el final"
+            assert _sitio_para_el_texto(campo) >= escrito, (
+                f"{campo.text()} no cabe en el campo y se corta"
             )
     finally:
         ventana.close()
         app.processEvents()
+
+
+def test_un_campo_que_arranca_angosto_se_ensancha_hasta_que_la_fecha_cabe(app):
+    """Con 22/10/2026 el editor quedaba justo del ancho del texto.
+
+    El ancho de partida es una estimación, y con el estilo de Windows se
+    quedaba corta: se cortaba el año o, con el cursor al principio, la
+    primera cifra. Lo que lo arregla es medir el editor ya puesto y pedir lo
+    que falte; aquí el campo arranca angosto a propósito.
+    """
+    caja = QWidget()
+    fila = QHBoxLayout(caja)
+    campo = _CampoDeFecha(QDate(2025, 12, 30))
+    campo.setDisplayFormat(FORMATO_FECHA)
+    campo.setCalendarPopup(True)
+    campo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+    campo.setMinimumWidth(40)
+    fila.addWidget(campo)
+    fila.addStretch(1)
+    try:
+        caja.resize(600, 60)
+        caja.show()
+        # Cada ensanche pide otro reparto de la fila, que llega como evento
+        # pendiente; se reparte a mano hasta que el campo deje de crecer.
+        ancho = -1
+        while campo.width() != ancho:
+            ancho = campo.width()
+            app.sendPostedEvents()
+            fila.activate()
+            app.processEvents()
+
+        escrito = campo.fontMetrics().horizontalAdvance(campo.text())
+        assert _sitio_para_el_texto(campo) >= escrito
+    finally:
+        caja.close()
 
 
 def test_la_fecha_mas_larga_es_la_de_dos_cifras(app, tmp_path):

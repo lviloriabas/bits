@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from loguru import logger
 
-from PySide6.QtCore import QDate, QRectF, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QDate, QEvent, QRectF, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QTextCharFormat
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QStyle,
+    QStyleOptionFrame,
     QStyleOptionProgressBar,
     QStylePainter,
     QTableWidget,
@@ -138,18 +139,71 @@ COLUMNA_MATRICULA_INDEXADA = 2
 ROL_ENLACE = int(Qt.ItemDataRole.UserRole) + 1
 
 
-def _ensanchar_hasta_la_fecha_mas_larga(campo: QDateEdit) -> None:
-    """Deja sitio para 30/12/2025, no solo para las fechas que lo limitan.
+class _CampoDeFecha(QDateEdit):
+    """Campo de fecha que se ensancha hasta que la más larga quepa entera.
 
     Qt pide el ancho del campo midiendo sus dos límites, y aquí los dos
-    (1/1/2000 y el día de hoy) llevan día y mes de una cifra. Con ese ancho
-    una fecha de dos y dos no entra: del día 10 en adelante el año se cortaba
-    por el final.
+    (1/1/2000 y el día de hoy) llevan día y mes de una cifra. Tampoco basta
+    medir la fecha más larga y sumarla al ancho que sugiere Qt: por dentro
+    el estilo se come el hueco de la flecha, el relleno del editor y los dos
+    píxeles por lado que todo QLineEdit guarda junto al cursor, y la cuenta
+    no sale igual que la que hace el propio campo. Con 22/10/2026 el editor
+    quedaba justo del ancho del texto: sin foco se cortaba el año y, con el
+    cursor al principio, Qt corría el texto y se perdía la primera cifra.
 
-    Se llama con el campo ya colgado de la ventana. Mientras el cuadro que lo
-    contiene no cuelgue de ella, el campo no lleva puesta la hoja de estilo y
-    el ancho que pide sale sin contar ni el relleno de los lados ni el pozo de
-    la flecha del calendario.
+    Por eso se mide el editor de verdad, ya colocado y con la hoja de estilo
+    puesta, y al campo se le pide lo que falte.
+    """
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - API Qt
+        # Primero Qt coloca el editor según el nuevo ancho; después se mide.
+        super().resizeEvent(event)
+        self.ajustar_ancho()
+
+    def showEvent(self, event) -> None:  # noqa: N802 - API Qt
+        # El primer reparto llega antes de que el campo cuente como visible,
+        # y ahí se descarta: la primera medida buena es al enseñarse.
+        super().showEvent(event)
+        self.ajustar_ancho()
+
+    def changeEvent(self, event) -> None:  # noqa: N802 - API Qt
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
+            self.ajustar_ancho()
+
+    def ajustar_ancho(self) -> None:
+        if not self.isVisible():
+            return
+        editor = self.lineEdit()
+        fecha = editor.fontMetrics().horizontalAdvance(
+            FECHA_MAS_LARGA.toString(FORMATO_FECHA)
+        )
+        if editor.width() <= 0:
+            # Más angosto que la flecha y el relleno juntos: no hay editor
+            # que medir todavía. Se crece lo que ocupa la fecha y se mide en
+            # el siguiente reparto.
+            self.setMinimumWidth(self.width() + fecha)
+            return
+        marco = QStyleOptionFrame()
+        editor.initStyleOption(marco)
+        libre = editor.style().subElementRect(
+            QStyle.SubElement.SE_LineEditContents, marco, editor
+        ).width()
+        cursor = editor.style().pixelMetric(
+            QStyle.PixelMetric.PM_TextCursorWidth, None, editor
+        )
+        falta = fecha + 2 * 2 + cursor - libre
+        if falta > 0:
+            self.setMinimumWidth(self.width() + falta)
+
+
+def _ensanchar_hasta_la_fecha_mas_larga(campo: QDateEdit) -> None:
+    """Deja sitio para 30/12/2025 entera, también con el cursor dentro.
+
+    Se llama con el campo ya colgado de la ventana: hasta entonces no lleva
+    la hoja de estilo, y el ancho que pide sale sin contar ni el relleno de
+    los lados ni el pozo de la flecha del calendario. Ese primer ancho es
+    una estimación; :class:`_CampoDeFecha` la corrige con el editor medido.
     """
     fuente = campo.fontMetrics()
     limites = max(
@@ -969,7 +1023,7 @@ class WebReportsWindow(QDialog):
 
     @staticmethod
     def _fecha(valor: QDate) -> QDateEdit:
-        control = QDateEdit(valor)
+        control = _CampoDeFecha(valor)
         control.setCalendarPopup(True)
         control.setDisplayFormat(FORMATO_FECHA)
         control.setMinimumDate(QDate(2000, 1, 1))
