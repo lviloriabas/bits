@@ -92,6 +92,17 @@ _FECHA_LISTA = (
     f" && !document.getElementById('{_CONTROL}ctl07_txtValue').disabled"
 )
 
+# Cuando el servidor de informes no puede generar el reporte no muestra un
+# aviso aparte: escribe el error en el área del reporte, como si fuera el
+# reporte, y siempre lo cierra con su código entre paréntesis, por ejemplo
+# «(rsReportParameterTypeMismatch)».
+_ERROR_DEL_SERVIDOR = re.compile(r"\(rs[A-Z]\w+\)")
+# Lo que se aguanta al visor quieto, sin trabajar y sin la página pedida,
+# antes de dar la consulta por perdida. El visor se marca ocupado mientras
+# AirVault genera el reporte, por largo que sea; quieto y sin página no hay
+# nada en camino.
+_VISOR_QUIETO_S = 60.0
+
 _DUPLICADA = re.compile(
     r"\bDUPLICATED\s+(?P<log>\d{7})\s*\((?P<copias>\d+)x\)",
     re.IGNORECASE,
@@ -685,21 +696,39 @@ class ClienteLogPageAudit:
         inicio = time.monotonic()
         limite = inicio + 1800.0
         siguiente_aviso = inicio
+        quieto_desde: float | None = None
+        texto = ""
         while time.monotonic() < limite:
             estado = cls._estado_reporte(pagina)
-            if not estado.get("ocupada"):
+            ahora = time.monotonic()
+            if estado.get("ocupada"):
+                quieto_desde = None
+            else:
+                nuevo = bool(estado.get("huella")) and estado["huella"] != anterior
+                texto = str(estado.get("texto") or "")
                 if estado.get("errores"):
-                    raise RuntimeError(str(estado["errores"]))
-                if (estado.get("huella") and estado["huella"] != anterior
-                        and estado.get("texto") and estado.get("actual") == pagina_esperada):
+                    raise RuntimeError(f"AirVault no generó el reporte: {estado['errores']}")
+                if nuevo and texto and estado.get("actual") == pagina_esperada:
                     cls._comprobar_parametros(estado, valores, nulos)
                     return
-            ahora = time.monotonic()
+                # Sin esto la ventana seguía «esperando que AirVault genere
+                # el reporte» media hora sobre un error que ya estaba escrito.
+                if nuevo and _ERROR_DEL_SERVIDOR.search(texto):
+                    raise RuntimeError(f"AirVault no generó el reporte: {texto[:500]}")
+                if quieto_desde is None:
+                    quieto_desde = ahora
+                elif ahora - quieto_desde >= _VISOR_QUIETO_S:
+                    raise RuntimeError(
+                        f"AirVault dejó de generar el reporte sin mostrar la página "
+                        f"{pagina_esperada}: {texto[:500] or 'el área del reporte quedó vacía'}"
+                    )
             if avisar is not None and ahora >= siguiente_aviso:
                 avisar(descripcion)
                 siguiente_aviso = ahora + 15.0
             pagina._dormir(0.5)
-        raise RuntimeError(f"Log Page Audit no terminó de cargar la página {pagina_esperada}")
+        raise RuntimeError(
+            f"Log Page Audit no terminó de cargar la página {pagina_esperada}: {texto[:500]}"
+        )
 
     @staticmethod
     def _leer_filas(pagina: _Pagina) -> list[list[object]]:

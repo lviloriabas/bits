@@ -83,6 +83,8 @@ _MOTIVOS = (
     (("reporte esta incompleto", "no termino de cargar la pagina", "leer las filas del reporte",
       "leer el estado de log page audit", "visor cambio de pagina"),
      "No se pudo cargar el reporte completo. Vuelva a consultarlo."),
+    (("airvault no genero el reporte", "airvault dejo de generar el reporte"),
+     "AirVault no pudo generar el reporte. Vuelva a consultarlo."),
     (("formulario de log page audit cambio", "no mostro el repositorio", "no habilito los parametros"),
      "AirVault no cargó las opciones del reporte. Vuelva a consultarlo."),
     (("cambio los filtros", "cambio el limite de fechas"),

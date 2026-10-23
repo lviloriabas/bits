@@ -9,6 +9,7 @@ from app.airvault import web_reports
 from app.airvault.config import AirVaultConfig
 from app.airvault.web_reports import ClienteLogPageAudit
 from app.gui.web_reports_window import WebReportsWindow, WebReportsWorker
+from app.utils.mensajes import mensaje_error
 
 
 def test_la_espera_informa_cada_quince_segundos_hasta_recibir_el_reporte(monkeypatch):
@@ -70,3 +71,44 @@ def test_la_consulta_informa_en_terminal_y_barra_y_detiene_el_arco(
         logger.remove(destino)
         ventana._al_terminar()
         ventana.close()
+
+
+def test_un_error_de_airvault_en_el_area_del_reporte_corta_la_espera(monkeypatch):
+    """El servidor escribe sus errores donde iría el reporte, sin página."""
+    monkeypatch.setattr(
+        ClienteLogPageAudit, "_estado_reporte",
+        staticmethod(lambda _p: {
+            "ocupada": False, "huella": "error", "actual": 0, "errores": "",
+            "texto": "The value provided for the report parameter 'ToDate' is "
+                     "not valid for its type. (rsReportParameterTypeMismatch)",
+        }),
+    )
+    esperas = []
+
+    class Pagina:
+        _dormir = staticmethod(esperas.append)
+
+    with pytest.raises(RuntimeError, match="rsReportParameterTypeMismatch") as error:
+        ClienteLogPageAudit._esperar_reporte(Pagina(), "viejo")
+    assert esperas == []
+    assert mensaje_error(error.value) == "AirVault no pudo generar el reporte. Vuelva a consultarlo."
+
+
+def test_el_visor_quieto_sin_la_pagina_no_se_espera_media_hora(monkeypatch):
+    ahora = [0.0]
+    monkeypatch.setattr(web_reports.time, "monotonic", lambda: ahora[0])
+    monkeypatch.setattr(
+        ClienteLogPageAudit, "_estado_reporte",
+        staticmethod(lambda _p: {
+            "ocupada": ahora[0] < 100, "huella": "viejo", "texto": "", "actual": 0,
+        }),
+    )
+
+    class Pagina:
+        def _dormir(self, segundos):
+            ahora[0] += segundos
+
+    with pytest.raises(RuntimeError, match="dejó de generar el reporte"):
+        ClienteLogPageAudit._esperar_reporte(Pagina(), "viejo")
+    # Mientras el visor trabaja se espera lo que haga falta; quieto, un minuto.
+    assert ahora[0] == 100 + web_reports._VISOR_QUIETO_S
