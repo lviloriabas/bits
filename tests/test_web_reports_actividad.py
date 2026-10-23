@@ -112,3 +112,22 @@ def test_el_visor_quieto_sin_la_pagina_no_se_espera_media_hora(monkeypatch):
         ClienteLogPageAudit._esperar_reporte(Pagina(), "viejo")
     # Mientras el visor trabaja se espera lo que haga falta; quieto, un minuto.
     assert ahora[0] == 100 + web_reports._VISOR_QUIETO_S
+
+
+def test_un_reporte_que_airvault_sigue_generando_no_se_corta_a_la_media_hora(monkeypatch):
+    ahora = [0.0]
+    monkeypatch.setattr(web_reports.time, "monotonic", lambda: ahora[0])
+    monkeypatch.setattr(
+        ClienteLogPageAudit, "_estado_reporte",
+        staticmethod(lambda _p: {
+            "ocupada": ahora[0] < 3600, "huella": "nuevo",
+            "texto": "Log Page Audit", "actual": 1,
+        }),
+    )
+
+    class Pagina:
+        def _dormir(self, segundos):
+            ahora[0] += segundos
+
+    ClienteLogPageAudit._esperar_reporte(Pagina(), "viejo")
+    assert ahora[0] == 3600

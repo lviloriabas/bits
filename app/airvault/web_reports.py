@@ -99,9 +99,14 @@ _FECHA_LISTA = (
 _ERROR_DEL_SERVIDOR = re.compile(r"\(rs[A-Z]\w+\)")
 # Lo que se aguanta al visor quieto, sin trabajar y sin la página pedida,
 # antes de dar la consulta por perdida. El visor se marca ocupado mientras
-# AirVault genera el reporte, por largo que sea; quieto y sin página no hay
+# AirVault genera el reporte, por largo que sea (medido en AirVault real: sin
+# un solo hueco en todo el tiempo de espera); quieto y sin página no hay
 # nada en camino.
 _VISOR_QUIETO_S = 60.0
+# El tope de una página con el visor trabajando. Con la cola cargada el
+# reporte con «Refresh» ha tardado 7 minutos, y media hora llegaba a cortar
+# uno que AirVault seguía generando. Quien no quiera esperar tiene Cancelar.
+_ESPERA_MAXIMA_S = 7200.0
 
 _DUPLICADA = re.compile(
     r"\bDUPLICATED\s+(?P<log>\d{7})\s*\((?P<copias>\d+)x\)",
@@ -694,7 +699,7 @@ class ClienteLogPageAudit:
         descripcion: str = "Esperando que AirVault genere el reporte",
     ) -> None:
         inicio = time.monotonic()
-        limite = inicio + 1800.0
+        limite = inicio + _ESPERA_MAXIMA_S
         siguiente_aviso = inicio
         quieto_desde: float | None = None
         texto = ""
