@@ -29,8 +29,21 @@ def app_root() -> Path:
 
 
 def _pythonw(root: Path) -> Path | None:
-    """Ruta del intérprete sin consola (portable)."""
-    base = root / "portable" / "python312" / "tools"
+    """Interprete elegido por setup, incluido el venv de Python de la PC."""
+    portable = root / "portable"
+    mode_file = portable / "python-mode.txt"
+    try:
+        mode = mode_file.read_text(encoding="ascii").strip() if mode_file.exists() else "portable"
+    except (OSError, UnicodeError):
+        return None
+    if mode == "system":
+        base = portable / "venv" / "Scripts"
+        if not (base.parent / "pyvenv.cfg").is_file():
+            return None
+    elif mode == "portable":
+        base = portable / "python312" / "tools"
+    else:
+        return None
     if (base / "pythonw.exe").exists():
         return base / "pythonw.exe"
     if (base / "python.exe").exists():
@@ -57,7 +70,7 @@ def main() -> int:
         return _show_error("La carpeta de BITS está incompleta. Copie de nuevo la carpeta completa.")
     if interpreter is None:
         return _show_error(
-            "La carpeta de BITS está incompleta. Copie de nuevo la carpeta completa."
+            "No se encontró el entorno de Python elegido. Ejecute setup.cmd para prepararlo de nuevo."
         )
 
     try:

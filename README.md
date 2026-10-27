@@ -29,7 +29,16 @@ Para elegir otra versión, abra **Herramientas**, **Elegir rama de actualizació
 
 Abra `BITS.exe` desde la carpeta completa del programa. No requiere instalación: el intérprete, las bibliotecas y los modelos van en `portable/`.
 
-Para reconstruir ese entorno desde el código, ejecute `setup.cmd` (o `setup.ps1`). Los puntos de entrada son:
+Para preparar el entorno desde el código, ejecute `setup.cmd` (o `setup.ps1`). Al instalar o volver a ejecutarlo muestra el modo actual y permite elegir entre:
+
+- **Python portable:** descarga Python 3.12.10 y guarda todo en `portable/`. La carpeta completa puede copiarse a otra PC.
+- **Python de la PC con venv:** busca CPython 3.12 de 64 bits (x64), versión 3.12.10 o posterior de esa serie, y crea `portable/venv/` sin paquetes globales. Instala allí las dependencias de `requirements.txt` y comparte los modelos de `portable/paddlex/`.
+
+Ambos modos funcionan sin permisos de administrador y sin instalar paquetes en el Python global. Puede cambiar de uno a otro repitiendo el setup; `BITS.exe` usa la elección cuando la preparación termina correctamente. Si falta un Python compatible en la PC, elija el portable. El venv depende del Python de esa PC: después de mover la carpeta o quitar ese Python, ejecute el setup de nuevo.
+
+Para automatizar sin preguntas: `setup.cmd -UsePortablePython` o `setup.cmd -UseSystemPython`. Para indicar un intérprete: `setup.cmd -PythonPath "C:\ruta\Python312\python.exe"`. `setup.cmd -Check` comprueba el modo guardado sin descargar ni cambiar nada.
+
+Los puntos de entrada son:
 
 | Archivo           | Para qué                                      |
 | ----------------- | --------------------------------------------- |

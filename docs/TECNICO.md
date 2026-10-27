@@ -149,7 +149,7 @@ flowchart LR
 
 | Componente | Tecnología y función |
 |---|---|
-| Ejecución | Python 3.12 portable para Windows. `BITS.exe` inicia `run_gui.py` mediante el intérprete incluido. |
+| Ejecución | Python 3.12 para Windows, portable o en un venv del Python de la PC. `BITS.exe` inicia `run_gui.py` con el modo elegido en el setup. |
 | Interfaz | PySide6/Qt: ventanas, tablas con modelos, visor, editor y trabajos de fondo con `QThread`. |
 | PDF | PyMuPDF: renderizado, extracción y composición de páginas. |
 | Imágenes | OpenCV, NumPy y Pillow: alineación, recortes, análisis de tinta y conversiones. |
@@ -541,6 +541,8 @@ La preparación del paquete se hace en un equipo con red; el uso posterior del O
 
 ```powershell
 .\setup.cmd
+powershell -ExecutionPolicy Bypass -File setup.ps1 -UseSystemPython
+powershell -ExecutionPolicy Bypass -File setup.ps1 -UsePortablePython
 powershell -ExecutionPolicy Bypass -File setup.ps1 -Check
 powershell -ExecutionPolicy Bypass -File setup.ps1 -Launcher
 .\portable\python312\tools\python.exe tools/precache_paddle.py
@@ -548,6 +550,10 @@ powershell -ExecutionPolicy Bypass -File setup.ps1 -Launcher
 ```
 
 `setup.ps1 -Force` reconstruye intérprete y modelos; úselo sobre una copia controlada. Después de cambiar modelos, precárguelos en `portable/` y compruebe su uso con la red bloqueada.
+
+El setup ofrece elegir entre Python portable y Python de la PC con venv, muestra la selección actual y permite intercambiar modos en una instalación existente. Enter conserva el modo actual. Los parámetros `-UsePortablePython`, `-UseSystemPython` y `-PythonPath "C:\ruta\python.exe"` omiten la pregunta para automatizar. Ambos modos funcionan sin elevación ni cambios en el Python global. El modo de la PC exige CPython 3.12.10 o posterior de la serie 3.12, x64; busca con `py -3.12`, en PATH y en ubicaciones habituales de instalación por usuario. No acepta Python 3.13, 3.14, de 32 bits ni ARM64. Crea `portable/venv/` sin `--system-site-packages`; la instalación y las comprobaciones usan el intérprete del venv. Los modelos siguen en `portable/paddlex/`. Los dos entornos se conservan al cambiar de modo y la elección en `portable/python-mode.txt` solo cambia cuando el setup termina correctamente. Un venv depende de su instalación base y debe reconstruirse en la PC de destino, como explica la [documentación de Python](https://docs.python.org/3.12/library/venv.html).
+
+La descarga del portable usa `curl --ssl-revoke-best-effort` para tolerar listas de revocación ausentes o inaccesibles en Schannel, causa del error `CRYPT_E_NO_REVOCATION_CHECK`. Conserva la validación del certificado y el hash SHA256 obligatorio antes de extraer el paquete. El alcance de esa opción figura en la [documentación de curl](https://curl.se/docs/manpage.html#--ssl-revoke-best-effort).
 
 Para agregar dependencias o reparar faltantes basta volver a ejecutar `setup.cmd`. El setup resuelve siempre `requirements.txt`, incluidos extras nuevos, sin reinstalar los paquetes ya satisfechos. `tools/check_portable.py` comprueba versiones, importaciones de las dependencias directas y `pip check`; si un paquete figura instalado pero no se puede importar, lo reinstala conservando su versión. También repone pip con `ensurepip` si falta. Un fallo de instalación o una comprobación final fallida termina con error, sin anunciar éxito.
 

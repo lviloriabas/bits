@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
-    Reconstruye el entorno portable descargando todo lo que el repositorio no
-    versiona: Python 3.12, las dependencias y los modelos OCR.
+    Prepara BITS con Python portable o Python de la PC en un venv aislado,
+    instala las dependencias y precarga los modelos OCR.
 
 .DESCRIPTION
     El repositorio guarda solo codigo fuente. La carpeta portable\ (unos 2 GB)
@@ -26,6 +26,15 @@
 .PARAMETER CleanCache
     Borra portable\.cache (instaladores descargados) al terminar.
 
+.PARAMETER UseSystemPython
+    Usa CPython 3.12 de 64 bits de la PC y crea portable\venv.
+
+.PARAMETER UsePortablePython
+    Usa el Python portable incluido, aunque antes se eligiera el de la PC.
+
+.PARAMETER PythonPath
+    Ruta de un Python de la PC. Implica UseSystemPython.
+
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File setup.ps1
 
@@ -37,7 +46,10 @@ param(
     [switch]$Check,
     [switch]$Launcher,
     [switch]$Force,
-    [switch]$CleanCache
+    [switch]$CleanCache,
+    [switch]$UseSystemPython,
+    [switch]$UsePortablePython,
+    [string]$PythonPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -59,6 +71,10 @@ $Portable = Join-Path $Root 'portable'
 $Cache = Join-Path $Portable '.cache'
 $PythonDir = Join-Path $Portable 'python312'
 $PythonExe = Join-Path $PythonDir 'tools\python.exe'
+$ModeFile = Join-Path $Portable 'python-mode.txt'
+$PythonMode = 'portable'
+$PythonRelativeDir = 'portable\python312'
+$PythonRelativeExe = 'portable\python312\tools\python.exe'
 $ModelsDir = Join-Path $Portable 'paddlex\official_models'
 $LauncherExe = Join-Path $Root 'BITS.exe'
 $env:PADDLE_PDX_CACHE_HOME = Join-Path $Portable 'paddlex'
@@ -134,10 +150,92 @@ function Get-SalidaPrograma {
     }
 }
 
+function Test-PythonCompatible {
+    param([string]$Ruta, [switch]$Venv)
+    if (-not (Test-Path -LiteralPath $Ruta -PathType Leaf)) { return $false }
+    $codigo = "import sys, struct, platform; assert sys.implementation.name == 'cpython'; assert sys.version_info[:2] == (3, 12) and sys.version_info >= (3, 12, 10); assert struct.calcsize('P') == 8 and platform.machine().lower() in ('amd64', 'x86_64')"
+    if ($Venv) {
+        # No basta con encontrar un exe: debe ser el venv de esta carpeta y
+        # no debe heredar paquetes de la instalacion base.
+        $codigo += "; from pathlib import Path; assert sys.prefix != sys.base_prefix; assert Path(sys.prefix).resolve() == Path(sys.executable).resolve().parents[1]; assert 'include-system-site-packages = false' in (Path(sys.prefix) / 'pyvenv.cfg').read_text().lower()"
+    }
+    return (Invoke-Programa -Ruta $Ruta -Argumentos @('-I', '-c', $codigo))
+}
+
 function Test-PythonPortable {
-    if (-not (Test-Path $PythonExe)) { return $false }
-    return (Invoke-Programa -Ruta $PythonExe -Argumentos @(
-            '-c', "import sys; assert sys.version_info[:2] == (3, 12)"))
+    return (Test-PythonCompatible -Ruta $PythonExe -Venv:($PythonMode -eq 'system'))
+}
+
+function Select-Python {
+    if ($UsePortablePython -and ($UseSystemPython -or $PythonPath)) {
+        throw 'Elija solo un modo de Python: portable o de la PC.'
+    }
+    $modo = 'portable'
+    if (Test-Path -LiteralPath $ModeFile) {
+        $guardado = (Get-Content -LiteralPath $ModeFile -Raw).Trim()
+        if ($guardado -in @('portable', 'system')) { $modo = $guardado }
+    }
+    if ($UseSystemPython -or $PythonPath) { $modo = 'system' }
+    if ($UsePortablePython) { $modo = 'portable' }
+
+    # Al instalar se pregunta tambien desde setup.ps1. Los parametros de modo
+    # permiten automatizar sin preguntas; -Check nunca pide entrada.
+    if (-not $Check -and -not ($UseSystemPython -or $UsePortablePython -or $PythonPath)) {
+        $actual = if ($modo -eq 'system') { 'Python de la PC con venv' } else { 'Python portable' }
+        Write-Host "Modo actual: $actual"
+        Write-Host '  1. Python portable (puede copiarse a otra PC)'
+        Write-Host '  2. Python de la PC con venv (requiere Python 3.12 de 64 bits)'
+        do {
+            $opcion = Read-Host 'Elija 1 o 2, o pulse Enter para conservar el modo actual'
+        } while ($opcion -notin @('', '1', '2'))
+        if ($opcion -eq '1') { $modo = 'portable' }
+        if ($opcion -eq '2') { $modo = 'system' }
+    }
+
+    $script:PythonMode = $modo
+    if ($modo -eq 'system') {
+        $script:PythonRelativeDir = 'portable\venv'
+        $script:PythonRelativeExe = 'portable\venv\Scripts\python.exe'
+    }
+    else {
+        $script:PythonRelativeDir = 'portable\python312'
+        $script:PythonRelativeExe = 'portable\python312\tools\python.exe'
+    }
+    $script:PythonDir = Join-Path $Root $PythonRelativeDir
+    $script:PythonExe = Join-Path $Root $PythonRelativeExe
+}
+
+function Find-SystemPython {
+    # Una ruta explicita nunca cae silenciosamente en otro interprete.
+    if ($PythonPath) {
+        if (-not (Test-PythonCompatible $PythonPath)) {
+            throw 'El Python indicado no es compatible. Use CPython 3.12.10 o posterior de la serie 3.12, de 64 bits (x64).'
+        }
+        return (Resolve-Path -LiteralPath $PythonPath).Path
+    }
+    $candidatos = @()
+    $py = Get-Command py.exe -ErrorAction SilentlyContinue
+    if ($py) {
+        $candidatos += @(Get-SalidaPrograma -Ruta $py.Source -Argumentos @(
+                '-3.12', '-I', '-c', 'import sys; print(sys._base_executable)')) |
+            Where-Object { $_ -is [string] -and (Test-Path -LiteralPath $_ -PathType Leaf) }
+    }
+    foreach ($nombre in @('python.exe', 'python3.12.exe', 'python3.exe')) {
+        $candidatos += @(Get-Command $nombre -All -CommandType Application -ErrorAction SilentlyContinue |
+                Where-Object { $_.Source -notlike '*\Microsoft\WindowsApps\*' } |
+                ForEach-Object { $_.Source })
+    }
+    foreach ($base in @($env:LOCALAPPDATA, $env:ProgramFiles)) {
+        if ($base) {
+            $candidatos += Join-Path $base 'Programs\Python\Python312\python.exe'
+            $candidatos += Join-Path $base 'Python312\python.exe'
+        }
+    }
+    foreach ($ruta in ($candidatos | Select-Object -Unique)) {
+        if (Test-PythonCompatible $ruta) { return $ruta }
+    }
+    throw ('No se encontro CPython 3.12.10 o posterior de la serie 3.12, de 64 bits (x64). ' +
+        'Instale esa version o indique su ruta con -PythonPath. Tambien puede elegir Python portable.')
 }
 
 function Test-Dependencias {
@@ -217,7 +315,10 @@ function Get-Descarga {
 
     $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
     if ($curl) {
-        & $curl.Source --location --fail --retry 3 --continue-at - `
+        # Schannel puede no alcanzar la lista de revocacion en redes de
+        # empresa. Conserva la validacion TLS y rechaza certificados revocados;
+        # solo tolera listas ausentes o inaccesibles. SHA256 sigue obligatorio.
+        & $curl.Source --ssl-revoke-best-effort --location --fail --retry 3 --continue-at - `
             --output $parcial $Url
         if ($LASTEXITCODE -ne 0) {
             throw "Fallo la descarga de $Url (curl $LASTEXITCODE)."
@@ -254,6 +355,10 @@ function Find-SevenZip {
 # --- Componentes -----------------------------------------------------------
 
 function Install-Python {
+    if ($PythonMode -eq 'system') {
+        Install-Venv
+        return
+    }
     Write-Paso "Python $PythonVersion portable"
     if ((Test-PythonPortable) -and -not $Force) {
         Write-Listo "ya esta en portable\python312"
@@ -285,6 +390,40 @@ function Install-Python {
 
     if (-not (Test-PythonPortable)) { throw 'El Python portable no quedo utilizable.' }
     Write-Listo "listo en portable\python312\tools\python.exe"
+}
+
+function Install-Venv {
+    Write-Paso 'Python de la PC en un entorno virtual aislado'
+    if ((Test-PythonPortable) -and -not $Force -and -not $PythonPath) {
+        Write-Listo 'ya esta en portable\venv'
+        return
+    }
+    # Validar primero evita borrar un venv sano si se indico una ruta erronea.
+    $basePython = Find-SystemPython
+    if ((Test-PythonPortable) -and -not $Force) {
+        $baseActual = Get-SalidaPrograma -Ruta $PythonExe -Argumentos @(
+            '-I', '-c', 'import sys; print(sys._base_executable)')
+        if ($baseActual -eq $basePython) {
+            Write-Listo 'ya esta en portable\venv con ese Python'
+            return
+        }
+    }
+    Write-Detalle 'creando portable\venv sin paquetes globales'
+    Remove-CarpetaPortable $PythonDir
+    & $basePython -I -m venv --copies $PythonDir
+    if ($LASTEXITCODE -ne 0 -or -not (Test-PythonPortable)) {
+        throw 'No se pudo crear el entorno virtual de Python 3.12.'
+    }
+    Write-Listo 'entorno virtual listo en portable\venv'
+}
+
+function Save-PythonMode {
+    # Se publica la eleccion solo despues de preparar todos los componentes.
+    # El launcher anterior sigue disponible si el cambio no se completa.
+    New-Item -ItemType Directory -Path $Portable -Force | Out-Null
+    $temporal = "$ModeFile.tmp"
+    Set-Content -LiteralPath $temporal -Value $PythonMode -Encoding ASCII
+    Move-Item -LiteralPath $temporal -Destination $ModeFile -Force
 }
 
 function Install-Dependencias {
@@ -341,9 +480,9 @@ function Build-Launcher {
 function Show-Estado {
     $filas = @(
         [pscustomobject]@{
-            Componente = "Python $PythonVersion"
+            Componente = if ($PythonMode -eq 'system') { 'Python 3.12 (venv de la PC)' } else { "Python $PythonVersion portable" }
             Estado     = if (Test-PythonPortable) { 'ok' } else { 'FALTA' }
-            Ruta       = 'portable\python312'
+            Ruta       = $PythonRelativeDir
             MB         = Get-TamanoMB $PythonDir
         },
         [pscustomobject]@{
@@ -380,8 +519,9 @@ if ($env:OS -ne 'Windows_NT') {
     throw 'El entorno portable es de Windows: ejecute este script en Windows.'
 }
 
-Write-Host "Entorno portable de BITS - Clasificacion de Bitacoras" -ForegroundColor White
+Write-Host "Preparacion de BITS - Clasificacion de Bitacoras" -ForegroundColor White
 Write-Detalle "carpeta: $Root"
+Select-Python
 
 if ($Check) {
     Show-Estado
@@ -398,6 +538,10 @@ if ($CleanCache -and (Test-Path $Cache)) {
     Write-Detalle 'cache de instaladores borrada'
 }
 
+Save-PythonMode
 Show-Estado
 Write-Host "Todo listo. Abra BITS.exe o ejecute:" -ForegroundColor Green
-Write-Host "    portable\python312\tools\python.exe run_cli.py --pdf input\<archivo>.pdf"
+Write-Host "    $PythonRelativeExe run_gui.py"
+if ($PythonMode -eq 'system') {
+    Write-Aviso 'Este venv depende del Python de esta PC. Si mueve la carpeta, vuelva a ejecutar setup.cmd.'
+}
